@@ -17,14 +17,21 @@
 
 ⇒ 所以本仓的定位是：**把"除了编译器之外的一切"准备好**，编译走下面两条路之一。
 
-### 编译链（二选一，均未实测）
+### 编译链（二选一）
 
-| 路 | 做法 | 代价 |
-|---|---|---|
-| **① GitHub Actions（推荐先验）** | 推代码 → `.github/workflows/ios-build.yml` 在 **macOS runner** 上 `xcodegen` + `xcodebuild`，产出**未签名** `.ipa` → 下载回 Windows | 免费；但产物未签名 ⇒ 需要本机 Sideloadly 用你的 Apple ID 重签 |
-| ② iPad 上的 Swift Playgrounds | 在 iPad 上建 `.swiftpm` 工程直接运行 | 无需 Mac；工程结构受限、调试弱 |
+| 路 | 做法 | 代价 | 状态 |
+|---|---|---|---|
+| **① GitHub Actions（推荐）** | 推代码 → `.github/workflows/ios-build.yml` 在 **macOS runner** 上 `xcodegen` + `xcodebuild`，产出**未签名** `.ipa` → 下载回 Windows | 免费额度按 **10×** 计（private 仓免费额度 2000 min/月 ⇒ 约 200 分钟 macOS 时长）；产物未签名 ⇒ 需本机 Sideloadly 用你的 Apple ID 重签 | ✅ **已实测通过**（2026-09-30，run 36663990921：`DSHRemote-unsigned.ipa` 29,957 B，工件已上传） |
+| ② iPad 上的 Swift Playgrounds | 在 iPad 上建 `.swiftpm` 工程直接运行 | 无需 Mac；工程结构受限、调试弱 | ❓ 未实测 |
 
-> ⚠️ 两条都**未实测**。先验 ①。
+> ⚠️ **① 的路上有两个已踩过的坑**（都已修在仓库里，别再踩）：
+> 1. **Xcode 版本配对**：`macos-14` 默认 Xcode 是 **15.4**，而 XcodeGen 2.46.0 产出的工程是
+>    `objectVersion 77`（Xcode 16 格式）⇒ 报 `future Xcode project file format (77)`。
+>    **修法**：workflow 里 `xcode-select` 到镜像中版本最高的 `Xcode_*.app`（该镜像有 15.0–15.4 与 **16.1/16.2**）。
+> 2. **XcodeGen 钉不住格式**：`options.objectVersion` 数字/字符串两种写法**生成出来都是 77** ⇒ 该键是死配置，
+>    已在 `project.yml` 注明并移除。
+> 📌 另：CI **不给任何 Apple ID 凭据**（签名凭据不离开你的电脑）。
+
 
 ---
 

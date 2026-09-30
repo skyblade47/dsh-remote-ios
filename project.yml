@@ -7,10 +7,11 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
-  # ⚠️ 取证中：2026-09-30 先按数字 `56` 试过一次，CI 里生成的仍是 **77**（说明本版 XcodeGen
-  #    可能不认这个键、或只认字符串）⇒ 这里改字符串再验一次，并在 CI 里 `grep objectVersion` 打印。
-  #    两条腿并行：即使本选项最终无效，CI 也已经改成"选镜像里最新的 Xcode"来兜住（见 ios-build.yml）。
-  objectVersion: "56"
+  # 🔴 2026-09-30 实测结论：**本版 XcodeGen（2.46.0）钉不住工程格式** ——
+  #    `objectVersion: 56`（数字）与 `"56"`（字符串）两种写法生成出来**都是 77**（CI 里 grep 取证过）。
+  #    ⇒ 所以这里**不再写这个键**（写了也是死配置，会让人误以为在起作用）；
+  #    改为在 CI 侧兜住：`ios-build.yml` 会**选镜像里版本号最高的 Xcode**（新 Xcode 读旧格式没问题）。
+  #    本地若用 Xcode 15 打开本项目，需要自己把 Xcode 升到 16+（或让 XcodeGen 换更老的版本）。
 
 targets:
   DSHRemote:
