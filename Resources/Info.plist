@@ -41,11 +41,14 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<!-- 🔴 tailnet 线路是**明文 http**（`http://<tailnet-ip>:8080`）⇒ ATS 默认会拦。
-	     `NSAllowsLocalNetworking` 覆盖不了 100.x（那不是 RFC1918 私网），所以这里放开任意加载。
-	     若改走 Funnel 的 https 域名，可把这条收紧成该域名的例外。 -->
+	     用 **`NSAllowsArbitraryLoadsInWebContent`**（而不是一刀切的 `NSAllowsArbitraryLoads`）：
+	     它**只**放行 WKWebView 里的明文加载，app 其余部分的 ATS 保护不变 —— 正好是我们的场景
+	     （Apple 官方文档对这个键的定位就是"允许 web 视图不安全加载，同时保留其它地方的 ATS 保护"）。
+	     ⚠️ 走 Funnel 的 https 域名时，这个例外**可以整段删掉**（更干净）。
+	     ⚠️ 若最终改用 Swift Playgrounds（它可能不允许自定义 Info.plist），就**必须**走 https —— 见 README §0.1。 -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
 	<!-- 仅在"用 Files/iCloud 选工作区目录"时需要（P3） -->

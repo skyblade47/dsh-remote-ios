@@ -32,6 +32,26 @@
 >    已在 `project.yml` 注明并移除。
 > 📌 另：CI **不给任何 Apple ID 凭据**（签名凭据不离开你的电脑）。
 
+### 0.1 签名与分发走哪条路（**2026-09-30 拍定：走 Swift Playgrounds，不装第三方签名工具**）
+
+| 方案 | 结论 |
+|---|---|
+| **① Swift Playgrounds（✅ 本仓选它）** | 在 iPad 上用 **Apple 自家的机制**直接建工程并运行到本机 ⇒ **不引入任何第三方签名工具**，Apple ID 输在苹果自己的界面里（安全性最好）。⚠️ 见下方"未验点" |
+| ② Sideloadly（❌ 已弃用） | 官方域名下载的安装包 **完全没有 Authenticode 签名**（`NotSigned`，137.23 MB，sha256 `7f5bbd15…`；winget 也因**哈希与清单不匹配**拒绝安装）⇒ 它是闭源、要处理你 **Apple ID** 的工具，**不签名的安装包无法验证来源**，故不采用。已删除，未安装。 |
+| ③ AltStore/AltServer | 开源可审计，但流程更绕（需同 Wi-Fi 刷新）。备选，未采用 |
+| ④ CI 编译 + 第三方重签 | CI 仍保留（**用来验证代码能编译**，见下），但**不作为分发路径** |
+
+**① 的未验点（动手前必须先验）**：
+
+| # | 问题 | 为什么关键 |
+|---|---|---|
+| P-1 | Swift Playgrounds 的 App 工程**能不能自定义 `Info.plist`**？ | 我们的壳要 ATS 放行明文 http（tailnet 线路）。**若不能改 plist ⇒ 只能走 Funnel 的 https**（那就得接受"多一跳"）。本机无法验证，只能在 iPad 上试一次 |
+| P-2 | 工程结构是 `.swiftpm`（不是 `.xcodeproj`）⇒ 本仓的 `project.yml` / CI 出包**不能直接用于 Playgrounds** | 两条路并存：CI 只做"编译校验"，实际运行靠 iPad 上的 Playgrounds 工程（把 `Sources/*.swift` 粘进去） |
+| P-3 | 是否需要开发者账号 / 免费 Apple ID 是否够、有效期多久 | 决定长期使用成本 |
+| P-4 | Playgrounds 的工程能放几个源文件 / 资源 | 我们的壳是多个 `.swift` + 未来要内置写作页资产（§离线要求）⇒ 资源支持是关键 |
+
+> 🔎 **P-1 的变通（若确实改不了 plist）**：把线路切到 **Funnel 的 https 域名**（`https://<xxx>.ts.net`）—— ATS 对 https 不拦，例外整段都可删。
+
 
 ---
 
