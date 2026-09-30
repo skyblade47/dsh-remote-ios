@@ -1,0 +1,27 @@
+# XcodeGen 工程描述（CI 的 macOS runner 上用 `xcodegen generate` 生成 .xcodeproj）
+# 为什么用 XcodeGen：.xcodeproj 是二进制/难 review 的产物；用一份可读的 yml 描述工程，
+# 变更在 git 里看得见（与"配置即代码"同一取向）。
+name: DSHRemote
+options:
+  bundleIdPrefix: com.skyblade47
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  DSHRemote:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    info:
+      path: Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skyblade47.dshremote
+        MARKETING_VERSION: "0.1.0"        # 与 dsh-remote / writing-client 保持同一版本节奏，不擅升
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "2"       # 2 = iPad only（本仓只面向 iPad）
+        CODE_SIGNING_ALLOWED: "NO"        # CI 里产出**未签名**包，签名留给本机 Sideloadly
+        ENABLE_BITCODE: "NO"

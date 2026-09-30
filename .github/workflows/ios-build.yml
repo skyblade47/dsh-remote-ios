@@ -1,0 +1,58 @@
+# macOS runner 上编译 iOS 应用 → 产出**未签名** .ipa 工件
+#
+# 为什么这样切：Windows 上编译不出 iOS 应用（无 Xcode/iOS SDK），
+# 所以把"编译"放到 GitHub 的 macOS runner，"签名"留在本机（Sideloadly 用你的 Apple ID）。
+# ⇒ **不给 CI 任何 Apple ID 凭据**（签名凭据不离开你的电脑）。
+#
+# 产物：DSHRemote-unsigned.ipa（Payload/DSHRemote.app 打包），本机用 Sideloadly 重签后装到 iPad。
+# ⚠️ 未实测：本条流水线尚未在真仓跑过（见 README §0）。
+
+name: ios-build
+
+on:
+  workflow_dispatch:        # 手动触发（先手动验，稳了再加 push 触发）
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 .xcodeproj
+        run: xcodegen generate
+
+      - name: 编译（Release，不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DSHRemote.xcodeproj \
+            -scheme DSHRemote \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -n 60
+
+      - name: 打成未签名 .ipa
+        run: |
+          set -euo pipefail
+          APP="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
+          echo "app = $APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry DSHRemote-unsigned.ipa Payload
+          ls -lh DSHRemote-unsigned.ipa
+          # 自检：包内必须有可执行文件（否则装上去是白图标）
+          unzip -l DSHRemote-unsigned.ipa | head -20
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DSHRemote-unsigned-ipa
+          path: DSHRemote-unsigned.ipa
+          if-no-files-found: error

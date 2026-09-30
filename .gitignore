@@ -1,0 +1,22 @@
+# 构建产物（XcodeGen 生成 + Xcode 输出）
+*.xcodeproj/
+build/
+DerivedData/
+*.ipa
+*.app
+Payload/
+
+# 观测产物（ios-observ.ps1 输出）
+shots/
+crash/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.trae/
+
+# 本地敏感（若将来放本地配置）
+*.local
+desktop-config.json
