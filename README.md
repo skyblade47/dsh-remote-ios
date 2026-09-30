@@ -67,15 +67,43 @@
 
 ---
 
-## 2. 一键观测/装包（插上 iPad 后）
+## 2. 观测链路（插上 iPad 后）
+
+**顺序**：`Doctor`（自检）→ 需要时 `Tunnel` → `Session`（★ 一键观测会话）。
 
 ```powershell
-powershell -File tools/ios-observ.ps1 -Action List        # 设备列表（型号 / iPadOS 版本 / UDID）
-powershell -File tools/ios-observ.ps1 -Action Syslog      # 实时系统日志（排查白屏/证书失败）
-powershell -File tools/ios-observ.ps1 -Action Shot        # 截屏到 .\shots\（把图发我即可，我看到真实渲染）
-powershell -File tools/ios-observ.ps1 -Action Crash       # 拉崩溃日志
-powershell -File tools/ios-observ.ps1 -Action Install -Ipa .\build\dsh.ipa
+# ① 先自检：Apple 服务 / go-ios / 设备 / tunnel 四项判定 + 下一步提示
+powershell -File tools/ios-observ.ps1 -Action Doctor
+
+# ② 等设备接入（没弹「信任此电脑」时很有用；默认等 120 秒，可用 -WaitSeconds 调）
+powershell -File tools/ios-observ.ps1 -Action Wait
+
+# ③ iOS 17+ 的多数命令需要隧道（**需管理员**；另开一个窗口跑，保持开着）
+powershell -File tools/ios-observ.ps1 -Action Tunnel
+
+# ④ ★ 一键观测会话：建 evidence\<时间戳>\ → 存设备信息 → 后台抓 syslog
+#    → 提示你去 iPad 上复现 → 回车结束 → 自动截图 + 收崩溃列表 + 写 SUMMARY.md
+powershell -File tools/ios-observ.ps1 -Action Session
+
+# 单项动作
+powershell -File tools/ios-observ.ps1 -Action List      # 设备列表
+powershell -File tools/ios-observ.ps1 -Action Info       # 设备详情
+powershell -File tools/ios-observ.ps1 -Action Syslog     # 实时日志（Ctrl+C 结束）
+powershell -File tools/ios-observ.ps1 -Action Shot       # 截屏到 .\shots\
+powershell -File tools/ios-observ.ps1 -Action Crash      # 崩溃列表
+powershell -File tools/ios-observ.ps1 -Action Install -Ipa <已签名.ipa>
+powershell -File tools/ios-observ.ps1 -Action Launch     # 启动本 app（默认 bundleId）
 ```
+
+> **`Session` 产出的目录长这样**（`evidence\` 已 gitignore，不入库）：
+> `device-info.json` · `device-name.txt` · `device-date.txt` · `syslog.txt` · `screenshot.png` · `crash-list.txt` · `SUMMARY.md`
+> ⇒ **把这个目录给我**（或只给 `syslog.txt` + `screenshot.png`）即可，我能直接看到真实渲染与日志。
+
+> 🔴 **两个已踩的 go-ios 坑**（脚本里已按实测写法修正，别改回去）：
+> 1. 参数要**等号形式**：`--udid=<v>`、`--output=<路径>`、`--path=<ipa>`（空格形式在 1.3.2 上不生效）。
+> 2. go-ios 的 stdout 会**混进 PowerShell 函数返回值**（会让 `$rc` 变成 `{"deviceList":[]} 0`）；
+>    且它每次往 stderr 打同一句良性 WARN（agent 未跑）⇒ 必须接住 stdout+stderr 并过滤那句，否则真实输出被淹。
+
 
 ---
 
