@@ -21,11 +21,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 选最新的 Xcode（并打印版本，便于排查）
+        # 🔴 为什么必须选：macos-14 镜像默认 Xcode 是 **15.4**，而 XcodeGen 新版产出的 .xcodeproj
+        #    是 **objectVersion 77**（Xcode 16 格式）⇒ 15.4 直接读不了：
+        #    「Unable to read project … future Xcode project file format (77)」（2026-09-30 实测两次踩到）。
+        #    ⇒ 取镜像里版本号最高的 Xcode_*.app（新 Xcode 读旧格式没问题，反向才不行）。
+        run: |
+          set -euo pipefail
+          echo "--- 镜像里可用的 Xcode ---"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          BEST="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$BEST" ]; then sudo xcode-select -s "$BEST"; fi
+          echo "--- 选定 ---"
+          xcode-select -p
+          xcodebuild -version
+
       - name: 装 XcodeGen
         run: brew install xcodegen
 
-      - name: 生成 .xcodeproj
-        run: xcodegen generate
+      - name: 生成 .xcodeproj（并打印工程格式取证）
+        run: |
+          set -euo pipefail
+          xcodegen --version
+          xcodegen generate
+          echo "--- 生成的工程格式（期望与本机 Xcode 可读）---"
+          grep -m1 'objectVersion' DSHRemote.xcodeproj/project.pbxproj
 
       - name: 编译（Release，不签名）
         run: |
