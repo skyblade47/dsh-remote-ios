@@ -7,6 +7,12 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+  # 🔴 钉住 .xcodeproj 的**工程格式**：XcodeGen 新版默认产出 objectVersion **77**（Xcode 16 格式），
+  #    而 GitHub 的 macos-14 runner 上是 **Xcode 15.4** ⇒ 会报
+  #    「cannot be opened because it is in a future Xcode project file format (77)」（2026-09-30 实测踩到）。
+  #    56 = Xcode 14/15 可读的格式，且 Xcode 16+ 也能读 ⇒ 两边都兼容。
+  #    ⚠️ 若将来给 runner 指定 Xcode 16+，这个值可以不动（新 Xcode 读旧格式没有问题）。
+  objectVersion: 56
 
 targets:
   DSHRemote:
