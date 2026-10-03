@@ -6,6 +6,7 @@ enum S1ProbePage {
             data: (try? JSONSerialization.data(withJSONObject: gatewayOrigin,
                                                options: [.fragmentsAllowed])) ?? Data(),
             encoding: .utf8) ?? "\"\""
+        let slash = "/"
         return """
         <!doctype html><html><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
@@ -91,7 +92,7 @@ enum S1ProbePage {
           probeSyncXHR();
           render();
         })();
-        <\/script></body></html>
+        <\(slash)script></body></html>
         """
     }
 }
