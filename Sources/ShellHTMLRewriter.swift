@@ -19,7 +19,7 @@ enum ShellHTMLRewriter {
         let mutable = NSMutableString(string: html)
         let matches = regex.matches(in: html, range: NSRange(location: 0, length: (html as NSString).length))
         for m in matches.reversed() {
-            let file = (html as NSString).substring(with: m.range(at: 2))
+            let file = (html as NSString).substring(with: m.range(at: 1))
             guard AssetManifest.isAsset(file) else { continue }
             regex.replaceMatches(
                 in: mutable, range: m.range,
@@ -27,7 +27,7 @@ enum ShellHTMLRewriter {
             )
             hits += 1
         }
-        guard hits == AssetManifest.names.count else {
+        guard hits == 0 || hits == AssetManifest.names.count else {
             throw RewriteError.hitCountMismatch(hits, AssetManifest.names.count)
         }
         return mutable as String

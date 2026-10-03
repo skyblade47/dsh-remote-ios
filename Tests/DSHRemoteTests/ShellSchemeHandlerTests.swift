@@ -26,8 +26,8 @@ final class ShellSchemeHandlerTests: XCTestCase {
         let (resp, data) = try XCTUnwrap(t.received)
         let http = try XCTUnwrap(resp as? HTTPURLResponse)
         XCTAssertEqual(http.statusCode, 200)
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: String]
-        XCTAssertEqual(obj?["echo"], "pong")
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(obj?["echo"] as? String, "pong")
         XCTAssertTrue(t.didStop)
     }
 

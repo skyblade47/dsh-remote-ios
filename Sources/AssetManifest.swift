@@ -13,6 +13,7 @@ enum AssetManifest {
     }
 
     static func contentType(_ name: String) -> String {
+        if name == "ping" { return "application/json; charset=utf-8" }
         let ext = (name.split(separator: ".", omittingEmptySubsequences: false).last).map(String.init) ?? ""
         switch ext {
         case "js": return "text/javascript; charset=utf-8"
