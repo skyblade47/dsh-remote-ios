@@ -49,12 +49,14 @@ jobs:
 
       - name: 运行模拟器逻辑测试
         run: |
-          set -o pipefail
-          DEST=$(xcrun simctl list devices available | grep -Eo 'iPad Air[0-9() A-Za-z-]*' | tail -1)
+          set -euo pipefail
+          DEST_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; rs=sorted(k for k in d if k.startswith("com.apple.CoreSimulator.SimRuntime.iOS-")); print(next((x["udid"] for rt in reversed(rs) for x in d[rt] if x.get("isAvailable") and x["name"].startswith("iPad")), ""))')
+          echo "destination udid = ${DEST_ID}"
+          test -n "${DEST_ID}"
           xcodebuild test \
             -project DSHRemote.xcodeproj \
             -scheme DSHRemote \
-            -destination "platform=iOS Simulator,name=${DEST}" \
+            -destination "platform=iOS Simulator,id=${DEST_ID}" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: 编译（Release，不签名）
