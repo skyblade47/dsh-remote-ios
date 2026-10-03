@@ -32,12 +32,32 @@ struct DSHRemoteApp: App {
 struct RootView: View {
     @State private var urlText: String = Cfg.gateway
     @State private var dropped = false
+    @State private var titleTaps = 0
+    @State private var showS1 = false
+    @State private var showS1Alert = false
 
     var body: some View {
         VStack(spacing: 0) {
+            Text("DSH Remote")
+                .font(.headline)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    titleTaps += 1
+                    if titleTaps >= 5 {
+                        if (try? GatewayURL.normalize(Cfg.gateway)) != nil {
+                            showS1 = true
+                            titleTaps = 0
+                        } else {
+                            showS1Alert = true
+                        }
+                    }
+                }
+
             // 顶部一条窄地址栏：只在"没配/改址"时用，正常使用可折叠
             HStack {
-                TextField("网关地址，例如 http://<tailnet-ip>:8080", text: $urlText)
+                TextField("网关 https 地址，例如 https://<xxx>.ts.net", text: $urlText)
                     .textFieldStyle(.roundedBorder)
                     .keyboardType(.URL)
                     .autocorrectionDisabled()
@@ -57,7 +77,7 @@ struct RootView: View {
                 ContentUnavailableView(
                     "还没有配置网关",
                     systemImage: "network",
-                    description: Text("填上面的地址后点「连接」。\niPad 上记得先装 Tailscale 并登录同一账号（走 tailnet 线路，免客户端证书）。")
+                    description: Text("填上面的 https 网关地址后点「连接」。\n免费账号路径不使用 Tailscale，网关需已开启 HTTPS（Funnel）。")
                 )
             } else {
                 // TODO(P2)：改成 TabView（写作 / DSH 两个 WebView 常驻，切换不重载）
@@ -66,5 +86,23 @@ struct RootView: View {
             }
         }
         .onChange(of: Cfg.gateway) { _, _ in dropped = false }
+        .alert("请先填写 https 网关", isPresented: $showS1Alert) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("先在上方填写已开启 HTTPS 的网关地址并点「连接」。")
+        }
+        .sheet(isPresented: $showS1) {
+            UIViewControllerBridge {
+                S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway))?.origin ?? "")
+            }
+        }
     }
+}
+
+struct UIViewControllerBridge<ViewController: UIViewController>: UIViewControllerRepresentable {
+    let make: () -> ViewController
+
+    func makeUIViewController(context: Context) -> ViewController { make() }
+
+    func updateUIViewController(_ uiViewController: ViewController, context: Context) {}
 }
