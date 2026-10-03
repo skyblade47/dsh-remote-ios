@@ -19,6 +19,10 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - path: ShellAssets
+        buildPhase: resources
+        type: folder
+        group: ""
     info:
       path: Resources/Info.plist
     settings:
@@ -30,3 +34,16 @@ targets:
         TARGETED_DEVICE_FAMILY: "2"       # 2 = iPad only（本仓只面向 iPad）
         CODE_SIGNING_ALLOWED: "NO"        # CI 里产出**未签名**包，签名留给本机 Sideloadly
         ENABLE_BITCODE: "NO"
+  DSHRemoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/DSHRemoteTests
+    dependencies:
+      - target: DSHRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skyblade47.dshremote.tests
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "2"
+        CODE_SIGNING_ALLOWED: "NO"

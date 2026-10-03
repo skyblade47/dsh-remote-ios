@@ -47,6 +47,16 @@ jobs:
           echo "--- 生成的工程格式（期望与本机 Xcode 可读）---"
           grep -m1 'objectVersion' DSHRemote.xcodeproj/project.pbxproj
 
+      - name: 运行模拟器逻辑测试
+        run: |
+          set -o pipefail
+          DEST=$(xcrun simctl list devices available | grep -Eo 'iPad Air[0-9() A-Za-z-]*' | tail -1)
+          xcodebuild test \
+            -project DSHRemote.xcodeproj \
+            -scheme DSHRemote \
+            -destination "platform=iOS Simulator,name=${DEST}" \
+            CODE_SIGNING_ALLOWED=NO
+
       - name: 编译（Release，不签名）
         run: |
           set -o pipefail
