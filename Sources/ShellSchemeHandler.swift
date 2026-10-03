@@ -21,7 +21,7 @@ final class ShellSchemeHandler: NSObject, WKURLSchemeHandler {
 
         guard host == "local", AssetManifest.isAsset(name), let data = loadData(name) else {
             respond(urlSchemeTask, status: 404, contentType: "application/json; charset=utf-8",
-                    body: Data("{\"ok\":false,error\":\"not-found\"}".utf8))
+                    body: Data("{\"ok\":false,\"error\":\"not-found\"}".utf8))
             return
         }
         respond(urlSchemeTask, status: 200, contentType: AssetManifest.contentType(name), body: data)
