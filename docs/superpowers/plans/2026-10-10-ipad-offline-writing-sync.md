@@ -4071,8 +4071,8 @@ final class NativeBridgeTests: XCTestCase {
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent[0].id as? Int, 7)
         let o = (try? JSONSerialization.jsonObject(with: Data(sent[0].json.utf8)) as? [String: Any]) ?? [:]
-        XCTAssertEqual(o?["ok"] as? Bool, true)
-        XCTAssertEqual(o?["platform"] as? String, "ipad")
+        XCTAssertEqual(o["ok"] as? Bool, true)
+        XCTAssertEqual(o["platform"] as? String, "ipad")
     }
 
     func testJsonStringBodyDispatches() {
@@ -4155,8 +4155,8 @@ final class NativeBridgeTests: XCTestCase {
         XCTAssertEqual(sent.count, 1)
         let reparsed = (try? JSONSerialization.jsonObject(
             with: Data(sent[0].json.utf8)) as? [String: Any]) ?? [:]
-        XCTAssertEqual(reparsed?["ok"] as? Bool, false)
-        XCTAssertTrue((reparsed?["error"] as? String ?? "").contains("未知方法"))
+        XCTAssertEqual(reparsed["ok"] as? Bool, false)
+        XCTAssertTrue((reparsed["error"] as? String ?? "").contains("未知方法"))
     }
 
     // MARK: - 入参 JSON 字符串转义（防注入）
@@ -4190,7 +4190,7 @@ final class NativeBridgeTests: XCTestCase {
 
 说明：`reply` 闭包替代真实 `evaluateJavaScript`（生产实现里是 `webView.evaluateJavaScript(replyScript)`，必须在主线程）；`barrier(_:)` 暴露队列排空点，仅测试用。`WKScriptMessage.body` 解包本身极薄（9.3 实现中直接调 `handle(body:)`），不为它写 WKWebView 集成测试（模拟器集成成本高、价值低；S3/真机验收覆盖）。
 
-> **主控裁决（Task 13.3 第三次 CI，2026-10-11）**：CI 报 NativeBridgeTests 46/47/130/131 四行 `cannot use optional chaining on non-optional value of type '[String : Any]'`。根因：`let o = try? (expr) as? [String: Any]` 实际解析为 `(try? (expr as Any)) as? [String: Any]`——`try?` 已把结果拍平成非可选的 `[String: Any]?` 之外的形态（`as?` 在 `try?` 内的绑定优先级使变量成为非可选字典），于是 `o??[...]` 的第二级可选链非法。围栏与落盘逐字同款，双侧改为 `let o = (try? JSONSerialization.jsonObject(...) as? [String: Any]) ?? [:]`（先整体 try? 转换、再以空字典兜底），访问处统一成单可选链 `o?[...]`；解析失败时断言对空字典取值必然失败，测试行为不变。
+> **主控裁决（Task 13.3 第三、四次 CI，2026-10-11）**：围栏原样两处断言 `let o = try? JSONSerialization.jsonObject(...) as? [String: Any]` 后用 `o??["ok"]` 访问。第三次 CI 报 46/47/130/131 `cannot use optional chaining on non-optional value of type '[String : Any]'`（列号 26，指向**第二级** `?`）；主控初次修复只消除了双可选链——加 `?? [:]` 兜底却保留访问处的单可选链 `o?[...]`，第四次 CI（run 38127216109）同列再报（列号随列移动变为 25），证伪初次判断。准确根因：`(try? expr as? [String: Any]) ?? [:]` 经 `??` 的重载 `(T?, @autoclosure () -> T) -> T` 以**非可选**默认值 `[:]` 解包，`o` 的类型是非可选 `[String: Any]`（对照 BridgeSyncSchemeHandlerTests.json() 与 AppDataStoreTests.dict() 均显式标注 `-> [String: Any]` 后用直接下标，是本仓正确范式）。最终双侧形态：`let o = (try? ... as? [String: Any]) ?? [:]` + **直接下标** `o["ok"]`（reparsed 同理 4 行）；解析失败时对空字典取值为 nil，`as?` 断言失败，测试行为不变。教训：`?? 非可选默认值` 已完成解包，后续不得再挂可选链。
 
 - [ ] **9.2 运行测试，确认失败（Red）**
 

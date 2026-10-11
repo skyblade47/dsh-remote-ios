@@ -43,8 +43,8 @@ final class NativeBridgeTests: XCTestCase {
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent[0].id as? Int, 7)
         let o = (try? JSONSerialization.jsonObject(with: Data(sent[0].json.utf8)) as? [String: Any]) ?? [:]
-        XCTAssertEqual(o?["ok"] as? Bool, true)
-        XCTAssertEqual(o?["platform"] as? String, "ipad")
+        XCTAssertEqual(o["ok"] as? Bool, true)
+        XCTAssertEqual(o["platform"] as? String, "ipad")
     }
 
     func testJsonStringBodyDispatches() {
@@ -127,8 +127,8 @@ final class NativeBridgeTests: XCTestCase {
         XCTAssertEqual(sent.count, 1)
         let reparsed = (try? JSONSerialization.jsonObject(
             with: Data(sent[0].json.utf8)) as? [String: Any]) ?? [:]
-        XCTAssertEqual(reparsed?["ok"] as? Bool, false)
-        XCTAssertTrue((reparsed?["error"] as? String ?? "").contains("未知方法"))
+        XCTAssertEqual(reparsed["ok"] as? Bool, false)
+        XCTAssertTrue((reparsed["error"] as? String ?? "").contains("未知方法"))
     }
 
     // MARK: - 入参 JSON 字符串转义（防注入）
