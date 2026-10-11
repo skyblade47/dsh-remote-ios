@@ -35,7 +35,7 @@ final class BridgeJSTests: XCTestCase {
             x?.setObject(JSValue(object: { (method: String, url: String, async: Bool) in
                 x?.setObject(url, forKeyedSubscript: "__url" as NSString)
                 x?.setObject(async, forKeyedSubscript: "__async" as NSString)
-            } as @convention(block) (String, String, Bool) -> Void, in: ctx),
+            } as @convention(block) (String, String, Bool) -> Void, in: self?.ctx),
                 forKeyedSubscript: "open" as NSString)
             x?.setObject(JSValue(object: { (body: String) in
                 guard let data = body.data(using: .utf8),
@@ -50,7 +50,7 @@ final class BridgeJSTests: XCTestCase {
                 let d = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
                 x?.setObject(String(data: d, encoding: .utf8),
                              forKeyedSubscript: "responseText" as NSString)
-            } as @convention(block) (String) -> Void, in: ctx),
+            } as @convention(block) (String) -> Void, in: self?.ctx),
                 forKeyedSubscript: "send" as NSString)
             return x
         }

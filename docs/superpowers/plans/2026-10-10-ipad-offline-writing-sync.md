@@ -4350,7 +4350,7 @@ final class BridgeJSTests: XCTestCase {
             x?.setObject(JSValue(object: { (method: String, url: String, async: Bool) in
                 x?.setObject(url, forKeyedSubscript: "__url" as NSString)
                 x?.setObject(async, forKeyedSubscript: "__async" as NSString)
-            } as @convention(block) (String, String, Bool) -> Void, in: ctx),
+            } as @convention(block) (String, String, Bool) -> Void, in: self?.ctx),
                 forKeyedSubscript: "open" as NSString)
             x?.setObject(JSValue(object: { (body: String) in
                 guard let data = body.data(using: .utf8),
@@ -4365,7 +4365,7 @@ final class BridgeJSTests: XCTestCase {
                 let d = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
                 x?.setObject(String(data: d, encoding: .utf8),
                              forKeyedSubscript: "responseText" as NSString)
-            } as @convention(block) (String) -> Void, in: ctx),
+            } as @convention(block) (String) -> Void, in: self?.ctx),
                 forKeyedSubscript: "send" as NSString)
             return x
         }
@@ -4492,6 +4492,8 @@ final class BridgeJSTests: XCTestCase {
 > JavaScriptCore 在 iOS 模拟器与 mac 测试宿主均可用（`import JavaScriptCore`，非 WebKit 私有 API）。微任务经 Promise 桩排空；若某 CI 上 JSC 的微任务时序不同，`testResolveByIdFulfillsPromise` 已用 expectation 等待，不依赖固定轮次。
 
 > **主控裁决（Task 13.3 第六次 CI，2026-10-11）**：run 38127978505 在 PathGuard 33 条清除后编译深入本文件，全仓仅剩 2 条错误，均在上方围栏 setUp 的两个 `@convention(block)` 桩闭包内。① L21 列 66：`JSValue.toDictionary()` 经 JavaScriptCore Swift overlay 返回 `[AnyHashable: Any]`，不能直接 append 进 `[[String: Any]]`（`posted`），须 `msg?.toDictionary() as? [String: Any]` 在 `if let` 内收窄键类型。② L32 列 42：`xhrCtor` 以 `[weak self]` 捕获，闭包内 `self` 恒为可选，`JSValue(newObjectIn:)` 须传 `self?.ctx`（同闭包后续 L44/L51 本就正确使用 `self?.`，仅此一处漏 `?`）。扫雷：全仓 `toDictionary|weak self` 共 9 处，BackgroundFlusher（源码与测试）、NativeBridgeTests、本文件其余位置均已正确收窄/加可选链，无同款残留。本文件 L42 的 `try? ... as? [String: Any]` 处于 `guard let` 绑定，合法不改。
+
+> **主控裁决（Task 13.3 第八次 CI，2026-10-11）**：run 38128822820 报本文件 L38:73/L53:59 两条 `reference to property 'ctx' in closure requires explicit use of 'self'`。这两处是 `xhrCtor`（`[weak self]`）内部两个**嵌套** `@convention(block)` 闭包（open/send 桩）的 `JSValue(object:in:)`，`in:` 实参裸写 `ctx`——外层闭包既已显式 `[weak self]`，内层闭包对 self 属性的引用也必须显式写出 `self?.ctx`（与同闭包 L32 的 `JSValue(newObjectIn: self?.ctx)` 同范式；第七轮编译在到达这两个内层闭包前先被 L19 错误短路，故本轮才暴露）。双侧改 `in: self?.ctx`。扫雷全仓 `@convention(block)`：本文件 L25/L57 在 setUp 方法体、L127 在测试方法体，均不在 `[weak self]` 闭包内，裸 `ctx` 合法；全仓无同款残留。
 
 - [ ] **9.5 写实现 `Sources/BridgeJS.swift` 通过 9.4（Green 第二半）**
 
