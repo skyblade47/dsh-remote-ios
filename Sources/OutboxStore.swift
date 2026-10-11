@@ -149,7 +149,7 @@ final class OutboxStore {
                 try FileManager.default.removeItem(at: dst)
             }
             try FileManager.default.moveItem(at: src, to: dst)
-        } catch atomicError {
+        } catch let atomicError {
             do {
                 _ = try FileManager.default.replaceItemAt(dst, withItemAt: src)
             } catch {

@@ -44,7 +44,7 @@ enum ShellHTMLRewriter {
             let file = (withJS as NSString).substring(with: m.range(at: 1))
             guard AssetManifest.isAsset(file) else { continue }
             regex.replaceMatches(
-                in: mutable, range: m.range(),
+                in: mutable, range: m.range(at: 0),
                 withTemplate: "dsh-asset://local/\(file)"
             )
             hits += 1

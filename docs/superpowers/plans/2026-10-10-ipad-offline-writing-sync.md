@@ -3431,7 +3431,7 @@ final class OutboxStore {
                 try FileManager.default.removeItem(at: dst)
             }
             try FileManager.default.moveItem(at: src, to: dst)
-        } catch atomicError {
+        } catch let atomicError {
             do {
                 _ = try FileManager.default.replaceItemAt(dst, withItemAt: src)
             } catch {
@@ -3456,6 +3456,8 @@ private extension String {
 ```
 
 > 关于 `move` 的回退分支：Java 先尝试 `ATOMIC_MOVE + REPLACE_EXISTING`，失败后回退普通 `REPLACE_EXISTING`。Foundation 的 `moveItem` 在同卷上本就是原子 rename，但目标已存在时先删除再移动会引入一个极短的“目标不存在”窗口；`replaceItemAt` 对应 Java 的二次回退（非原子替换）。执行时若在该私法上有更贴合的写法，可在保持「先原子、失败回退替换、均失败抛错」语义的前提下微调，但**不得**改成直接覆写且无回退。
+
+> **主控裁决（Task 13.3 首次 CI，2026-10-11）**：CI（Xcode 16.2，`-swift-version 5`）报 `OutboxStore.swift:152/156: cannot find 'atomicError' in scope`。省略 `let` 的 catch 简写绑定（`} catch atomicError {`）是 Swift 6 语言模式语法，Swift 5 模式不识别；上方围栏原文即如此，属围栏缺陷。已双侧改为 `} catch let atomicError {`（Swift 5 全版本合法，语义完全不变）。
 
 移植要点（执行时不得偏离）：
 
@@ -5922,7 +5924,7 @@ enum ShellHTMLRewriter {
             let file = (withJS as NSString).substring(with: m.range(at: 1))
             guard AssetManifest.isAsset(file) else { continue }
             regex.replaceMatches(
-                in: mutable, range: m.range,
+                in: mutable, range: m.range(at: 0),
                 withTemplate: "dsh-asset://local/\(file)"
             )
             hits += 1
@@ -5936,6 +5938,8 @@ enum ShellHTMLRewriter {
 ```
 
 要点：① 注入必须**先于**正则——插进去的就是 `/__shell__/ipad.css|js`，正则阶段自然把它们一并改写，hits 自洽为 14；不要在注入时直接写 `dsh-asset://`（那样注入标签不被计数、也绕过了白名单校验）。② 三个锚点逐字对应 shell.html:5/9/727（含自闭合斜杠与两空格缩进差异：head 的 link 无缩进、尾部 script 有两空格缩进——锚点字符串不含前导空白，`replacingOccurrences` 只匹配标签本身，插入物换行后由锚点原有缩进承接，CSS 锚点行首无缩进故 ipad.css link 也无缩进，与 head 风格一致）。③ viewport 用**字面量**替换而非正则：`viewport-fit=cover"` 带结尾引号，只命中 content 属性结尾，不会误伤；已含 `interactive-widget` 时跳过（幂等）。④ 该函数只在主框架导航接管处对 Bundle 内 shell.html 调用一次（Task 4），测试中的任意片段也安全（无锚点即 no-op）。
+
+> **主控裁决（Task 13.3 首次 CI，2026-10-11）**：CI（Xcode 16.2 / `-swift-version 5`）报 `ShellHTMLRewriter.swift:47: missing argument for parameter 'at' in call`。上方围栏原文 `range: m.range,` 缺 NSTextCheckingResult 的外部参数标签，为围栏自身笔误；落盘整文件转写时逐字照抄导致同样错误。已双侧改为 `m.range(at: 0)`（与同段 L5922 的 `m.range(at: 1)` 一致），语义不变。
 
 - [ ] **12.6 新增 ShellAssets/ipad.css（全文）**
 
