@@ -6350,6 +6350,17 @@ Get-ChildItem e:\项目\dsh-remote-ios\build-artifacts
 
 浏览器路线：Actions run 页 → Artifacts → DSHRemote-unsigned-ipa（zip 内即 .ipa）。`build-artifacts/` 若未被 .gitignore 覆盖，确认不提交（产物不入库）。
 
+> **主控补记（增量搭建转向，2026-10-11，提交 `7f796d0`）——本文件 Task 4 / Task 11 的入口围栏示例已被「本地优先壳直达」取代，阅读这些历史代码块时以此条为准，勿据其回退现场代码。** 用户决定停止整段重型设计、改为逐步搭建，**增量 1 先立「本地编辑器」与「网关对话连接」两个框架**。真机表现为 iPadOS 27 + Funnel 下整条连同标题空白（Safari 能打开），根因是旧实现「先 `web.load(https://网关/__shell__/shell.html)` 网络首发，再在 `decidePolicyFor` 里 cancel + `loadHTMLString` 换壳」的时序。重构后的确切事实：
+>
+> - **零网络首发**：`ShellWebView.makeUIView` 直接 `loadLocalShell(into:gatewayRaw:)`，启动即从 Bundle 读取并 `loadHTMLString(rewritten, baseURL:)` 本地 `shell.html`；**完整删除** `decidePolicyFor` 导航接管与 `enum ShellNavPolicy`（故 Task 4.3/4.4、Task 9/11 围栏里的 `ShellNavPolicy.shouldTakeOver`、`decidePolicyFor`、`loadLocalShell(into:baseURL:)` 签名均已不存在）。资产缺失/改写失败走内联 `fatalPage`，**绝不回退网络首发**。
+> - **origin 选择器新增 `Sources/ShellOrigin.swift`**：`resolve(gatewayRaw:)` 始终返回可用 origin——合法 https 网关用其 origin（含端口/子路径），未配置/非法/离线回退固定占位 `https://local.dsh-remote.invalid/`（`.invalid` TLD 永不解析）；`baseURL(gatewayRaw:)` 供 `loadHTMLString`。文档 origin 借此与网关虚拟同源，壳内 `[DSH]` iframe `/app#/` 仍过 `frame-ancestors 'self'`、Cookie 同源。
+> - **`GatewayURL.normalize` 收敛为只产 origin**：返回类型由 `(origin: String, shell: String)` 元组改为 `String`，废弃 shell 网络 URL。故 Task 4.5 / Task 11.5 围栏里的 `(try? GatewayURL.normalize(...))?.shell`、`?.origin`、`normalized?.shell ?? (Cfg.gateway + Cfg.entryPath)` 全部失效。
+> - **RootView 移除网关闸门**：删除 `Cfg.entryPath`、`dropped` 与「未配网关显示 ContentUnavailableView」分支，**永远建本地壳**（离线即可进写作页）；State 改 `shellToken = 0`，点「连接」自增并给 `ShellWebView(...).id(shellToken)`，以新 origin 整体重建 WKWebView（baseURL 只能在 loadHTMLString 时定下）；删除 `.onChange(of: Cfg.gateway)`。标题五连进 S1 仍要求 normalize 成功，传参为 `S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway)) ?? "")`（String，不解构）。
+> - **默认进写作页 + 离线对话占位落在 iPad 注入层 `ShellAssets/ipad.js`（不改 PC 同步资产 shell.html）**：轮询等待 `window.__wcTabs.show` 后 `show('writing')`（100ms × 最多 50 次）；`location.hostname === 'local.dsh-remote.invalid'` 判离线，把 `#dsh-frame` 的 src 由 `/app#/` 置 `about:blank`（不发无效对话请求），在线恢复 `/app#/`。
+> - **测试同步**：新增 `Tests/DSHRemoteTests/ShellOriginTests.swift`（占位回退 / 非法回退 / 合法 https 用 origin / 占位可解析 4 例）；`GatewayURLTests` 改 String 断言并补端口用例；`ShellNavigationTests` 删除 `testShouldTakeOverShellNavigation`，仅保留重写器 14 处计数测试。
+>
+> 本条只订正文档与现场的一致性；Task 13.1-13.4 的勾选结论不回退，13.5 起真机验收继续，但验收 A 的同源链路前提改以「本地壳直达 + origin/baseURL」理解。
+
 - [ ] **13.5 SideStore 重签装机（用户在 iPad 端操作，助手只给步骤）**
 
 沿用已验证的 S2 链路（有线配对记录已在）：iPad 与电脑同 Tailscale 网络并非必需（SideStore 重签是本机行为）；把新 IPA 传到 iPad（文件 App / 现有导入方式）→ SideStore 导入「DSHRemote-unsigned.ipa」→ 用美区专用 Apple ID 在**设备端 GUI** 完成本地重签安装（密码由用户本人输入，助手不接触、不记录、不落盘任何凭据）→ 覆盖安装后确认版本为本次构建。
