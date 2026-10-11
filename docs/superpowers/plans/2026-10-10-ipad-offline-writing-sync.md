@@ -1702,7 +1702,8 @@ final class AppDataStoreTests: XCTestCase {
     }
 
     func arr(_ r: [String: Any], _ key: String) -> [Any] {
-        (r[key] as? [Any]) ?? []
+        if let strs = r[key] as? [String] { return strs }
+        return (r[key] as? [Any]) ?? []
     }
 
     @discardableResult
@@ -6316,6 +6317,12 @@ gh run list --workflow=ios-build.yml --repo skyblade47/dsh-remote-ios -L 3
 > 2. **`ShellNavigationTests.testBundleShellHTMLRewritesFourteenReferences` 资源 nil（配置错）**：日志 `XCTUnwrap failed: expected non-nil value of type "URL"`。全 build 日志取证：app target 有 15 条 CpResource（shell.html 等扁平落 `DSHRemote.app` 根），**test target 零条 CpResource**——4.2 当初给的独立 `resources:` 段在 XcodeGen 2.46 下对 unit-test target 不产资源拷贝。修法：把 ShellAssets 挪进 test target 的 `sources:` 并显式 `buildPhase: resources`（`type: group / group: ""`），复刻 app target 已验证有效的同构写法，测试本体不动以保留「真实壳改写」的集成覆盖；若后续 CI 仍无 CpResource，再退回 4.1 预置的内联字符串兜底。全仓 Grep 确认测试侧 `Bundle(for:)` 资源读取仅此一处，改单点即覆盖。
 >
 > 非致命 warning 记录在案、本批不动：`OutboxStoreTests` 三条 `conditional downcast from 'Int?' to 'Int' does nothing`（不影响测试结果）。派发第十一次 CI 验证。
+
+> **主控裁决（Task 13.3 第十一次 CI，run 38133249701，2026-10-11）——资源点转绿；intents 崩溃点修正定位**：本 run 三关第 1-5 步（含 xcodegen）全过，模拟器测试仍因**同一用例** `testSaveIntentsNormalizeDedupeCap` 的同一 `ContiguousArrayBuffer Index out of range` trap 失败，但**资源点已彻底转绿**——build 日志中 test target 出现 16 条 CpResource（shell.html 等扁平落 `DSHRemoteTests.xctest` 根），`testBundleShellHTMLRewritesFourteenReferences` 不再报 nil。重启后的第二轮 156 个测试 0 failures，唯一失败就是首个 launch 的该崩溃用例。
+>
+> 第十次裁决对崩溃点的判断**被本 run 证伪了一半，如实纠正**：当时以为 `normalizeIntentList` 入口对原生 `[String]` 的 `as? [Any]` 不命中是崩溃点。入口修复（先 `[String]` 后 `[Any]`，对齐 `send.js`）本身正确、予以保留，但它**不是** trap 所在。决定性取证是 `testGetStateDefaults`（L70）——它用**完全相同**的 `arr(...) as? [String]` 读默认 intents 且 passed。差异只在数据路径：`getState()` 的 intents 来自 `readConfig()`（经 JSONSerialization，是可桥 `[Any]` 的 NSArray）；而 `saveConfig()` 的返回值 `settings` 由 `settingsConfig(next)` **不经序列化直接构造**，其中 intents 是 `normalizeIntentList` 返回的 Swift 原生 `[String]`。测试读回辅助 `arr(_:_:)` 只有 `r[key] as? [Any]`，对该原生 `[String]` 不命中 → 回退 `[]` → 紧接的 `intents[0]` 越界 trap。即陷阱在**测试读回辅助**（出口），而非归一化入口。
+>
+> 修法（双侧）：`AppDataStoreTests.arr` 增加前置分支 `if let strs = r[key] as? [String] { return strs }`，再回退 `[Any]`（后者仍服务 drafts 的 `[[String: Any]]` 取值，L328/329/344/358 不受影响）。归一化入口的 `[String]` 分支保留（生产代码经 bridge 直传原生数组时同样需要，属真实防御，与 `Array.isArray` 语义一致）。派发第十二次 CI 验证。
 
 - [ ] **13.4 下载未签名 IPA（Windows）**
 

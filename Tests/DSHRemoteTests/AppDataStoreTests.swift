@@ -28,7 +28,8 @@ final class AppDataStoreTests: XCTestCase {
     }
 
     func arr(_ r: [String: Any], _ key: String) -> [Any] {
-        (r[key] as? [Any]) ?? []
+        if let strs = r[key] as? [String] { return strs }
+        return (r[key] as? [Any]) ?? []
     }
 
     @discardableResult
