@@ -6224,7 +6224,7 @@ git commit -m "feat(shell): iPad 壳侧触控适配（ipad.css/ipad.js + 白名�
 
 前置：Task 1-12 所有 commit 检查点均已在**征得用户同意后**完成；本机无 Xcode，所有 Swift 验证以 CI 结果为准。
 
-- [ ] **13.1 本地静态预检（Windows，推送前必做）**
+- [x] **13.1 本地静态预检（Windows，推送前必做）**
 
 在 `e:\项目\dsh-remote-ios` 仓根逐条执行。
 
@@ -6269,7 +6269,7 @@ git -C e:\项目\dsh-remote status -sb
 
 预期：与本计划开工前一致（若有本计划造成的改动，全部回退）。
 
-- [ ] **13.2 征得同意后推送分支（不 force push、不改 git config）**
+- [x] **13.2 征得同意后推送分支（不 force push、不改 git config）**
 
 向用户说明：推送目标 `origin/feature/m0-m1-shell`（现有分支），仅触发 workflow_dispatch 的 ios-build，**不打 tag、不合并 main**。用户同意后执行：
 
@@ -6279,7 +6279,7 @@ git -C e:\项目\dsh-remote-ios push origin feature/m0-m1-shell
 
 若远端有新提交（他人/CI 机器人），先 `git fetch origin` 并向用户报告分叉情况，由用户决定 rebase/merge；**默认禁止任何强推**（含 `--force` 与 `--force-with-lease`），确有必要时必须再次征得用户同意。
 
-- [ ] **13.3 触发 CI（workflow_dispatch）并跟到全绿**
+- [x] **13.3 触发 CI（workflow_dispatch）并跟到全绿**
 
 ios-build.yml 只在手动派发或 `v*` tag 时运行（推送分支本身不触发）。优先用 gh CLI（无需在仓库存任何 Apple 凭据）：
 
@@ -6341,7 +6341,7 @@ gh run list --workflow=ios-build.yml --repo skyblade47/dsh-remote-ios -L 3
 >
 > **主控裁决（Task 13.3 第十四次 CI，run 38135768880，2026-10-11）——CI 三关首次全绿，13.3 迭代收敛完成**：xcodegen / iPad 模拟器逻辑测试 / Release 未签名编译 + IPA 三关 `success`。硬证据：`** TEST SUCCEEDED **`；崩溃用例 `testSaveIntentsNormalizeDedupeCap ... passed (0.003 seconds)`；**单 launch 177 tests, 0 failures (0 unexpected)**（此前连续 run 10/11/12 均因该用例 trap 触发重启）；artifact `DSHRemote-unsigned-ipa`（438897 字节）已上传。教训记录在案：两次基于 `Any`/数组下转的静态推断（入口、`arr` 出口）均被 CI 证伪，真正的根因是**测试取数漏层级**这类与生产逻辑无关的测试自身错误；当稳定复现的 trap 无符号化堆栈、且静态推演与现象矛盾时，应第一时间上面包屑取硬证据，而非继续猜。进入 13.4 下载 IPA。
 
-- [ ] **13.4 下载未签名 IPA（Windows）**
+- [x] **13.4 下载未签名 IPA（Windows）**
 
 ```powershell
 gh run download <run-id> -n DSHRemote-unsigned-ipa -D e:\项目\dsh-remote-ios\build-artifacts --repo skyblade47/dsh-remote-ios
