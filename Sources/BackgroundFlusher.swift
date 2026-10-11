@@ -69,8 +69,8 @@ extension BackgroundFlusher {
     /// 生产绑定：弱持有 WKWebView，求值时回主线程（WKWebView 必须主线程使用）。
     func bind(webView: WKWebView) {
         bind { [weak webView] script, completion in
-            let doEvaluate = {
-                webView?.evaluateJavaScript(script) { _, error in completion(error) }
+            let doEvaluate: () -> Void = {
+                _ = webView?.evaluateJavaScript(script) { _, error in completion(error) }
             }
             if Thread.isMainThread { doEvaluate() }
             else { DispatchQueue.main.async(execute: doEvaluate) }

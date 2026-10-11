@@ -90,7 +90,7 @@ final class AppDataStore {
             next["drafts"] = mergeDrafts(prev["drafts"], patch["drafts"])
         }
         if patch["theme"] != nil {
-            let theme = stringOf(patch["theme"])
+            let theme = Self.stringOf(patch["theme"])
             next["theme"] = ["auto", "light", "dark"].contains(theme) ? theme : "auto"
         }
         if patch["general"] != nil {
@@ -114,7 +114,7 @@ final class AppDataStore {
                     ? mode : "auto"
             }
             if pr["gateway"] != nil {
-                let gw = stringOf(pr["gateway"]).trimmingJava()
+                let gw = Self.stringOf(pr["gateway"]).trimmingJava()
                 if !Self.gatewayPattern.hasMatch(gw) {
                     return fail("BadRequest: gateway 必须是 http(s):// 地址")
                 }
@@ -168,12 +168,12 @@ final class AppDataStore {
             try atomicWrite(md, Data(bytes))
             let mtime = mtimeMillis(md)
 
-            let segs = stringOf(relPath).replacingOccurrences(of: "\\", with: "/")
+            let segs = Self.stringOf(relPath).replacingOccurrences(of: "\\", with: "/")
                 .components(separatedBy: "/")
             var meta: [String: Any] = [:]
             meta["key"] = key
-            meta["root"] = stringOf(root)
-            meta["relPath"] = stringOf(relPath)
+            meta["root"] = Self.stringOf(root)
+            meta["relPath"] = Self.stringOf(relPath)
             meta["work"] = segs.count > 1 ? segs[0] : ""
             meta["name"] = segs[segs.count - 1]
             meta["savedAt"] = nowMillis()
@@ -252,7 +252,7 @@ final class AppDataStore {
                   let parsed = try? jsonParse(text),
                   let meta = parsed as? [String: Any] else { continue }
             guard let relPath = meta["relPath"] as? String, safeRelPath(relPath) else { continue }
-            let metaRoot = stringOf(meta["root"])
+            let metaRoot = Self.stringOf(meta["root"])
             guard metaRoot == root else { continue }
 
             let md = dir.appendingPathComponent(Self.draftKeyFor(root: metaRoot, relPath: relPath) + ".md")
@@ -365,7 +365,7 @@ final class AppDataStore {
         let f = dataDir.appendingPathComponent("sync").appendingPathComponent("baseline.json")
         do {
             try mkdirs(f.deletingLastPathComponent())
-            let bytes = Data(jsonStringify(map).utf8)
+            let bytes = Data(try jsonStringify(map).utf8)
             try atomicWrite(f, bytes)
             return ["ok": true, "bytes": Int64(bytes.count)]
         } catch {
@@ -379,7 +379,7 @@ final class AppDataStore {
         let f = dataDir.appendingPathComponent("last-session.json")
         do {
             try mkdirs(f.deletingLastPathComponent())
-            let bytes = Data(jsonStringify(rec).utf8)
+            let bytes = Data(try jsonStringify(rec).utf8)
             try atomicWrite(f, bytes)
             return ["ok": true, "bytes": Int64(bytes.count)]
         } catch {
@@ -612,7 +612,7 @@ final class AppDataStore {
     private func normalizeIntent(_ v: Any?) -> String {
         // 逐字对齐 Java：replaceAll("[\\r\\n]+", " ")——连续换行折叠成一个空格
         // （不能拆成三次单字符替换，否则 "\r\n\r\n" 会变成两个空格而蓝本是一个）
-        let collapsed = stringOf(v).replacingOccurrences(
+        let collapsed = Self.stringOf(v).replacingOccurrences(
             of: #"[\r\n]+"#, with: " ", options: .regularExpression)
         let s = collapsed.trimmingJava()
         return s.count > 40 ? String(s.prefix(40)) : s
@@ -797,7 +797,7 @@ final class AppDataStore {
     private func writeConfig(_ cfg: [String: Any]) throws {
         let f = dataDir.appendingPathComponent("config.json")
         try mkdirs(f.deletingLastPathComponent())
-        try writeWhole(f, text: jsonStringify(cfg))
+        try writeWhole(f, text: try jsonStringify(cfg))
     }
 
     // MARK: - JSON / IO

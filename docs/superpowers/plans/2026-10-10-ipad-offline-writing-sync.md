@@ -2211,7 +2211,7 @@ final class AppDataStore {
             next["drafts"] = mergeDrafts(prev["drafts"], patch["drafts"])
         }
         if patch["theme"] != nil {
-            let theme = stringOf(patch["theme"])
+            let theme = Self.stringOf(patch["theme"])
             next["theme"] = ["auto", "light", "dark"].contains(theme) ? theme : "auto"
         }
         if patch["general"] != nil {
@@ -2235,7 +2235,7 @@ final class AppDataStore {
                     ? mode : "auto"
             }
             if pr["gateway"] != nil {
-                let gw = stringOf(pr["gateway"]).trimmingJava()
+                let gw = Self.stringOf(pr["gateway"]).trimmingJava()
                 if !Self.gatewayPattern.hasMatch(gw) {
                     return fail("BadRequest: gateway 必须是 http(s):// 地址")
                 }
@@ -2289,12 +2289,12 @@ final class AppDataStore {
             try atomicWrite(md, Data(bytes))
             let mtime = mtimeMillis(md)
 
-            let segs = stringOf(relPath).replacingOccurrences(of: "\\", with: "/")
+            let segs = Self.stringOf(relPath).replacingOccurrences(of: "\\", with: "/")
                 .components(separatedBy: "/")
             var meta: [String: Any] = [:]
             meta["key"] = key
-            meta["root"] = stringOf(root)
-            meta["relPath"] = stringOf(relPath)
+            meta["root"] = Self.stringOf(root)
+            meta["relPath"] = Self.stringOf(relPath)
             meta["work"] = segs.count > 1 ? segs[0] : ""
             meta["name"] = segs[segs.count - 1]
             meta["savedAt"] = nowMillis()
@@ -2373,7 +2373,7 @@ final class AppDataStore {
                   let parsed = try? jsonParse(text),
                   let meta = parsed as? [String: Any] else { continue }
             guard let relPath = meta["relPath"] as? String, safeRelPath(relPath) else { continue }
-            let metaRoot = stringOf(meta["root"])
+            let metaRoot = Self.stringOf(meta["root"])
             guard metaRoot == root else { continue }
 
             let md = dir.appendingPathComponent(Self.draftKeyFor(root: metaRoot, relPath: relPath) + ".md")
@@ -2486,7 +2486,7 @@ final class AppDataStore {
         let f = dataDir.appendingPathComponent("sync").appendingPathComponent("baseline.json")
         do {
             try mkdirs(f.deletingLastPathComponent())
-            let bytes = Data(jsonStringify(map).utf8)
+            let bytes = Data(try jsonStringify(map).utf8)
             try atomicWrite(f, bytes)
             return ["ok": true, "bytes": Int64(bytes.count)]
         } catch {
@@ -2500,7 +2500,7 @@ final class AppDataStore {
         let f = dataDir.appendingPathComponent("last-session.json")
         do {
             try mkdirs(f.deletingLastPathComponent())
-            let bytes = Data(jsonStringify(rec).utf8)
+            let bytes = Data(try jsonStringify(rec).utf8)
             try atomicWrite(f, bytes)
             return ["ok": true, "bytes": Int64(bytes.count)]
         } catch {
@@ -2733,7 +2733,7 @@ final class AppDataStore {
     private func normalizeIntent(_ v: Any?) -> String {
         // 逐字对齐 Java：replaceAll("[\\r\\n]+", " ")——连续换行折叠成一个空格
         // （不能拆成三次单字符替换，否则 "\r\n\r\n" 会变成两个空格而蓝本是一个）
-        let collapsed = stringOf(v).replacingOccurrences(
+        let collapsed = Self.stringOf(v).replacingOccurrences(
             of: #"[\r\n]+"#, with: " ", options: .regularExpression)
         let s = collapsed.trimmingJava()
         return s.count > 40 ? String(s.prefix(40)) : s
@@ -2918,7 +2918,7 @@ final class AppDataStore {
     private func writeConfig(_ cfg: [String: Any]) throws {
         let f = dataDir.appendingPathComponent("config.json")
         try mkdirs(f.deletingLastPathComponent())
-        try writeWhole(f, text: jsonStringify(cfg))
+        try writeWhole(f, text: try jsonStringify(cfg))
     }
 
     // MARK: - JSON / IO
@@ -3020,6 +3020,14 @@ private extension NSRegularExpression {
 - `listPendingDrafts` 内调用剪枝式清理走 `clearDraftLocked`（不加锁，已持锁）；公共 `clearDraft` 自带锁。
 - `trimmingJava()` 复刻 Java `trim()`（只裁 ≤ U+0020），不可用 `trimmingCharacters(in: .whitespaces)`。
 - 校对 `relPath` 在 `proofSave` 入口 trim（Java 行为），`proofLoad` 同样 trim 后再算 key。
+
+> **主控裁决（Task 13.3 第二次 CI，2026-10-11）**：CI（Xcode 16.2 / Swift 5 语言模式 / iOS 18.2 SDK）第二轮在本文件暴露 10 条错误，围栏与落盘逐字同款缺陷，已双侧修复：
+>
+> 1. `stringOf` 是 `private static func`，Swift 5 模式下实例方法不得裸用静态方法（错误 `static member 'stringOf' cannot be used on instance of type 'AppDataStore'`）。7 个实例上下文调用点（saveConfig 的 theme/gateway、writeDraft 的 segs/root/relPath、listPendingDrafts 的 metaRoot、normalizeIntent 的 collapsed）统一加 `Self.` 限定；静态方法 `draftKeyFor`/`proofCacheKey` 内的裸调用合法，不动。
+> 2. `jsonStringify` 是 throws 实例方法，`writeBaseline`/`writeLastSession` 两处 `Data(jsonStringify(...).utf8)` 缺 `try`（CI 报 368:30 / 382:30）；全量排查 throws 调用点时另发现 `writeConfig` 内 `try writeWhole(f, text: jsonStringify(cfg))` 嵌套调用同样缺内层 `try`（编译器本轮被短路未报）。三处一并补 `try`。
+> 3. CI 另报 `listPendingDrafts` 263:71 `reference to member 'fileSizeKey' cannot be resolved without a contextual type`，但同模式的 pruneDrafts 两处（644/653 行）不报错——判定为同函数 255 行 stringOf 错误污染整函数类型推断的级联错误，本行代码不改动，随 stringOf 修复在第三次 CI 验证自愈；若仍报错再显式写 `URLResourceKey.fileSizeKey`。
+>
+> 修复仅为编译合规（静态限定 / 错误传播标注），运行时语义、错误信息与 Java 蓝本一比一不变。
 
 - [ ] **7.4 运行全部测试，验证通过（Green）**
 
@@ -5452,8 +5460,8 @@ extension BackgroundFlusher {
     /// 生产绑定：弱持有 WKWebView，求值时回主线程（WKWebView 必须主线程使用）。
     func bind(webView: WKWebView) {
         bind { [weak webView] script, completion in
-            let doEvaluate = {
-                webView?.evaluateJavaScript(script) { _, error in completion(error) }
+            let doEvaluate: () -> Void = {
+                _ = webView?.evaluateJavaScript(script) { _, error in completion(error) }
             }
             if Thread.isMainThread { doEvaluate() }
             else { DispatchQueue.main.async(execute: doEvaluate) }
@@ -5481,6 +5489,8 @@ extension BackgroundFlusher {
 ```
 
 要点：① 内核只依赖三个注入点（`beginTask`/`endTask`/`evaluator`），无 UIKit/WebKit 符号，BackgroundFlusherTests 全程内存桩即可。② 生产入口有两个：`ShellSession` 里用 `BackgroundFlusher(live: ())` 拿接 `UIApplication` 的实例；`Coordinator.attach(to:)` 调 `bind(webView:)` 弱挂 webView。③ `token` 用 `AnyHashable` 装箱 `UIBackgroundTaskIdentifier.rawValue`（`Int`），测试传任意 `Int`；`endTask` 用 `raw.base as? Int` 还原。④ `finishOnce` 同时被 expirationHandler 与 evaluateJavaScript completion 竞争调用，`ended` 保证 begin/end 严格配对一次；每轮 flush 的 `ended`/`token` 是局部变量，互不干扰，`flushing` 复位后下一轮可重新尝试。
+
+> **主控裁决（Task 13.3 第二次 CI，2026-10-11）**：CI 报 `bind(webView:)` 76:54 `cannot convert value of type '() -> Void?' to expected argument type 'DispatchWorkItem'`。根因：`webView?.evaluateJavaScript(...) { ... }` 经可选链使闭包体产生 `Void?`，无类型标注的 `let doEvaluate = { ... }` 被推断为 `() -> Void?`；而 `DispatchQueue.main.async(execute:)` 的 `execute:` 标签精确选择 `DispatchWorkItem` 重载（尾随闭包的 `() -> Void` 重载不带该标签），故类型不匹配。围栏与落盘逐字同款缺陷，双侧修复为显式标注 `let doEvaluate: () -> Void = { _ = webView?.evaluateJavaScript(...) ... }`：显式返回类型压成 `Void`，`_ =` 显式丢弃可选链结果。主线程分支调用不变，派发时机与弱引用语义不变。
 
 - [ ] **11.4 运行测试，确认通过（Green）**
 
