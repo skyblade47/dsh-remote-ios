@@ -1,0 +1,728 @@
+/* ============================================================================
+   写作页（阶段② v1）样式 —— 与 dsh web 对齐（设计文档 §19）
+
+   三栏：左 240（文档树）/ 中（编辑块 + 预览块，左右分栏）/ 右 288（占位：阶段④）
+   + 顶部工具栏 + 底部状态栏。
+
+   ⚠️ 对齐 = 「同一套 CSS 变量」+「照抄组件观感」两件事（§19.2）：
+     · 颜色 / 字号 / 阴影 / 渐变 → 一律走 dsw-tokens.css 的 --dsw-*（:root 亮色，
+       body[data-ds-dark-theme] 暗色；暗色由壳层跟随 [DSH] iframe 的主题来切）
+     · **圆角 / 间距没有 token** ⇒ 照内核组件 CSS 的实测字面值写死，每处标注出处
+
+   组件观感出处（内核 dsh @ 100.99.84.35，实测于 2026-09-25）：
+     · 按钮   @deepseek-ai/dsh-client-ui-primitives/lib/Button.module.css
+     · 输入框 @deepseek-ai/dsh-client-ui-primitives/lib/Input.module.css
+     · 标签   @deepseek-ai/dsh-client-ui-primitives/lib/Tag.module.css
+     · 卡片   .../Menu.module.css（菜单卡）/ Modal.module.css（对话框）
+     · 侧栏行 dsh-web-frontend/dist/assets/index-DPX2bQLo.css
+   ============================================================================ */
+
+#page-writing { display: flex; flex-direction: column; min-height: 0; background: var(--dsw-alias-bg-base); }
+/* .page[hidden] 的选择器权重低于 id，这里显式补一条 */
+#page-writing[hidden] { display: none; }
+/* 🔴 `hidden` 的**统一兜底**：本文件里很多组件自己声明了 `display`（`#page-writing button`
+   → inline-flex、`.w-editor-empty` → flex、`.w-sidebar` / `.w-right` → flex…），而
+   **作者样式一律盖过 UA 的 `[hidden] { display: none }`** ⇒ 这些元素**带上 hidden 属性也照样显示**。
+   这个坑本文件已经踩过三次：`.w-banner` 的两个按钮 · `.w-toolbar` 的两个分栏入口 ·
+   D-6 的 `.w-editor-empty`（后者导致「未打开文档」覆盖层**永久盖住写作区、关不掉**，用户 2026-09-28 实测）。
+   ⇒ 在这里一次兜住：**带 `hidden` 就必须不显示**，不依赖任何组件的书写顺序或选择器权重。
+   （`!important` 在这条上是恰当的语义：hidden 就是"别显示"，不存在"既要显示又带 hidden"的正当用法。） */
+#page-writing [hidden] { display: none !important; }
+
+/* ── 按钮 = dsh Button（Button.module.css L4-36 / L38-71）─────────────────
+   基础 .button：gap 4 / border none / **radius 18px** / font 14px·22px / color label-primary / bg transparent
+   档位：.md **h36**（默认）   .sm **h28** + font 12·18 + pad 0 10 + radius 14（"compact height for dense rows"）
+   悬浮：.toolbar → button-tool-bar-hover   .primary → button-primary-hover   .ghost/.outline → interactive-bg-hover
+   字重：Button 基类**未声明 font-weight** ⇒ 400
+   ⚠️ 18/14/36/28/10 均为实测字面值（无 radius/spacing token，§19.2）           */
+#page-writing button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  height: 36px; padding: 0 14px;                      /* .md */
+  border: 0; border-radius: 18px;
+  font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px; font-weight: 400;
+  color: var(--dsw-alias-label-primary);
+  background: transparent;                             /* 默认无底，层级靠主色按钮承担（2026-09-30 用户定） */
+  cursor: pointer;
+  /* ⚠️ 2026-09-25 实测修：缺这条时 flex 行内被压缩的按钮会把文案**折成两行并溢出** ——
+     「新建作品」实测 rect 62.5×28 但 scrollHeight=32（>clientHeight 28, wrap=1）。
+     按钮文案一律不换行（溢出改为不可见之前，先保证按钮不被压缩，见下 .w-row button）。 */
+  white-space: nowrap;
+}
+#page-writing button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+#page-writing button:disabled { cursor: not-allowed; opacity: .4; }
+/* ⚠️ ⑥ CR-6 的「作品/文档」「记录板」两个入口靠 `hidden` 属性显隐，而 `#page-writing button`
+   的 `display:inline-flex` 会盖掉 UA 的 `[hidden]` ⇒ 由本文件顶部的 `#page-writing [hidden]` 统一兜住
+   （同一个坑以前在 `.w-banner` 上单独补过一次）。 */
+
+/* 「保存」= 主操作 ⇒ dsh Button .primary 配色 */
+#page-writing #w-save {
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+#page-writing #w-save:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
+
+/* ⑥ CR-6「分栏」开关：开着时保持"按下"观感 —— 否则开关状态在界面上完全看不出来 */
+#page-writing #w-split.active { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* ── 工具栏 ───────────────────────────────────────────────────────────── */
+#page-writing .w-toolbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  /* ⚠️ 与按钮的 `white-space: nowrap` **配套**：窄窗口时让"番茄钟"整组换到第二行，
+     而不是把按钮文案压折（旧行为）或让内容溢出面板（只加 nowrap 的新行为）。
+     实测 560px：加 wrap 前 toolbarScrollW=630 > 560（溢出）；加 wrap 后无溢出。 */
+  flex-wrap: wrap; row-gap: 6px;
+  padding: 6px 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  border-bottom: .5px solid var(--dsw-alias-border-l1);
+}
+#page-writing .w-toolbar .w-sep { flex: 1 1 auto; }
+
+/* 次要说明文字 */
+#page-writing .w-note { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); }
+
+/* 「✓ 自动保存」= dsh Tag（Tag.module.css L4-14）neutral 调
+   pad 1px 8px / **radius 999px** / font 11px·17px / weight 500 / bg bg-module-platform / color label-secondary
+   ⚠️ 11px·17px·999px 为实测字面值（Tag 是固定尺寸，只有调色板随 tone 变） */
+#page-writing #w-autosave {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 999px;
+  font-family: var(--dsw-font-family); font-size: 11px; line-height: 17px; font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-module-platform);
+  white-space: nowrap;
+}
+
+/* 番茄钟 */
+#page-writing .w-pomo { display: flex; align-items: center; gap: 6px; }
+#page-writing .w-pomo #w-pomo-time {
+  font: var(--dsw-font-s-strong-14);
+  font-variant-numeric: tabular-nums;                 /* ⚠️ 必须在 font 简写之后（font 简写会重置 font-variant） */
+  min-width: 52px; text-align: center;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ── 输入框 = dsh Input 的 .wrap（Input.module.css L1-14）─────────────────
+   **h32** / pad 0 8 / **border .5px border-l4** / **radius 8px** / bg bg-layer-1
+   focus：`.wrap:focus-within { border-color: brand-primary }` —— 无描边环，只换边框色
+   ⚠️ 本页 input 是裸元素（没有 dsh 的 .wrap 外壳）⇒ 把 .wrap 的值直接落在 input 上，
+      并把 `:focus-within` 改写成 `:focus`。32/8/.5px/8 为实测字面值。            */
+#page-writing input {
+  box-sizing: border-box; height: 32px; min-width: 0;
+  padding: 0 8px;
+  border: .5px solid var(--dsw-alias-border-l4); border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+#page-writing input::placeholder { color: var(--dsw-alias-label-dimmed); }
+#page-writing input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+#page-writing .w-pomo input[type="number"] { width: 52px; }
+
+/* ── 主体三栏 ─────────────────────────────────────────────────────────── */
+/* ⚠️ `position: relative` 是**分栏浮层的定位基准**（CR-6）：分栏时左栏/右栏改成 `position:absolute`
+   浮在正文之上，必须相对 `.w-body`（而非 `#page-writing`）定位 —— 否则会盖住顶部工具栏与底部状态栏。 */
+#page-writing .w-body { position: relative; flex: 1 1 auto; display: flex; min-height: 0; }
+
+/* 左栏：三层（空态 / 作品卡片墙 / 作品内文档树）（宽度 240 是设计文档 §2.1 的定数，非 token） */
+#page-writing .w-sidebar {
+  flex: 0 0 240px; display: flex; flex-direction: column; min-height: 0;
+  /* ⚠️ `min-width: 0` 必须留：flex 项默认 `min-width:auto` = 内容最小宽度，会把 `flex-basis:240px`
+     **顶穿**。实测（2026-09-25）加入 nowrap 的层标题（`.w-panel-title` 里是**完整工作区路径**）后，
+     左栏被撑到 **436px**（设计定数 240）；把它归零即回到 240.7px，长文本改由内部省略号处理。
+     —— 这一条与 ② 是同一类问题：**nowrap + 无 min-width:0 ⇒ 容器被文字撑开**。 */
+  min-width: 0;
+  background: var(--dsw-specific-sidebar-fill);        /* dsh 侧栏底色（亮 #f9fafb / 暗 #1b1b1c） */
+  border-right: .5px solid var(--dsw-alias-border-l1);
+}
+/* 同一时间只显示一层 */
+#page-writing .w-side { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; }
+#page-writing .w-side[hidden] { display: none; }
+
+/* 层头（作品墙 / 文档树）：标题 + 右侧小动作 */
+#page-writing .w-panel-head { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 8px 0; }
+#page-writing .w-panel-title {
+  flex: 1 1 auto; min-width: 0;
+  font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#page-writing .w-side-actions { flex: 0 0 auto; padding: 6px; border-bottom: .5px solid var(--dsw-alias-border-l1); }
+#page-writing .w-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+#page-writing .w-row:last-child { margin-bottom: 0; }
+#page-writing .w-row input { flex: 1 1 auto; }
+/* ⚠️ 2026-09-25 实测修：按钮原为 flex `0 1 auto` ⇒ 被同行输入框压到 62.5px，
+   文案「新建作品」折行溢出（scrollHeight 32 > 28）。改为不参与收缩，
+   由输入框（已有 min-width:0）吸收空间余缺。 */
+#page-writing .w-row button { flex: 0 0 auto; }
+/* 全宽按钮（空态用）：不用内联 style，避免盖住上面的 flex 规则 */
+#page-writing .w-block { display: flex; width: 100%; margin-bottom: 4px; }
+#page-writing .w-block:last-child { margin-bottom: 0; }
+
+/* 侧栏按钮 = dsh Button .sm（密集行用紧凑档） */
+#page-writing .w-sidebar button { height: 28px; padding: 0 10px; border-radius: 14px; font-size: 12px; line-height: 18px; }
+/* 层头里的极小动作按钮（刷新 / 返回）：无底色、只做图标级动作 */
+#page-writing .w-sidebar button.w-mini {
+  flex: 0 0 auto; height: 24px; padding: 0 8px; border-radius: 8px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+}
+#page-writing .w-sidebar button.w-mini:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* 空态（尚未选择工作区） */
+#page-writing .w-empty-title {
+  padding: 10px 8px 6px;
+  font: var(--dsw-font-s-strong-14); color: var(--dsw-alias-label-primary);
+}
+#page-writing .w-hint {
+  margin: 6px; padding: 8px; border-radius: 8px;
+  font: var(--dsw-font-xxs-12); line-height: 1.7;
+  color: var(--dsw-alias-state-warn-primary); background: var(--dsw-alias-bg-layer-1);
+  white-space: pre-wrap; word-break: break-word;
+}
+#page-writing .w-hint[hidden] { display: none; }
+/* ⚠️ 提示块是**常驻**的（不再只属于空态）：`flex: 0 0 auto` 让它不参与「层」的伸缩，
+   否则它会把三层中的当前层挤扁。`min-width:0` 同上（长错误文案不得撑宽左栏）。 */
+#page-writing .w-sidebar > .w-hint { flex: 0 0 auto; min-width: 0; max-height: 40vh; overflow: auto; }
+#page-writing .w-hint-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+#page-writing .w-hint-actions button { flex: 0 0 auto; }
+
+/* ── ①-a 常驻工作区栏：「工作区：<路径> ▾ 切换」──────────────────────────
+   有工作区时恒显（左栏顶部），点「▾ 切换」出小面板（切换已有 / 新建 / 新建到指定位置）。 */
+#page-writing .w-wsbar {
+  flex: 0 0 auto; min-width: 0;
+  padding: 6px 6px 0;
+  border-bottom: .5px solid var(--dsw-alias-border-l1);
+}
+#page-writing .w-wsbar[hidden] { display: none; }
+#page-writing .w-wsbar-head { display: flex; align-items: center; gap: 6px; padding: 0 2px 6px; }
+#page-writing .w-ws-pop {
+  margin-bottom: 6px; padding: 6px;
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 12px;   /* ⚠️ 12px 为推断（HoverCard 档） */
+  background: var(--dsw-alias-bg-layer-1);
+}
+#page-writing .w-ws-pop[hidden] { display: none; }
+#page-writing .w-ws-pop-note { display: block; margin-top: 6px; line-height: 1.6; }
+
+/* ── ②-b 导入模态 ─────────────────────────────────────────────────────── */
+#page-writing .w-modal {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .42);
+}
+#page-writing .w-modal[hidden] { display: none; }
+#page-writing .w-modal-card {
+  display: flex; flex-direction: column;
+  width: 560px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
+  /* 圆角 24px = 内核 Modal 卡档（实测字面值，§19.2 无 radius token）；阴影走 elevation token */
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 24px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+#page-writing .w-modal-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 6px;
+}
+#page-writing .w-modal-title { flex: 1 1 auto; min-width: 0; font: var(--dsw-font-s-strong-14); }
+#page-writing .w-modal-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  padding: 0 12px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+#page-writing .w-import-tip { display: block; line-height: 1.7; }
+#page-writing .w-import-result {
+  min-height: 40px; max-height: 40vh; overflow: auto;
+  padding: 8px; border-radius: 8px;
+  font: var(--dsw-font-xxs-12); line-height: 1.7;
+  color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-base);
+  white-space: pre-wrap; word-break: break-word;
+}
+/* 模态里的行：标签 + 下拉/输入 */
+#page-writing .w-modal .w-row > .w-note { flex: 0 0 auto; }
+#page-writing .w-modal select,
+#page-writing .w-modal input { flex: 1 1 auto; min-width: 0; }
+/* 下拉 = dsh Input 观感（h32 / pad 0 8 / border-l4 / r8；见上面的 input 注释） */
+#page-writing select {
+  box-sizing: border-box; height: 32px;
+  padding: 0 6px;
+  border: .5px solid var(--dsw-alias-border-l4); border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 作品卡片墙（2026-09-30 方案一：整张大卡可点，卡内不再外铺文档） */
+#page-writing .w-works-grid {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 6px 8px 12px;
+}
+/* 一个作品 = wrapper（卡片 + 右上角「⋯」+ 展开的内联操作面板）。
+   「⋯」放在卡片外侧：卡片本身是 <button>，内嵌按钮是非法 HTML。 */
+#page-writing .w-work-item {
+  position: relative; flex: 0 0 auto;
+  display: flex; flex-direction: column;
+}
+/* ⚠️ 卡片圆角取 **12px**（方案一小样值）：整张卡是侧栏内的大点击目标，
+     r20 的菜单卡档在 240 窄栏里过圆；r12 与侧栏行 r8 同档而略重。 */
+#page-writing .w-sidebar button.w-card {
+  flex: 0 0 auto; width: 100%;
+  height: auto; min-height: 56px; padding: 10px 38px 10px 12px;
+  justify-content: flex-start; align-items: stretch; flex-direction: column; gap: 0;
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  text-align: left;
+}
+#page-writing .w-sidebar button.w-card:hover:not(:disabled) {
+  border-color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+#page-writing .w-work-item.active button.w-card { border-color: var(--dsw-alias-brand-primary); }
+#page-writing .w-card-title {
+  display: block; min-width: 0;
+  font: var(--dsw-font-s-strong-14); color: var(--dsw-alias-label-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#page-writing .w-card-meta {
+  display: block; margin-top: 4px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#page-writing .w-card-open {
+  display: block; margin-top: 4px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-brand-primary);
+}
+/* 卡片右上角「⋯」：绝对定位，不挤占主点击区 */
+#page-writing .w-work-item > .w-more {
+  position: absolute; top: 4px; right: 4px; z-index: 1;
+  width: 24px; height: 24px; padding: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+#page-writing .w-work-item > .w-more:hover:not(:disabled) { color: var(--dsw-alias-label-primary); }
+
+#page-writing .w-root {
+  flex: 0 0 auto; padding: 6px 8px;
+  font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary);
+  border-bottom: .5px solid var(--dsw-alias-border-l1); word-break: break-all;
+}
+#page-writing .w-tree { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 6px 12px; }
+#page-writing .w-tree-work {
+  padding: 5px 8px;
+  font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary);
+}
+#page-writing .w-empty { padding: 12px 8px; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); line-height: 1.7; }
+
+/* 文档行（2026-09-30 方案二：加高列表行，整行可点，右侧「⋯」）
+   悬停/选中用 dsh 侧栏 nav item 专属 token（--dsw-specific-sidebar-nav-item-hover / -active）
+   ⚠️ 高度取 **40px**：方案二小样行 padding 10px（12px 字 ≈ 40px 高）；
+      圆角 8px 参照 dsh Input 的 r8（侧栏无 radius token，§19.2）。 */
+#page-writing .w-doc {
+  display: flex; align-items: center; gap: 4px;
+  min-height: 40px; padding: 6px 8px; border-radius: 8px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary);
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#page-writing .w-doc:hover { background: var(--dsw-specific-sidebar-nav-item-hover); }
+#page-writing .w-doc.active {
+  background: var(--dsw-specific-sidebar-nav-item-active);
+  color: var(--dsw-alias-label-primary); font-weight: 500;
+}
+
+/* ── B3：条目操作（重命名 / 移动到… / 删除）+ 回收站 ───────────────────────
+   「⋯」与内联面板都沿用侧栏既有 token。 */
+#page-writing .w-doc-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#page-writing .w-doc .w-more {
+  flex: 0 0 auto; width: 24px; height: 24px; padding: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+#page-writing .w-doc .w-more:hover { color: var(--dsw-alias-label-primary); }
+/* ⑪ C11「仅云端」条目：本地**没有**这个文件（只在服务器上）⇒ 一眼可辨、但不能让人误以为"离线也能打开"。
+   名字仍走 flex:1 ⇒ 右侧的「↓ 云端」小字自然靠右（与「⋯」同一槽位）。 */
+#page-writing .w-doc-remote { opacity: .82; }
+#page-writing .w-doc-remote:hover { opacity: 1; }
+#page-writing .w-doc-remote .w-doc-name { font-style: italic; }
+#page-writing .w-doc-remote .w-note { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary); }
+#page-writing .w-card-cloud .w-card .w-card-title { opacity: .85; }
+/* 内联操作面板：不换模态、就地展开一行（重命名出输入框，移动出按钮） */
+#page-writing .w-ops { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 2px 8px 6px 12px; }
+#page-writing input.w-ops-input {
+  flex: 1 1 120px; min-width: 80px; height: 24px; padding: 0 8px;
+  background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary);
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  font: var(--dsw-font-xxs-12); outline: none;
+}
+#page-writing input.w-ops-input:focus { border-color: var(--dsw-alias-label-secondary); }
+#page-writing .w-sidebar button.w-danger { color: var(--dsw-alias-state-error-primary); }
+#page-writing .w-trash-tip { padding: 0 8px 8px; }
+
+/* 中栏：**单栏写作区**（B4 起；原"编辑块 + 预览块"并排已取消） */
+#page-writing .w-center { flex: 1 1 auto; display: flex; min-width: 0; min-height: 0; }
+#page-writing .w-editor-host {
+  position: relative;   /* D-6 的锁定覆盖层 `.w-editor-empty` 要绝对定位盖在写作区上 */
+  flex: 1 1 auto; display: flex; min-width: 0;
+  background: var(--dsw-alias-bg-base);
+}
+
+/* 写作区内部（换实现时随块一起换）—— **纯文本** contentEditable：
+   `pre-wrap` 让字面 `\n` 直接成行（我们拦掉了 Enter 的默认 `<div>` 行为 ⇒ 正文里没有块元素）。
+   ⚠️ ③「排版 · 写作区」改的是 **inline 样式**（writing.js 的 applyEditorTypography）：
+      字号 / 字体族 / 行高 / 字间距 / max-width(行宽) + margin auto(居中) —— 都落在 `.w-editor` 上；
+      不设（默认）时**不留 inline** ⇒ 下面这套值就是原行为。
+   ⚠️ 行宽为什么用 **em** 不用 `ch`：`ch` 是 "0" 的宽度，等宽字体下 ≈0.6em，
+      而中文全角字宽 ≈1em ⇒ 用 ch 会**低估**每行汉字数（实测见报告）。 */
+#page-writing .w-editor {
+  flex: 1 1 auto; width: 100%; box-sizing: border-box;
+  border: 0; outline: none;
+  padding: 12px 14px;
+  white-space: pre-wrap;    /* 🔴 字面换行 + 连续空格原样显示（纯文本写作区的前提） */
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  /* 默认字体 = **楷体**（2026-09-27 用户习惯字体）。这里的值只在"设置应用之前"的首屏生效 ——
+     之后由 writing.js 的 applyEditorTypography **显式写 inline**。
+     ⚠️ 改字体栈要**两处一起改**：本行 + writing.js 的 `FONT_STACKS.kai`。 */
+  font-family: "KaiTi", "楷体", "Kaiti SC", "STKaiti", "Kaiti TC", "AR PL UKai CN", "SimSun", serif;
+  font-size: var(--dsh-content-font-size, 14px);
+  line-height: var(--dsw-font-markdown-base-line-height);
+  color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base);
+  caret-color: var(--dsw-alias-label-primary);
+}
+/* 占位提示：contentEditable **没有** ::placeholder ⇒ 用 `data-empty` 标记 + `:before`
+   （不能用 `:empty`：光标进过之后浏览器常留一个空 `<br>`，`:empty` 会失效） */
+#page-writing .w-editor[data-empty="1"]::before {
+  content: attr(data-placeholder);
+  color: var(--dsw-alias-label-dimmed);
+  pointer-events: none;
+}
+
+/* ── 🔴 D-6：无归属时的「写作区锁定」覆盖层 ──────────────────────────────────
+   规则：**没有文档（或没有工作区）就不让写** —— 理由写在 shell.html 那段注释里：
+   没选文档时内容没有保存目标，自动保存与草稿兜底都会静默跳过 ⇒ 丢字。
+   这里只是把那个非法状态**显式化**：盖住写作区 + 说清原因 + 给一条新建入口。 */
+#page-writing .w-editor-empty {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 24px; text-align: center;
+  background: var(--dsw-alias-bg-base);   /* 盖住锁定后的空写作区（否则还看得见占位文案） */
+}
+#page-writing .w-editor-empty-title {
+  font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-secondary);
+}
+#page-writing .w-editor-empty-hint {
+  max-width: 420px; font-size: 12px; line-height: 1.7; color: var(--dsw-alias-label-tertiary);
+}
+/* 锁定态：光标改成"不可编辑"的语义，且**不再显示**"在此写正文…"（那句话会诱导输入） */
+#page-writing .w-editor-locked { cursor: not-allowed; }
+#page-writing .w-editor-locked[data-empty="1"]::before { content: none; }
+
+/* ── ③ 排版 · 写作区配色预设（`[data-typo-color]` 挂在 `#page-writing` 上）─────────
+   ⚠️ 预设值**写死字面值**（不新造 token）；默认档 = **不加该属性** ⇒ 原样走 `--dsw-*` 与
+      浏览器默认的光标/选区 ⇒ **默认观感一字不变**。
+   · 米白底（sepia）= 纸书/长时间码字；· 淡绿底（green）= 低对比护眼。
+   （宿主底色一并改：设了行宽后两侧留白也应是同色，否则会"镶一条边框"。） */
+#page-writing[data-typo-color="sepia"] .w-editor-host { background: #f7f1e3; }
+#page-writing[data-typo-color="sepia"] .w-editor {
+  background: #f7f1e3; color: #3a3226; caret-color: #8a6d3b;
+}
+#page-writing[data-typo-color="sepia"] .w-editor::selection { background: #e8dcc0; color: #3a3226; }
+
+#page-writing[data-typo-color="green"] .w-editor-host { background: #e6f0e4; }
+#page-writing[data-typo-color="green"] .w-editor {
+  background: #e6f0e4; color: #2e3a2c; caret-color: #4a6b45;
+}
+#page-writing[data-typo-color="green"] .w-editor::selection { background: #cbe0c5; color: #2e3a2c; }
+
+/* （原「预览块」样式整段已删 —— B4 起中栏只有写作区，`.w-preview` 不再存在） */
+
+/* 右栏：占位（阶段④ 记录板 / 文件预览）—— 宽度 288 是设计文档 §2.1 的定数 */
+#page-writing .w-right {
+  flex: 0 0 288px; padding: 12px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-specific-sidebar-fill);
+  border-left: .5px solid var(--dsw-alias-border-l1);
+  /* ⑥ B5：右栏装的是校对面板（列表要能自己滚）⇒ 这一列必须是可伸缩的 flex 列 */
+  display: flex; flex-direction: column; min-height: 0;
+}
+
+/* ══ ⑥ B5：AI 校对的正文高亮（CSS Highlight API · `::highlight()`）══════════════
+   🔑 为什么走这条路（用户 2026-09-28 拍）：`::highlight()` **只画不碰 DOM** ——
+      正文节点、`getText()`（= `domToText`）的输出、以及落盘的 .md **全部一字不变**。
+      这正是 B4 立下的"整篇一个文本流、不做块模型"所要求的；插 `<mark>` 那条路会污染文本流。
+   三档严重度三色；**颜色写死字面值**（与 sepia/green 预设同口径：不新造 token，§19.2）。
+   ⚠️ 这两组选择器必须**顶格写**（`::highlight()` 不能挂在祖先选择器下）。 */
+::highlight(wc-must) {
+  background-color: rgba(220, 38, 38, .16);
+  text-decoration: underline wavy rgba(220, 38, 38, .65);
+}
+::highlight(wc-should) {
+  background-color: rgba(217, 119, 6, .16);
+  text-decoration: underline wavy rgba(217, 119, 6, .6);
+}
+::highlight(wc-nice) {
+  background-color: rgba(37, 99, 235, .13);
+  text-decoration: underline wavy rgba(37, 99, 235, .5);
+}
+
+/* ── ⑥ B5 校对面板（右栏）──────────────────────────────────────────────── */
+#page-writing .w-proof { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; gap: 6px; }
+#page-writing .w-proof-head { flex: 0 0 auto; display: flex; align-items: baseline; gap: 6px; }
+#page-writing .w-proof-status { flex: 0 0 auto; color: var(--dsw-alias-label-secondary); line-height: 1.6; }
+#page-writing .w-proof-acts { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 6px; }
+#page-writing .w-proof-list {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+#page-writing .w-proof-item {
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  cursor: pointer;
+}
+#page-writing .w-proof-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
+#page-writing .w-proof-item.is-active { border-color: var(--dsw-alias-brand-primary); }
+#page-writing .w-proof-item.is-failed { border-color: var(--dsw-alias-state-error-secondary); }
+#page-writing .w-proof-item-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#page-writing .w-proof-sev { flex: 0 0 auto; padding: 0 6px; border-radius: 6px; line-height: 16px; }
+#page-writing .w-proof-sev.is-must { background: rgba(220, 38, 38, .14); color: #b91c1c; }
+#page-writing .w-proof-sev.is-should { background: rgba(217, 119, 6, .14); color: #b45309; }
+#page-writing .w-proof-sev.is-nice { background: rgba(37, 99, 235, .12); color: #1d4ed8; }
+#page-writing .w-proof-diff { min-width: 0; }
+#page-writing .w-proof-orig { color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
+#page-writing .w-proof-arrow { color: var(--dsw-alias-label-tertiary); }
+#page-writing .w-proof-sug { color: var(--dsw-alias-label-primary); font-weight: 600; }
+#page-writing .w-proof-reason { margin-top: 2px; color: var(--dsw-alias-label-tertiary); line-height: 1.6; }
+#page-writing .w-proof-fail { margin-top: 2px; color: var(--dsw-alias-state-error-primary); line-height: 1.6; }
+#page-writing .w-proof-foot { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary); line-height: 1.6; }
+#page-writing .w-proof-todo {
+  flex: 0 0 auto; margin-top: 8px; padding-top: 6px;
+  border-top: .5px solid var(--dsw-alias-border-l1);
+}
+/* 面板里的按钮走 .sm 档（列表行里 h36 太大）；选择器带 `button.` 的权重同左栏那条 */
+#page-writing .w-proof button.w-mini {
+  flex: 0 0 auto; height: 24px; padding: 0 10px; border-radius: 12px;
+  font-size: 12px; line-height: 18px;
+}
+
+/* ══ ⑥ CR-6 分栏：左栏 / 右栏改「浮层」 ══════════════════════════════════════
+   🔑 **DOM 结构一点没动** —— 只是换定位（常驻 flex 项 → absolute 浮层）。所以
+      `renderSidebar()` 以及它内部的全部事件绑定（含 B3 的 ⋯ 内联面板）**一行都不用改**。
+   ⚠️ `.w-sidebar` / `.w-right` 自带 `display:flex`，会盖掉 `[hidden]` 的 `display:none`
+      ⇒ 必须显式补一条（与本文件顶部 `#page-writing[hidden]` 是同一类"权重打架"问题）。
+   ⚠️ 浮层挂在 `.w-body` 内，而 `#page-writing .w-body` 自己就是 `position:relative`（见本文件
+      「主体三栏」那条）⇒ 不会盖住顶部工具栏与底部状态栏，那两处操作仍可直接点。 */
+#w-main.split .w-sidebar {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 20;
+  width: 280px;   /* 比常驻时(240)宽一点：改成"用完即收"，信息密度优先 */
+  border-right: .5px solid var(--dsw-alias-border-l1);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+}
+#w-main.split .w-right {
+  position: absolute; right: 0; top: 0; bottom: 0; z-index: 20;
+  /* 🔴 `width` 必须显式给：绝对定位下 `flex: 0 0 288px` 的 flex-basis **完全失效**
+     （absolute 子元素不是 flex item）⇒ 只给 right:0 的话宽度会收缩成内容宽（占位文案那么窄）。
+     288 保持常驻时的定数（设计文档 §2.1）。 */
+  width: 288px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+}
+#w-main.split .w-sidebar[hidden],
+#w-main.split .w-right[hidden] { display: none; }
+
+/* ── 状态栏 ───────────────────────────────────────────────────────────── */
+#page-writing .w-statusbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+  padding: 6px 10px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-1);
+  border-top: .5px solid var(--dsw-alias-border-l1);
+}
+#page-writing .w-statusbar .w-path {
+  margin-left: auto; color: var(--dsw-alias-label-tertiary); max-width: 46%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;
+}
+/* 状态栏文字必须**装得下**（1) 现在出错文案很长，2) 不溢出到窗口外）
+   —— flex 子项默认 min-width:auto 不会收缩 ⇒ 显式给 0 + 省略号。 */
+#page-writing .w-statusbar > * { min-width: 0; }
+#page-writing .w-statusbar #w-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-writing .w-save.state-saved { color: var(--dsw-alias-state-success-primary); }
+#page-writing .w-save.state-dirty { color: var(--dsw-alias-state-warn-primary); }
+#page-writing .w-save.state-saving { color: var(--dsw-alias-label-secondary); }
+#page-writing .w-save.state-error { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
+
+/* ── 启动横幅：「上次有内容没保存成功」（本轮）───────────────────────────────
+   🔴 **非阻塞**（本轮要求）：这是一个 in-flow 的块，**不是模态** —— 不挡启动、不挡任何操作、可关闭。
+   （关窗瞬间弹模态会把退出卡住 ⇒ 那种不做；保存失败的提示改在**下次启动**给。）
+   状态色一律用 dsw 已有的 state 系列 token（**不新造色**，§19.2）：
+     · 强调条 / 标题 → --dsw-alias-state-error-primary（与状态栏「✗ 保存失败」同一个 token）
+     · 描边         → --dsw-alias-state-error-secondary
+     · 底色 / 正文  → --dsw-alias-bg-layer-1 / --dsw-alias-label-secondary */
+#page-writing .w-banner {
+  flex: 0 0 auto;
+  margin: 6px 8px 0;
+  padding: 8px 10px;
+  border: .5px solid var(--dsw-alias-state-error-secondary);
+  border-left: 3px solid var(--dsw-alias-state-error-primary); /* ⚠️ 3px 为推断（强调条，无 spacing token，§19.2） */
+  border-radius: 12px;                                          /* ⚠️ 12px 为推断（同 .w-ws-pop 的小浮层档，§19.2 无 radius token） */
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12); line-height: 1.7;
+}
+#page-writing .w-banner[hidden] { display: none; }
+#page-writing .w-banner-head { display: flex; align-items: flex-start; gap: 6px; }
+#page-writing .w-banner-title {
+  flex: 1 1 auto; min-width: 0;
+  font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-state-error-primary);
+}
+/* 长路径 / 长 errno 文案必须**装得下**：换行 + 滚动，不撑宽页面 */
+#page-writing .w-banner-list {
+  margin-top: 4px; max-height: 22vh; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+#page-writing .w-banner-note {
+  margin-top: 4px; color: var(--dsw-alias-label-tertiary);
+  white-space: pre-wrap; word-break: break-word;
+}
+#page-writing .w-banner-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+/* 横幅里的按钮取 dsh Button **.sm 档**（h28 / r14 / 12·18；36 的默认档在提示条里过大） */
+#page-writing .w-banner button { height: 28px; padding: 0 10px; border-radius: 14px; font-size: 12px; line-height: 18px; }
+#page-writing .w-banner button.w-mini {
+  height: 24px; padding: 0 8px; border-radius: 8px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+}
+#page-writing .w-banner button.w-mini:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+/* ⚠️ `#page-writing button { display:inline-flex }` 会盖掉 `hidden` 属性的 UA `display:none`
+   ⇒ 「没有草稿时隐藏『重试保存』/『打开草稿』」这条必须显式补回来 */
+#page-writing .w-banner button[hidden] { display: none; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑤ 「设置」弹层（**壳层级** · 本轮新增）
+   —— 挂在 body 下（不在 #page-writing 里）⇒ 从 [DSH] / [写作] 任一页都能打开，
+      且 `position: fixed` ⇒ **不占三栏空间**。故这里用 `.s-*` 选择器，不套 `#page-writing`。
+
+   形态照 §19：
+     · 卡片 = 内核 **Modal** 档：`r24` + `--dsw-elevation-prominent`（`writing.css:195-202` 同款）
+     · 遮罩 = `--dsw-alias-bg-mask-1` + `--dsw-mask-blur`（token 出处 `dsw-tokens.css:99 / :191`）
+     · 组件档位照**已核实**的实测值（§19.7）：Input `h32 / r8 / border .5px`、
+       Button `.sm` `h28 / r14 / 12·18`、Tag `r999 / 11·17 / 500`
+     · 圆角 / 间距**无 token** ⇒ 照组件实测值写死（§19.2），每处标注出处
+   ══════════════════════════════════════════════════════════════════════════ */
+.s-modal {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--dsw-alias-bg-mask-1);
+  backdrop-filter: var(--dsw-mask-blur);
+  -webkit-backdrop-filter: var(--dsw-mask-blur);
+}
+.s-modal[hidden] { display: none; }
+.s-card {
+  display: flex; flex-direction: column;
+  width: 640px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
+  /* 圆角 24px = 内核 Modal 卡档（实测字面值）；阴影走 elevation token */
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 24px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-prominent);
+  font-family: var(--dsw-font-family); color: var(--dsw-alias-label-primary);
+}
+.s-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+.s-title { flex: 1 1 auto; min-width: 0; font: var(--dsw-font-s-strong-14); }
+.s-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  padding: 0 12px 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+/* 分组卡：r12 取 HoverCard 档（小浮层；容器里再套 r24 会过度圆） */
+.s-group {
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  padding: 8px 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.s-group-title {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary);
+}
+.s-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.s-row:last-child { margin-bottom: 0; }
+/* ⑨ 发送（诉求预设，2026-09-28）：需要**多行**的设置行。
+   ⚠️ 不能塞进 .s-row —— 那是 `align-items:center` 的单行 flex，textarea 会被压成一条线。 */
+.s-row-col { display: flex; flex-direction: column; align-items: stretch; gap: 6px; margin-bottom: 6px; }
+.s-row-col textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 72px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-primary);
+}
+.s-label { flex: 0 0 auto; min-width: 108px; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary); }
+.s-val { flex: 1 1 auto; min-width: 0; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); }
+.s-hint {
+  margin-top: 4px;
+  font: var(--dsw-font-xxxs-11); line-height: 1.7;
+  color: var(--dsw-alias-label-tertiary);
+}
+.s-hint code {
+  padding: 1px 4px; border-radius: 4px;   /* ⚠️ 1px 4px / r4 为推断（同 writing.css 的行内 code） */
+  background: var(--dsw-alias-markdown-inline-code);
+}
+.s-warn { color: var(--dsw-alias-state-warn-primary); }
+/* 输入框 = dsh Input .wrap（h32 / pad 0 8 / border .5px / r8；见 writing.css:90-104 同款） */
+.s-modal input[type="number"],
+.s-modal input[type="text"] {
+  box-sizing: border-box; height: 32px; width: 116px; min-width: 0;
+  padding: 0 8px;
+  border: .5px solid var(--dsw-alias-border-l4); border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+.s-modal input[type="number"]:focus,
+.s-modal input[type="text"]:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+.s-modal input.s-wide { flex: 1 1 auto; width: auto; }
+/* 下拉 = 与 Input 同档（h32 / pad 0 6 / border .5px / r8；同 writing.css 的 `#page-writing select`） */
+.s-modal select {
+  box-sizing: border-box; height: 32px; min-width: 0;
+  padding: 0 6px;
+  border: .5px solid var(--dsw-alias-border-l4); border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-family: var(--dsw-font-family); font-size: 14px; line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+.s-modal select:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+/* 排版组的预设说明是多行文本（writing.js 用 \n 拼）⇒ 需要 pre-line 才会换行 */
+#s-typo-preset-note { white-space: pre-line; }
+/* 按钮 = dsh Button **.sm 档**（h28 / r14 / pad 0 10 / 12·18） */
+.s-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  height: 28px; padding: 0 10px; border: 0; border-radius: 14px;
+  font-family: var(--dsw-font-family); font-size: 12px; line-height: 18px; font-weight: 400;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-button-tool-bar-fill);
+  cursor: pointer; white-space: nowrap;
+}
+.s-btn:hover:not(:disabled) { background: var(--dsw-alias-button-tool-bar-hover); }
+/* 标签 = dsh Tag（pad 1px 8px / **r999** / 11·17 / 500）—— 用 warn tone 提示"重启生效" */
+.s-tag {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 999px;
+  font-family: var(--dsw-font-family); font-size: 11px; line-height: 17px; font-weight: 500;
+  color: var(--dsw-alias-state-warn-label);
+  background: var(--dsw-alias-state-warn-tertiary);
+  white-space: nowrap;
+}
+.s-themes { display: flex; flex-wrap: wrap; gap: 12px; }
+.s-radio {
+  display: inline-flex; align-items: center; gap: 4px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary);
+  cursor: pointer; white-space: nowrap;
+}
+
+.w-goal-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.w-goal-chip.is-done {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.w-goal-chip[hidden] {
+  display: none;
+}

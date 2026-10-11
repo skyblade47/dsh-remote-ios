@@ -2,10 +2,10 @@ import Foundation
 
 enum AssetManifest {
     static let names: Set<String> = [
-        "dsw-tokens.css", "writing.css",
+        "dsw-tokens.css", "writing.css", "ipad.css",
         "send.js", "watch.js", "editor-plain.js", "proofread.js",
-        "sync-core.js", "writing.js", "send-net.js",
-        "proofread-net.js", "sync-net.js"
+        "sync-core.js", "writing-count-core.js", "writing.js", "send-net.js",
+        "proofread-net.js", "sync-net.js", "ipad.js"
     ]
 
     static func isAsset(_ name: String) -> Bool {

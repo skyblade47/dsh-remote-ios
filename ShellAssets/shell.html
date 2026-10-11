@@ -1,0 +1,916 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>写作客户端</title>
+<!-- ⚠️ 加载顺序：dsw-tokens.css 必须在 writing.css 之前（写作页要能覆盖 token） -->
+<link rel="stylesheet" href="/__shell__/dsw-tokens.css" />
+<link rel="stylesheet" href="/__shell__/writing.css" />
+<style>
+  /* 壳层 chrome（本页自己的 UI，与 iframe 内无关）。
+     颜色/字号全部走 --dsw-*（dsw-tokens.css）；圆角/间距无 token ⇒ 照内核组件实测值写死，见各条注释。 */
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    font: var(--dsw-font-s-14);
+    color: var(--dsw-alias-label-primary);
+    background: var(--dsw-alias-bg-base);
+  }
+  /* 顶部标签栏：dsh dockkit Tab Strip 观感
+     出处：dsh-web-frontend/dist/assets/index-DPX2bQLo.css（发布包，minified）
+           本地美化副本 _tabStrip_17p4l_156 / _tab_17p4l_156 / _tabActive_17p4l_243 */
+  header {
+    flex: 0 0 auto; height: 40px; display: flex; align-items: center; gap: 4px;
+    padding: 0 10px;
+    background: var(--dsw-alias-bg-layer-1);
+    border-bottom: .5px solid var(--dsw-alias-border-l1);
+  }
+  .tab {
+    display: flex; align-items: center;
+    /* _tab_: h28 / pad 0 10 / r12 / 13px / lh 1 —— 实测字面值 */
+    height: 28px; padding: 0 10px; border: 0; border-radius: 12px;
+    font-family: var(--dsw-font-family);
+    font-size: var(--dsh-content-font-size-secondary, 13px);
+    line-height: 1;
+    color: var(--dsw-alias-label-secondary);
+    background: transparent; cursor: pointer;
+    white-space: nowrap; user-select: none;
+  }
+  /* _tab_:hover —— 出处同上 */
+  .tab:hover { background: var(--dsw-alias-interactive-bg-hover); }
+  /* _tabActive_ —— 出处同上 */
+  .tab.active { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-markdown-tag); }
+  /* 「⚙ 设置」入口：与 .tab 同档观感（h28 / r12 / 13px），但**常驻**（不参与"选中"）。
+     它只在壳层 chrome 里，故与 .tab 并列写在 inline <style>（见文件头注释）。 */
+  .gear {
+    display: flex; align-items: center; gap: 4px; margin-left: 4px;
+    height: 28px; padding: 0 10px; border: 0; border-radius: 12px;
+    font-family: var(--dsw-font-family);
+    font-size: var(--dsh-content-font-size-secondary, 13px);
+    line-height: 1;
+    color: var(--dsw-alias-label-secondary);
+    background: transparent; cursor: pointer;
+    white-space: nowrap; user-select: none;
+  }
+  .gear:hover { background: var(--dsw-alias-interactive-bg-hover); }
+  .diag { margin-left: auto; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); }
+  main { flex: 1 1 auto; position: relative; min-height: 0; }
+  .page { position: absolute; inset: 0; }
+  .page[hidden] { display: none; }
+  #dsh-frame { display: block; width: 100%; height: 100%; border: 0; }
+
+  /* ── ⑥ CR-6 分栏模式 ────────────────────────────────────────────────────────
+     🔑 关键取舍：两个页面**本来就是 `<main>` 下的兄弟节点**（常驻、只用 `hidden` 显隐）
+        ⇒ 分栏 = 都不加 `hidden` + 用定位分成左右两半。**iframe 一步都没搬** ——
+        而在 DOM 里搬动 iframe 会触发重载，对话现场就没了。
+     比例走 CSS 变量 `--w-split-pct`（由 writing.js 的 renderSplit 写在 #w-main 上）：
+        用**百分比**而不是像素 ⇒ 窗口 resize **不需要任何重算**。 */
+  #w-main.split #page-writing { right: auto; width: calc(var(--w-split-pct, 50%) - 4px); }
+  #w-main.split #page-dsh { left: calc(var(--w-split-pct, 50%) + 4px); }
+  .w-split-handle { display: none; }
+  #w-main.split .w-split-handle {
+    display: block; position: absolute; top: 0; bottom: 0; z-index: 5;
+    left: calc(var(--w-split-pct, 50%) - 4px); width: 8px;
+    cursor: col-resize; background: transparent;
+  }
+  #w-main.split .w-split-handle:hover,
+  .w-split-handle.dragging { background: var(--dsw-alias-interactive-bg-hover); }
+  /* 🔴 拖拽期间给对话区盖上"不吃鼠标"：否则指针一进 iframe 就被它接管（选中文字 / 触发内部滚动），
+     分割条随即收不到 pointermove ⇒ 拖拽当场断掉。这是本批唯一必须真机反复试的交互点。 */
+  #page-dsh.no-pointer { pointer-events: none; }
+</style>
+</head>
+<body>
+  <header>
+    <button class="tab active" data-page="dsh">[DSH]</button>
+    <button class="tab" data-page="writing">[写作]</button>
+    <!-- ⑤ 「设置」入口：**壳层级**（标签栏上一颗齿轮）⇒ 从 [DSH] / [写作] 任一页都能开；
+         弹层是 `position: fixed` 的模态，**不占三栏空间**（见下面的 #s-modal）。 -->
+    <button class="gear" id="shell-settings" aria-haspopup="dialog"
+            title="设置：工作区 / 编辑器 / 排版 / 番茄钟 / 外观 / 草稿 / 远程">⚙ 设置</button>
+    <span class="diag" id="diag"></span>
+  </header>
+
+  <main id="w-main">
+    <!-- [DSH]：iframe 指向同源 `/app#/`（**控制台 SPA 入口**；内核原生前端在 `/index.html`，
+         见「AI 对话」页）常驻不销毁。
+         ⚠️ 不能指 `/`：`/` 在网关侧只是 302 到 `/app#/`（根路径不是控制台入口），指它只会多一跳；
+         指 `/app`（不带 `#/`）也一样能到（app.js 的 parseHash 默认 /dashboard），带 `#/` 是为与
+         登录页跳转、管理员页导航的写法保持一致。 -->
+    <section class="page" id="page-dsh">
+      <iframe id="dsh-frame" src="/app#/"></iframe>
+    </section>
+
+    <!-- [写作]：阶段② v1 —— 左栏文档树 / 中栏 编辑块+预览块 / 右栏占位（阶段④）/ 顶部工具栏 / 底部状态栏 -->
+    <section class="page" id="page-writing" hidden>
+      <!-- 顶部工具栏 -->
+      <div class="w-toolbar">
+        <!-- ⑥ CR-6 分栏：开关 + 两个「浮层入口」（后两个只在分栏时出现 —— 单页模式下左栏/右栏本来就在）
+             为什么用按钮而不是悬浮图标：工具栏是这一页唯一的常驻操作区，放这里不需要新的布局位置。 -->
+        <button id="w-split" title="对话页与写作页并排显示；中间的分割条可拖动改比例，双击复位 50/50">⇤⇥ 分栏</button>
+        <button id="w-docs" title="作品 / 文档（分栏时收进浮层）" hidden>作品/文档</button>
+        <button id="w-board" title="记录板（分栏时收进浮层）" hidden>记录板</button>
+        <!-- ⚠️ 这里**不要**再加 `.w-sep`：它是 `flex:1 1 auto` 的弹性间隔，工具栏里本来只有
+             「发送段 / 番茄钟」之间那一个；多插一个会把弹性空间平分 ⇒ 单页模式的铺排就变了。 -->
+        <button id="w-save" title="Ctrl/Cmd+S">保存</button>
+        <!-- ⑤ 发送给任务中心（阶段⑤）：把正文整篇内联进消息，向任务中心投一条点名「创作教练」的请求。
+             「发送选中段」无选区时置灰（由 send-net.js 维护）。 -->
+        <button id="w-send-full" title="把当前文档全文内联进消息，发送给任务中心">发送全文</button>
+        <button id="w-send-sel" title="把当前文档选中段内联进消息，发送给任务中心" disabled>发送选中段</button>
+        <!-- C12 「提交给 agent」：客户端区（`客户端区/正文/…`）与 agent 工作区（`写作训练/草稿/…`）
+             已分离 —— 点它才把当前稿**复制**进 `写作训练/草稿/`，agent 才看得见（源保留）。
+             冲突（409）复用既有的 C5 三选（覆盖 / 另存为 / 取消），见 send-net.js 的 submitCurrent()。 -->
+        <button id="w-submit" title="把当前文档提交给 agent：从「客户端区」复制到「写作训练/草稿」，agent 就能看到">提交给 agent</button>
+        <!-- B5 / CR-4①：AI 校对 —— 把正文 + 固定提示词发给「校对助手」会话，结果出在右栏；
+             🔴 只给建议，正文一字不改（点某一条的「应用」才改那一处）。 -->
+        <button id="w-proof" title="把正文发给校对助手，只给建议、不改正文；结果出在右栏">✎ 校对</button>
+        <span class="w-note" id="w-autosave">✓ 自动保存「开」</span>
+        <span class="w-sep"></span>
+        <div class="w-pomo">
+          <span>🍅</span>
+          <span id="w-pomo-mode">专注</span>
+          <span id="w-pomo-time">25:00</span>
+          <button id="w-pomo-toggle">开始</button>
+          <button id="w-pomo-reset">重置</button>
+          <span class="w-note">专注</span><input id="w-focus-min" type="number" min="1" max="180" value="25" />
+          <span class="w-note">休息</span><input id="w-break-min" type="number" min="1" max="60" value="5" />
+          <span class="w-note" id="w-pomo-note"></span>
+        </div>
+      </div>
+
+      <!-- 「上次有内容没保存成功」横幅（本轮）—— 🔴 **非阻塞**：就是一个 in-flow 的块，
+           不是模态（关窗瞬间弹模态会卡住退出；启动时也不挡任何操作），可「知道了」关掉。
+           数据来自 ① 上次会话记录（userData/last-session.json）② 未落正式盘的草稿
+           （listPendingDrafts）。样式见 writing.css（--dsw-* 的 state 系列）。 -->
+      <div class="w-banner" id="w-banner" role="status" hidden>
+        <div class="w-banner-head">
+          <span class="w-banner-title" id="w-banner-title"></span>
+          <button id="w-banner-close" class="w-mini" title="关闭这条提示（草稿仍会保留，下次启动再提示）">✕</button>
+        </div>
+        <div class="w-banner-list" id="w-banner-list"></div>
+        <div class="w-banner-note" id="w-banner-note"></div>
+        <div class="w-banner-actions">
+          <button id="w-banner-retry">重试保存（把草稿写回工作区）</button>
+          <button id="w-banner-open">打开草稿看看</button>
+          <button id="w-banner-dismiss" class="w-mini">知道了</button>
+        </div>
+      </div>
+
+      <!-- ⑪ C11 多端文档同步：与上面「草稿横幅」**刻意分成两条** —— 它要的是**另一组动作**
+           （用远端 / 保留本地 / 移入回收站）；复用草稿横幅那几个按钮会把两件事的语义搅在一起。
+           非模态、可关；🔴 文案一律先说清"**本地的不会被自动动**"（设计铁律：永不自动覆盖、永不静默删）。
+           样式直接复用 .w-banner（见 writing.css）。渲染见 writing.js 的 renderSyncBanner()。 -->
+      <div class="w-banner" id="w-sync-banner" role="status" hidden>
+        <div class="w-banner-head">
+          <span class="w-banner-title" id="w-sync-title"></span>
+          <button id="w-sync-close" class="w-mini" title="先不管：本地内容不受影响，下次打开这篇还会再提示">✕</button>
+        </div>
+        <div class="w-banner-note" id="w-sync-note"></div>
+        <div class="w-banner-actions">
+          <button id="w-sync-reupload">重新上传到服务器</button>
+          <button id="w-sync-take-remote">用远端覆盖本地</button>
+          <button id="w-sync-keep-local">保留本地</button>
+          <button id="w-sync-trash-local" class="w-mini">把本地这份移入回收站</button>
+        </div>
+      </div>
+
+      <!-- 三栏 -->
+      <div class="w-body">
+        <!-- 左栏：常驻「工作区：<路径> ▾」+ 常驻可操作提示 + 三层
+             （① 空态：选/建工作区 ② 作品卡片墙 ③ 作品内文档树）。同一时间只显示一「层」，见 writing.js renderSidebar() -->
+        <aside class="w-sidebar" id="w-sidebar">
+          <!-- ① 常驻：当前工作区 + 「▾ 切换」（有工作区时才显示；没有工作区时由下面的空态块承担同一组动作） -->
+          <div class="w-wsbar" id="w-ws-bar" hidden>
+            <div class="w-wsbar-head">
+              <span class="w-panel-title" id="w-root-label">工作区</span>
+              <!-- B3：回收站入口放**常驻**的工作区栏里 ⇒ 卡片墙 / 作品内 / 回收站三视图都能一键进出 -->
+              <button id="w-trash-open" class="w-mini" title="回收站：删除的作品/文档先放这里，可恢复或彻底删除">回收站</button>
+              <button id="w-ws-menu" class="w-mini" aria-haspopup="true" aria-expanded="false"
+                      title="修改 / 切换工作区路径">▾ 切换</button>
+            </div>
+            <div class="w-ws-pop" id="w-ws-pop" hidden>
+              <button id="w-ws-switch" class="w-block">切换到已有目录…</button>
+              <div class="w-row">
+                <input id="w-ws-name" aria-label="新工作区名" placeholder="新工作区名" />
+                <button id="w-ws-create">新建工作区</button>
+              </div>
+              <button id="w-ws-create-here" class="w-block">新建到指定位置…</button>
+              <div class="w-note w-ws-pop-note">
+                切换前会先把当前文档的未保存修改写盘，并弹一次确认；<b>旧工作区的 md 一律不动</b>（只是不再指向它）。
+              </div>
+            </div>
+          </div>
+
+          <!-- 常驻提示（可操作文案）：**不随三层切换消失**（切换/新建工作区失败时也能看到），并自带直达按钮 -->
+          <div class="w-hint" id="w-empty-hint" hidden>
+            <div class="w-hint-text" id="w-empty-hint-text"></div>
+            <div class="w-hint-actions">
+              <button id="w-hint-create" class="w-mini">用应用内「新建工作区」</button>
+              <button id="w-hint-close" class="w-mini">关闭</button>
+            </div>
+          </div>
+
+          <!-- ② 空态：尚未选择工作区 —— 除「选择已有目录」外，再由壳层自己「新建工作区」
+               （Windows 原生对话框的"新建文件夹"在本机会直接报没有权限 ⇒ 不能依赖它） -->
+          <div class="w-side" id="w-side-empty" hidden>
+            <div class="w-empty-title">尚未选择工作区</div>
+            <div class="w-side-actions">
+              <button id="w-pick-root" class="w-block">选择已有目录…</button>
+              <div class="w-row">
+                <input id="w-new-root-name" aria-label="新工作区名" />
+                <button id="w-create-root">新建工作区</button>
+              </div>
+              <button id="w-create-root-here" class="w-block">新建到指定位置…</button>
+            </div>
+          </div>
+
+          <!-- ③ 作品卡片墙（顶层）：名字 + 章数 + 最后修改；点卡片进入作品 -->
+          <div class="w-side" id="w-works-view" hidden>
+            <div class="w-panel-head">
+              <span class="w-panel-title">作品</span>
+              <button id="w-import-works" class="w-mini" title="导入作品与文档（复制，不移动）">导入</button>
+              <button id="w-refresh" class="w-mini">刷新</button>
+            </div>
+            <div class="w-side-actions">
+              <input id="w-works-search" placeholder="搜索作品…" />
+              <div class="w-row">
+                <input id="w-new-work-name" placeholder="新作品名（= 目录）" />
+                <button id="w-new-work">新建作品</button>
+              </div>
+            </div>
+            <div class="w-works-grid" id="w-works-grid"></div>
+          </div>
+
+          <!-- ④ 作品内：该作品的文档树 + 搜索 + 新建文档；左上角返回卡片墙 -->
+          <div class="w-side" id="w-tree-view" hidden>
+            <div class="w-panel-head">
+              <button id="w-back-works" class="w-mini">← 所有作品</button>
+              <span class="w-panel-title" id="w-tree-work-name"></span>
+              <button id="w-import-tree" class="w-mini" title="导入作品与文档（复制，不移动）">导入</button>
+            </div>
+            <div class="w-side-actions">
+              <input id="w-doc-search" placeholder="搜索文档…" />
+              <div class="w-row">
+                <input id="w-new-doc-name" placeholder="新文档名（.md）" />
+                <button id="w-new-doc">新建文档</button>
+              </div>
+            </div>
+            <div class="w-tree" id="w-tree"></div>
+          </div>
+
+          <!-- ⑤ 回收站（B3）：软删的条目都在这里 ⇒ 恢复 / 彻底删除。
+               入口是常驻工作区栏上的「回收站」按钮（三个左栏视图都能进）。 -->
+          <div class="w-side" id="w-trash-view" hidden>
+            <div class="w-panel-head">
+              <button id="w-trash-back" class="w-mini">← 返回</button>
+              <span class="w-panel-title">回收站</span>
+              <span class="w-note" id="w-trash-count"></span>
+            </div>
+            <div class="w-note w-trash-tip">
+              删除的作品/文档都在这里（进回收站不等于删除），可以「恢复」回原位；
+              只有「彻底删除」才是真删，不可恢复。
+            </div>
+            <div class="w-tree" id="w-trash-list"></div>
+          </div>
+        </aside>
+
+        <!-- 中栏：**单栏写作区**（B4 / CR-3，2026-09-27 用户拍板）
+             🔴 形态（参考 ai-writing-coach 的写作区）：
+               · **只有写作区**，源码栏与预览栏的并排对照**已取消**；
+               · 正文是**纯文本**（contentEditable + pre-wrap）：不做 md 渲染、没有格式工具栏
+                 ⇒ 工作区里仍是 .md 文件，写作区把内容**原样显示**；
+               · **不用块模型**：整篇一个文本流，Enter = 换行。
+             占位提示走 `data-empty` + `:before`（contentEditable 没有 ::placeholder）。 -->
+        <div class="w-center">
+          <div class="w-editor-host">
+            <!-- 🔴 D-6（2026-09-28 用户实测）：**没有归属就不让写**。
+                 写作区是常开的，但没选文档时写进来的内容**没有保存目标** —— 自动保存（flush）与
+                 草稿兜底都会静默跳过，切文档时又被 `Editor.setValue()` 直接覆盖 ⇒ **丢字且无提示**。
+                 所以未选文档（或未选工作区）时用这层盖住写作区，并给一条新建入口。
+                 显隐与文案由 writing.js 的 `renderEditorState()` 统一控制，判据在 editor-plain.js 的 `lockState()`。 -->
+            <div class="w-editor-empty" id="w-editor-empty" hidden>
+              <div class="w-editor-empty-title" id="w-editor-empty-title"></div>
+              <div class="w-editor-empty-hint" id="w-editor-empty-hint"></div>
+              <button id="w-editor-newdoc" hidden>新建一篇（自动命名）</button>
+            </div>
+            <!-- EDITOR BLOCK：当前 = 纯文本所见即所得写作区（契约见 writing.js 顶部） -->
+            <div id="w-editor" class="w-editor" contenteditable="true" spellcheck="false"
+                 role="textbox" aria-multiline="true" aria-label="写作区"
+                 data-placeholder="在此写正文…"></div>
+          </div>
+        </div>
+
+        <!-- 右栏：⑥ B5 校对建议（列表 + 状态）。记录板 / 文件预览仍是阶段④ 占位。
+             高亮走 CSS Highlight API（`::highlight(wc-*)`，见 writing.css）⇒ 正文 DOM 与 .md 一字不动。 -->
+        <aside class="w-right" id="w-right">
+          <div class="w-proof">
+            <div class="w-proof-head">
+              <span class="w-panel-title">✎ 校对建议</span>
+              <span class="w-note" id="w-proof-count"></span>
+            </div>
+            <div class="w-proof-status" id="w-proof-status"></div>
+            <div class="w-proof-acts"><button id="w-proof-cancel" class="w-mini" hidden>取消</button></div>
+            <div class="w-proof-list" id="w-proof-list"></div>
+            <div class="w-proof-foot">只给建议，不改正文 —— 点某一条的「应用」才改那一处。</div>
+          </div>
+          <div class="w-proof-todo">记录板 / 文件预览 · 阶段④</div>
+        </aside>
+      </div>
+
+      <!-- 底部状态栏 -->
+      <div class="w-statusbar">
+        <span id="w-count">字数 0</span>
+        <span id="w-goal-chip" class="w-goal-chip" hidden></span>
+        <span class="w-save state-idle" id="w-status-save"></span>
+        <!-- 草稿占用（`#37` 之后）：`占用 MB / 上限 MB（N%）`；接近上限变色（见 writing.js 的 renderDraftsUsage） -->
+        <span class="w-note" id="w-drafts-usage" title="草稿目录占用 / 总容量上限"></span>
+        <!-- ⑪ C11 多端同步状态：`已同步 / 未同步（离线）/ 远端有更新 …`（见 writing.js 的 renderSyncState） -->
+        <span class="w-note" id="w-sync" title="与服务器的同步状态（只在打开文档后按需比对，不轮询）"></span>
+        <span class="w-note" id="w-msg"></span>
+        <span class="w-path" id="w-path">（未选择工作区）</span>
+      </div>
+
+      <!-- 导入作品与文档（应用内模态；`position: fixed` ⇒ 不参与三栏布局）
+           ⚠️ 文案如实写明：**复制，不移动**；只接受 .md；重名不覆盖（加后缀「 2」）。 -->
+      <div class="w-modal" id="w-import" hidden>
+        <div class="w-modal-card" role="dialog" aria-modal="true" aria-label="导入作品与文档">
+          <div class="w-modal-head">
+            <span class="w-modal-title">导入作品与文档</span>
+            <button id="w-import-close" class="w-mini">关闭</button>
+          </div>
+          <div class="w-modal-body">
+            <div class="w-note w-import-tip">
+              只接受 <b>.md</b>（大小写不敏感）；<b>复制，不移动源文件</b>；与目标已有文件重名时<b>不覆盖</b>，
+              自动加后缀「 2」「 3」…；非 md 与子目录会<b>跳过并列出</b>（导入文件夹时 <b>不递归</b>）。
+            </div>
+            <div class="w-row">
+              <span class="w-note">目标作品</span>
+              <select id="w-import-work"></select>
+            </div>
+            <div class="w-row">
+              <input id="w-import-newwork" placeholder="新作品名（选「＋ 新建作品…」时用）" />
+            </div>
+            <div class="w-row">
+              <button id="w-import-files">选择 .md 文件…</button>
+              <button id="w-import-dir">导入整个文件夹…</button>
+            </div>
+            <div class="w-note" id="w-import-note"></div>
+            <div class="w-import-result" id="w-import-result"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ⑤ 发送给任务中心（阶段⑤）—— 应用内模态（同导入模态：`position: fixed`，不占三栏布局）
+           ⚠️ 与既有功能**解耦**：本块 + 工具栏两个按钮 + send-net.js = 可整体拔掉，回到加本阶段之前。
+           首版「正文内联发送」：不做远端同步 ⇒ 不显示远端落点。
+           文案一律中文、不用 emoji；「取消」只关窗，不发请求、不写记录（无副作用）。 -->
+      <div class="w-modal" id="w-send" hidden>
+        <div class="w-modal-card" role="dialog" aria-modal="true" aria-label="发送给任务中心">
+          <div class="w-modal-head">
+            <span class="w-modal-title">发送给任务中心</span>
+            <button id="w-send-close" class="w-mini">关闭</button>
+          </div>
+          <div class="w-modal-body">
+            <div class="w-row"><span class="w-note">文档</span><span id="w-send-doc"></span></div>
+            <div class="w-row">
+              <span class="w-note">意图</span>
+              <select id="w-send-intent" aria-label="诉求（意图）">
+                <option value="错字/病句检查">错字/病句检查</option>
+                <option value="结构诊断">结构诊断</option>
+                <option value="续写">续写</option>
+                <option value="__other__">其他…</option>
+              </select>
+            </div>
+            <div class="w-row" id="w-send-other-row" hidden>
+              <span class="w-note">其他</span>
+              <input id="w-send-other" placeholder="请填写诉求" aria-label="其他诉求" />
+              <!-- ⑨ 2026-09-28：把手上这条诉求存进预设（用户常手填「成果」）—— 设置 › 发送 里可管理 -->
+              <button id="w-send-save-intent" type="button"
+                title="把这行诉求存进预设：下次直接在下拉里选（设置 › 发送 里可改可删）">＋ 存为常用</button>
+            </div>
+            <div class="w-row"><span class="w-note">范围</span><span id="w-send-scope"></span></div>
+            <!-- D-2：选区**已经捕获在内存里**，失焦/点别处都不会丢（浏览器不会为此再画高亮——
+                 那是 D-3，属原生行为不修）⇒ 这里用**文字指示**把"已捕获"讲清楚，并给一个清除入口。 -->
+            <div class="w-row" id="w-send-sel-row" hidden>
+              <span class="w-note">选区</span>
+              <span id="w-send-sel-info"></span>
+              <button id="w-send-sel-clear" class="w-mini" title="放弃已捕获的选区，改为发送全文">清除选区</button>
+            </div>
+            <!-- ⑩ C5（形态 B）：**需要用户拍板**的一行 ——
+                 ① 落盘冲突三选（覆盖 / 另存为 / 取消）；
+                 ② 落盘失败时的**显式出口**「改用内联发送」（fail-closed：**不自动降级**，只让用户手选）。
+                 三个按钮是**复用槽位**，由 send-net.js 的 askResolve() 填文案与回调。 -->
+            <div class="w-row" id="w-send-resolve" hidden>
+              <span class="w-note" id="w-send-resolve-msg"></span>
+              <button id="w-send-resolve-1" type="button" hidden></button>
+              <button id="w-send-resolve-2" type="button" hidden></button>
+              <button id="w-send-resolve-3" type="button" hidden></button>
+            </div>
+            <div class="w-import-result" id="w-send-preview" hidden></div>
+            <div class="w-note" id="w-send-note"></div>
+            <div class="w-row">
+              <button id="w-send-go">发送</button>
+              <button id="w-send-cancel" class="w-mini">取消</button>
+              <span class="w-note" id="w-send-progress"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ⑥ CR-6 分栏：两页之间的**拖拽分割条**。
+         ⚠️ 不用 `hidden` 属性控制显隐（`.page[hidden]` 的写法在这里会与 display 规则打架），
+            而是由 `#w-main.split` 决定 —— 见 writing.css 的分栏段。
+         位置由 CSS 变量 `--w-split-pct` 决定（由 writing.js 的 renderSplit 写在 #w-main 上）。 -->
+    <div class="w-split-handle" id="w-split-handle" title="拖动调整宽度 · 双击复位 50/50"></div>
+  </main>
+
+  <!-- ⑤ 「设置」弹层（**壳层级**：挂在 body 下、`position: fixed` ⇒ **不占三栏空间**；
+       从 [DSH] / [写作] 任一页都能打开）。形态照 §19：Modal 观感（r24 + elevation-prominent）
+       + 遮罩 `--dsw-alias-bg-mask-1` + `--dsw-mask-blur`。样式见 writing.css 末尾的 `.s-*` 段。
+       ⚠️ 每一项都**真正生效**：能立即生效的立即生效；「远程」两项在启动时解析 ⇒ 标「重启生效」。
+       ⚠️ 默认值与加这层设置前**逐项一致**（见 main.js 的 SETTINGS_DEFAULTS 注释）。
+       ⚠️ 「排版」只有**一组**（B4 起）：写作区（纯文本 contentEditable，字号/字体族/行高/字间距/行宽/配色）。
+          原「预览区」那一组已随单栏改造**下线并隐藏**（见下方注释）。 -->
+  <div class="s-modal" id="s-modal" hidden>
+    <div class="s-card" role="dialog" aria-modal="true" aria-label="设置">
+      <div class="s-head">
+        <span class="s-title">设置</span>
+        <button id="s-close" class="s-btn">关闭</button>
+      </div>
+      <div class="s-body">
+        <!-- ① 工作区：只读显示 + 「切换…」「新建…」「新建到指定位置…」= 复用既有 IPC 与既有流程 -->
+        <div class="s-group">
+          <div class="s-group-title">工作区</div>
+          <div class="s-row">
+            <span class="s-label">当前路径</span>
+            <span class="s-val" id="s-root">（未选择工作区）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">操作</span>
+            <button id="s-ws-switch" class="s-btn">切换…</button>
+            <button id="s-ws-create" class="s-btn">新建…</button>
+            <button id="s-ws-create-here" class="s-btn">新建到指定位置…</button>
+          </div>
+          <div class="s-row">
+            <span class="s-label">新工作区名</span>
+            <input id="s-ws-name" type="text" class="s-wide" aria-label="新工作区名" />
+          </div>
+          <div class="s-hint">
+            走<b>既有流程</b>：有未保存修改时先弹一次确认并写盘，<b>写盘失败即中止切换</b>；
+            <b>旧工作区的 md 一律不动</b>（只是不再指向它）。对应既有 IPC：
+            <code>wc:pick-root</code> / <code>wc:create-root</code> / <code>wc:pick-dir</code>。
+          </div>
+        </div>
+
+        <!-- ② 编辑器（非排版类） -->
+        <div class="s-group">
+          <div class="s-group-title">编辑器</div>
+          <div class="s-row">
+            <span class="s-label">自动保存去抖</span>
+            <input id="s-debounce" type="number" min="200" max="10000" step="50" aria-label="自动保存去抖（毫秒）" />
+            <span class="s-val">ms（停手这么久后自动落盘）· <b>立即生效</b>，200–10000</span>
+          </div>
+        </div>
+
+        <!-- ③ 排版（中文码字）—— B4 起只有**一组**：
+             写作区 = **纯文本 contentEditable** ⇒ 字号 / 字体族 / 行高 / 字间距 / 行宽 / 配色。
+             （原「预览区」那一组随单栏改造下线并隐藏 —— 中栏不再有"渲染结果"那一栏。） -->
+        <div class="s-group">
+          <div class="s-group-title">排版 · 一键预设</div>
+          <div class="s-row">
+            <span class="s-label">预设</span>
+            <button id="s-typo-default" class="s-btn">默认（= 现状）</button>
+            <button id="s-typo-comfort" class="s-btn">舒适（中文长文）</button>
+            <button id="s-typo-compact" class="s-btn">紧凑（快速核对）</button>
+          </div>
+          <div class="s-hint" id="s-typo-preset-note"></div>
+        </div>
+
+        <div class="s-group">
+          <div class="s-group-title">排版 · 写作区（唯一一栏）
+            <span class="s-val">纯文本 · 字号/字体族/行高/字间距/行宽/配色</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">字号</span>
+            <input id="s-fontsize" type="number" min="0" max="32" aria-label="编辑器字号（像素）" />
+            <span class="s-val">px · <b>立即生效</b>（0 = 跟随 [DSH] 字号轴；10–32，推荐 14–24）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">字体族</span>
+            <select id="s-typo-editor-ff" aria-label="写作区字体族">
+              <option value="kai">楷体（默认 · 中文小说手写感）</option>
+              <option value="serif">衬线（宋体系 · 书感偏"印刷"）</option>
+              <option value="sans">无衬线（雅黑/苹方 · 屏幕最清晰）</option>
+              <option value="mono">等宽（原默认 · 对齐感强，纯写作偏硬）</option>
+              <option value="dsh">跟随 [DSH] 正文字体</option>
+            </select>
+            <span class="s-val">中文优先的字体栈（详见本组脚注）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">行高</span>
+            <input id="s-typo-lineheight" type="number" min="0" max="2.4" step="0.05" aria-label="写作区行高（倍数）" />
+            <button id="s-typo-lh-recommend" class="s-btn">用推荐 1.9</button>
+            <span class="s-val">倍 · 0 = 跟随原 token；1.4–2.4，<b>中文舒服区 1.8–2.0（推荐）</b></span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">字间距</span>
+            <input id="s-typo-letterspacing" type="number" min="0" max="0.1" step="0.01" aria-label="写作区字间距（em）" />
+            <span class="s-val">em · 0 = 不加（默认）；0–0.1，<b>中文建议微松 0.02–0.05</b>（太挤会糊）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">行宽</span>
+            <input id="s-typo-measure" type="number" min="0" max="48" step="1" aria-label="写作区行宽（em）" />
+            <span class="s-val">em（≈ 每行汉字数）· 0 = <b>跟随窗口（不限宽，默认）</b>；20–48（约 25–40 字/行最舒服）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">配色</span>
+            <select id="s-typo-color" aria-label="写作区配色">
+              <option value="default">跟随主题（--dsw-*，默认）</option>
+              <option value="sepia">护眼 · 米白底</option>
+              <option value="green">护眼 · 淡绿底</option>
+            </select>
+            <span class="s-val">写作区 底 / 字 / 光标 / 选区</span>
+          </div>
+          <div class="s-hint">
+            行宽单位用 <b>em</b>（中文全角字 ≈ 1em）而<b>不是</b> <code>ch</code>：<code>ch</code> 是"0"的宽度、
+            等宽字体下只有约 0.6em，直接算会<b>低估每行汉字数</b>（实测见报告）。设了行宽会自动<b>居中</b>。
+            字体栈：楷体 <code>"KaiTi","楷体","Kaiti SC",…,serif</code> · 衬线 <code>"Songti SC","SimSun",…,serif</code> ·
+            无衬线 <code>"Microsoft YaHei","PingFang SC",…,sans-serif</code>。
+          </div>
+        </div>
+
+        <!-- 「排版 · 预览区」整组已**删除**（B4，2026-09-27）：写作区改成单栏纯文本后，中栏不再有
+             "渲染结果"那一栏 ⇒ 这一组设置没有任何作用对象。按本仓既定取向（"每一项都真正生效"），
+             **不留能点但不生效的设置** ⇒ HTML / els 引用 / 变更接线 / 预设里的 preview 一半全部移除。
+             ⚠️ main.js 里 `settings.preview` 的默认值与 clamp **保留不动**（改主进程属于无谓兼容面改动）。 -->
+
+
+        <!-- ③ 番茄钟：与工具栏那两个输入框**是同一份配置**（不造第二份） -->
+        <div class="s-group">
+          <div class="s-group-title">番茄钟<span class="s-val">与工具栏的「专注 / 休息」输入框是同一份配置</span></div>
+          <div class="s-row">
+            <span class="s-label">专注 / 休息</span>
+            <input id="s-focus" type="number" min="1" max="180" aria-label="专注时长（分钟）" />
+            <span class="s-val">/</span>
+            <input id="s-break" type="number" min="1" max="60" aria-label="休息时长（分钟）" />
+            <span class="s-val">分钟 · <b>立即生效</b>（改后倒计时回到专注起点）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">自动开始下一轮</span>
+            <input id="s-autonext" type="checkbox" aria-label="是否自动开始下一轮" />
+            <span class="s-val">关闭后一轮结束即暂停（停在下一轮起点，点「开始」继续）· <b>立即生效</b></span>
+          </div>
+        </div>
+
+        <!-- ④ 外观 -->
+        <div class="s-group">
+          <div class="s-group-title">外观</div>
+          <div class="s-row">
+            <span class="s-label">主题</span>
+            <div class="s-themes">
+              <label class="s-radio"><input type="radio" name="s-theme" value="auto" />跟随 [DSH]</label>
+              <label class="s-radio"><input type="radio" name="s-theme" value="light" />强制亮</label>
+              <label class="s-radio"><input type="radio" name="s-theme" value="dark" />强制暗</label>
+            </div>
+          </div>
+          <div class="s-hint">
+            <b>跟随</b> = 镜像 [DSH] iframe 的主题（<code>body[data-ds-dark-theme]</code>，原行为）；
+            <b>强制</b>会<b>覆盖</b>跟随；切回「跟随」立即<b>恢复</b>镜像。立即生效。
+          </div>
+        </div>
+
+        <!-- ⑨ 发送：诉求（意图）预设 —— **用户 2026-09-28 要求可自定义**（他在手填「成果」） -->
+        <div class="s-group">
+          <div class="s-group-title">发送</div>
+          <div class="s-row-col">
+            <span class="s-label">诉求预设</span>
+            <textarea id="s-send-intents" rows="4" aria-label="诉求预设（每行一个）"
+              placeholder="每行一个诉求，例如：&#10;成果&#10;结构诊断"></textarea>
+          </div>
+          <div class="s-hint">
+            发送弹窗里那个下拉的选项就来自这里（<b>每行一个</b>，最多 20 条、单条 ≤ 40 字），末尾恒有「其他…」。
+            <br>在发送弹窗里手填后点「<b>＋ 存为常用</b>」也会加进来。<b>留空</b>则下拉只剩「其他…」。
+            <br>⚠️ 这填的是消息里那行「<b>诉求：…</b>」（发给任务中心的提示词），与「排版」组无关。
+          </div>
+        </div>
+
+        <!-- ⑤ 草稿 -->
+        <div class="s-group">
+          <div class="s-group-title">草稿</div>
+          <div class="s-row">
+            <span class="s-label">保留上限</span>
+            <input id="s-draft-files" type="number" min="1" max="10000" aria-label="草稿份数上限" />
+            <span class="s-val">份（超出按最旧删除）· 1–10000，<b>下一个草稿写入时生效</b></span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">单份上限</span>
+            <input id="s-draft-bytes" type="number" min="0.001" max="256" step="0.5" aria-label="单份草稿大小上限（MB）" />
+            <span class="s-val">MB（超过则拒写草稿）· 0.001–256，<b>下一个草稿写入时生效</b></span>
+          </div>
+          <!-- 总容量上限：两个维度（份数 / 总字节）任一超标都「按最旧删」⇒ 只削峰，不是更激进的清理 -->
+          <div class="s-row">
+            <span class="s-label">总容量上限</span>
+            <input id="s-draft-total" type="number" min="1" max="4096" step="8" aria-label="草稿目录总容量上限（MB）" />
+            <span class="s-val">MB（超出按最旧删）· 1–4096，<b>下一个草稿写入时生效</b></span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">当前占用</span>
+            <span class="s-val" id="s-drafts-usage">（未知）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">启动时提示</span>
+            <input id="s-notify" type="checkbox" aria-label="启动时是否自动提示" />
+            <span class="s-val">启动时自动提示（可恢复草稿 / 上次保存失败）· <b>下次启动生效</b>（草稿与失败记录照旧落盘）</span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">草稿目录</span>
+            <span class="s-val" id="s-drafts-dir">（未知）</span>
+          </div>
+        </div>
+
+        <!-- ⑥ 远程：**改了必须重启**（反代在启动时绑端口；不在运行期热改） -->
+        <!-- ⑨ C9：入口改「自动（三档顺位 + 降级）/ 手动」，自动模式用 gateway.js 的三条候选 -->
+        <div class="s-group">
+          <div class="s-group-title">远程<span class="s-tag">重启生效</span></div>
+          <div class="s-row">
+            <span class="s-label">入口</span>
+            <select id="s-remote-mode" aria-label="入口模式">
+              <option value="auto">自动（按顺位探测三条线路 + 降级）</option>
+              <option value="manual">手动（只用下面的地址）</option>
+            </select>
+          </div>
+          <div class="s-row">
+            <span class="s-label">网关地址</span>
+            <input id="s-gateway" type="text" class="s-wide" aria-label="网关地址" />
+          </div>
+          <div class="s-row">
+            <span class="s-label">回环端口</span>
+            <input id="s-port" type="number" min="1024" max="65535" aria-label="回环端口" />
+          </div>
+          <!-- ⑩ U-20 #40④：上面两项带「重启生效」⇒ 给一个**一键重启**，不必手动关开窗口。
+               它走主进程的 `app.quit()`（优雅退出 ⇒ 未保存内容先落盘），不是强制杀进程。 -->
+          <div class="s-row">
+            <span class="s-label">立即生效</span>
+            <button id="s-restart" type="button">重启客户端</button>
+            <span class="s-val">改完上面两项点它即可（未保存内容会先落盘）</span>
+          </div>
+          <div class="s-hint" id="s-remote-note">
+            <b>入口 = 自动</b>时按顺位探测三条线路并降级：<b>①</b> Funnel HTTPS（网关登录）·
+            <b>②</b> Funnel mTLS（客户端证书，<b class="s-warn">尚未接上</b>）·
+            <b>③</b> tailnet 直连（最稳，需装 Tailscale）。本机<b>在 tailnet 内</b>时顺位为
+            <b>③→①→②</b>，否则 <b>①→②→③</b>。此时「网关地址」<b>不参与</b>，只给手动模式用。
+            这些在<b>启动时</b>读取（环境变量 <code>WC_GATEWAY</code> / <code>WC_PORT</code> 优先，
+            且 <code>WC_GATEWAY</code> 会<b>跳过探测</b>），反代在启动时绑定端口 ⇒
+            <b class="s-warn">必须重启客户端才生效</b>。
+          </div>
+          <!-- 实况由 writing.js 的 refreshRemoteEffectiveNote() 填（**不覆盖**上面那段静态规则） -->
+          <div class="s-hint" id="s-remote-eff"></div>
+        </div>
+
+        <!-- ⑥ B5 AI 校对：专用会话 id（会话在 [DSH] 页自己建 ⇒ 客户端不再自动建会话） -->
+        <div class="s-group">
+          <div class="s-group-title">AI 校对</div>
+          <div class="s-row">
+            <span class="s-label">校对会话 id</span>
+            <input id="s-proof-session" type="text" class="s-wide" aria-label="校对会话 id" placeholder="session-…" />
+          </div>
+          <div class="s-hint" id="s-proof-note">
+            校对走一条<b>专用会话</b>（默认 = 本机建的「文章校对」那条）：请在里面把<b>校对约定</b>作为第一条消息发给它。
+            想换会话就在下面填新 id；留空 = 用<b>内置默认</b>；填完<b>下次点「校对」即生效</b>（不用重启）。
+          </div>
+        </div>
+        <!-- ⑧ T-10：启动与托盘（默认值见 main.js 的 SETTINGS_DEFAULTS.general；自启默认**关**） -->
+        <div class="s-group">
+          <div class="s-group-title">启动与托盘</div>
+          <div class="s-row">
+            <span class="s-label">开机自动启动</span>
+            <input id="s-autostart" type="checkbox" aria-label="是否开机自动启动" />
+            <span class="s-val">登录 Windows 后自动打开本客户端（写入系统登录启动项）· <b>立即生效</b></span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">托盘图标</span>
+            <input id="s-tray" type="checkbox" aria-label="是否显示托盘图标并点关闭时收进托盘" />
+            <span class="s-val">通知区常驻图标，点 ✕ <b>不退出</b>、收进托盘（左键显示主窗口 / 右键退出）· <b>立即生效</b></span>
+          </div>
+          <!-- 托盘**实况**（不是设置值）：主进程每次建/拆托盘都会回填这里 -->
+          <div class="s-hint" id="s-tray-note"></div>
+          <div class="s-hint" id="s-general-note">
+            默认：自启<b>关</b>（不擅自改开机项），托盘<b>开</b>。
+            <b>关</b>掉托盘 = 通知区没有图标，且点 ✕ 直接退出（两者联动，只开其一会造成「关不掉的窗口」）。
+            想<b>彻底退出</b>：托盘右键 →「退出」，或随时按 <code>Ctrl+Q</code>。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+       <!-- 阶段⑤：send.js = 纯逻辑（与 node 单测同一份）；writing.js 先跑（它暴露 __wcSendBridge），
+         send-net.js 后跑（在它的 init 里接线；用到桥时用户已可点击，故顺序安全）。 -->
+  <script src="/__shell__/send.js"></script>
+  <!-- B3 兜底：watch.js 必须**先于** writing.js 加载（writing.js 起手就取 window.WCWatch） -->
+  <script src="/__shell__/watch.js"></script>
+  <!-- B4：editor-plain.js = 纯文本写作区的判据（换行/粘贴/输入法），与 node 单测同一份 -->
+  <script src="/__shell__/editor-plain.js"></script>
+  <!-- B5：proofread.js = 校对的纯逻辑（提示词 / JSON 抽取 / 校验 / 文本定位 / 应用），与 node 单测同一份；
+       必须**先于** proofread-net.js 加载（后者起手取 window.WCProofread） -->
+  <script src="/__shell__/proofread.js"></script>
+  <!-- C11：sync-core.js = 多端同步的纯逻辑（版本串 / 三态判定 / 基线），与 node 单测同一份；
+       必须**先于** writing.js（writing.js 起手就取 window.WCSync）与 sync-net.js 加载 -->
+  <script src="/__shell__/sync-core.js"></script>
+  <script src="/__shell__/writing-count-core.js"></script>
+  <script src="/__shell__/writing.js"></script>
+  <script src="/__shell__/send-net.js"></script>
+  <!-- B5：校对链路层（HTTP + 轮询 + 右栏渲染 + 应用）；依赖 send.js（信封）与 writing.js（桥）⇒ 最后加载 -->
+  <script src="/__shell__/proofread-net.js"></script>
+  <!-- C11：同步链路层（clientZoneList / clientZoneRead / clientZoneDelete）；依赖 sync-core.js 与 writing.js（桥）⇒ 最后加载 -->
+  <script src="/__shell__/sync-net.js"></script>
+  <script>
+    // 两页常驻 + display( hidden ) 显隐：不销毁重建 ⇒ iframe 每次切换都保持原状（不重载）
+    const tabs = Array.from(document.querySelectorAll('.tab'))
+    const pages = { dsh: document.getElementById('page-dsh'), writing: document.getElementById('page-writing') }
+    // 显隐的**唯一入口**：只有页签高亮 + hidden 两件事，其它任何地方要改都调它或下面的 __wcTabs
+    const showPages = (names) => {
+      const set = new Set(names)
+      for (const t of tabs) t.classList.toggle('active', set.has(t.dataset.page))
+      for (const [name, el] of Object.entries(pages)) el.hidden = !set.has(name)
+    }
+    /* ⑥ CR-6 分栏：两页要**同时**显示 ⇒ 给 writing.js 一个入口。
+       🔴 不能靠"点页签"来实现（`showWritingPage()` 就是点页签）：那条路径一次只显示一页，
+          分栏时反而会把对话页 hidden 掉，右半屏全空。 */
+    window.__wcTabs = { showBoth: () => showPages(['dsh', 'writing']), show: (n) => showPages([n]) }
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => {
+        // 分栏时点页签**不改显隐**（两页都得在，否则并排就断了）；退出分栏由 renderSplit 交还给这里
+        if (document.getElementById('w-main').classList.contains('split')) return
+        showPages([tab.dataset.page])
+      })
+    }
+
+    // 回环门自检：壳层 origin 必须与 iframe 同源，且 hostname 是回环地址
+    const frame = document.getElementById('dsh-frame')
+    const frameOrigin = new URL(frame.getAttribute('src'), location.href).origin
+    document.getElementById('diag').textContent =
+      'hostname=' + location.hostname +
+      ' · 同源=' + (frameOrigin === location.origin ? '是' : '否')
+
+    // ── 主题跟随（壳层跟随 [DSH] iframe 的主题，避免两页视觉割裂）──────────────
+    // 出处：dsh 由 ui-layout 的 ThemePresenter 把主题投影到 document（纯 DOM 写入）：
+    //   · body[data-ds-dark-theme]     ← DARK_ATTRIBUTE，切暗色调色板（dsw-tokens.css 同款选择器）
+    //   · html { color-scheme }        ← 原生 UA chrome（滚动条 / 表单控件）
+    //   · body 的 --dsh-content-font-size ← 内容字号轴
+    //   见 dsh-client-ui-layout/lib/types/client/theme-presenter.d.ts
+    // 壳层与 iframe 同源 ⇒ 可直接读 iframe.contentDocument（跨源时 try/catch 兜底）。
+    const DARK_ATTR = 'data-ds-dark-theme'
+    const sysDark = window.matchMedia('(prefers-color-scheme: dark)')
+    let themeObserver = null
+    // 主题覆盖（「设置 → 外观」）：'auto' = 原行为（跟随 [DSH] iframe）；'light' / 'dark' = 强制。
+    // 由写作页（writing.js）在启动时按配置设置。⚠️ 默认 'auto' ⇒ 不加设置时行为**一字不变**。
+    let themeOverride = 'auto'
+
+    // 已真正导航过（URL 不再是 about:blank）的 iframe 文档；不可达 ⇒ null
+    function frameDoc() {
+      try {
+        const d = frame.contentDocument
+        return d && d.URL && d.URL !== 'about:blank' ? d : null
+      } catch (e) {
+        return null
+      }
+    }
+
+    function syncTheme() {
+      const doc = frameDoc()
+      const body = doc && doc.body
+      const forced = themeOverride === 'light' || themeOverride === 'dark'
+      if (!body) {
+        // 兜底：iframe 未加载完 / 未登录 / 跨源 ⇒ 先跟随系统（被强制时以强制为准）
+        const dark = forced ? themeOverride === 'dark' : sysDark.matches
+        document.body.toggleAttribute(DARK_ATTR, dark)
+        if (forced) document.documentElement.style.colorScheme = themeOverride
+        else document.documentElement.style.removeProperty('color-scheme')
+        document.documentElement.style.removeProperty('--dsh-content-font-size')
+        return
+      }
+      // 属性是「存在即暗」（dsw-tokens.css 的选择器就是属性存在性）⇒ 镜像存在性，不镜像值
+      const dark = forced ? themeOverride === 'dark' : body.hasAttribute(DARK_ATTR)
+      document.body.toggleAttribute(DARK_ATTR, dark)
+      if (forced) {
+        // 「强制」= **覆盖**跟随；切回「跟随」时下面这条 else 会**恢复**镜像
+        document.documentElement.style.colorScheme = themeOverride
+      } else {
+        const cs = doc.documentElement.style.colorScheme
+        if (cs) document.documentElement.style.colorScheme = cs
+        else document.documentElement.style.removeProperty('color-scheme')
+      }
+      // 字号轴挂在 :root：dsw-tokens.css 里 --dsh-content-font-delta 定义在 :root，
+      // 只有 :root 的 --dsh-content-font-size 才能让它重算（挂在 body 上会算不到）。
+      // ⚠️ 字号轴与亮暗无关 ⇒ **不受主题覆盖影响**（编辑器字号有独立设置项）。
+      const fs = body.style.getPropertyValue('--dsh-content-font-size')
+      if (fs) document.documentElement.style.setProperty('--dsh-content-font-size', fs)
+      else document.documentElement.style.removeProperty('--dsh-content-font-size')
+    }
+
+    // 「设置 → 外观」的接口（writing.js 调用）：setOverride('auto'|'light'|'dark') 后立即重算
+    window.__wcTheme = {
+      setOverride: function (v) {
+        themeOverride = v === 'light' || v === 'dark' ? v : 'auto'
+        syncTheme()
+      },
+      getOverride: function () { return themeOverride },
+    }
+
+    // iframe 每次导航都会换掉 document ⇒ 在 load 上重新挂 observer（旧的随旧 document 一起死）
+    function watchFrame() {
+      if (themeObserver) { themeObserver.disconnect(); themeObserver = null }
+      const doc = frameDoc()
+      if (!doc || !doc.body) { syncTheme(); return }
+      themeObserver = new MutationObserver(syncTheme)
+      themeObserver.observe(doc.documentElement, { attributes: true, attributeFilter: ['style'] })
+      themeObserver.observe(doc.body, { attributes: true, attributeFilter: [DARK_ATTR, 'style'] })
+      syncTheme()
+    }
+
+    frame.addEventListener('load', watchFrame)
+    // 系统主题变化只在「iframe 读不到」时才用得上（读得到时一切以 iframe 为准）
+    sysDark.addEventListener('change', () => { if (!frameDoc()) syncTheme() })
+    watchFrame()
+
+    // ── Electron 写作桥中继（preload 只在主 frame 注入 wcWriting；iframe 内同源 SPA 需要它）──
+    // 事实：未开 nodeIntegrationInSubFrames 时 iframe 内 window.wcWriting 为 undefined。
+    // 做法：主 frame 在真实桥上只订阅一次 tick/open，再给同源 iframe 的 contentWindow 注入同名窄 shim。
+    let frameCallbacks = { tick: [], open: [] }
+    let injectedWin = null
+
+    function emitFrame(kind) {
+      const list = frameCallbacks[kind] || []
+      for (let i = 0; i < list.length; i += 1) {
+        try { list[i]() } catch (e) { }
+      }
+    }
+
+    function bindRealWritingBridge() {
+      if (!window.wcWriting || window.wcWriting.kind !== 'electron') return
+      if (typeof window.wcWriting.onWritingTick === 'function') {
+        window.wcWriting.onWritingTick(() => emitFrame('tick'))
+      }
+      if (typeof window.wcWriting.onWritingOpen === 'function') {
+        window.wcWriting.onWritingOpen(() => emitFrame('open'))
+      }
+    }
+
+    function injectWritingBridge() {
+      const real = window.wcWriting
+      if (!real || real.kind !== 'electron') return
+      let win
+      try {
+        win = frame.contentWindow
+      } catch (e) {
+        return
+      }
+      if (!win) return
+      // 导航会换 window：检测到新 window 时重置回调登记（旧回调随旧页面一起失效）
+      if (win !== injectedWin) {
+        injectedWin = win
+        frameCallbacks = { tick: [], open: [] }
+      }
+      // 绝不覆盖真实桥或他人实现：只在缺失或本中继旧 shim 时注入
+      let existing
+      try {
+        existing = win.wcWriting
+      } catch (e) {
+        return
+      }
+      if (existing && !existing.__wcRelayed) return
+      try {
+        frame.contentWindow.wcWriting = {
+          __wcRelayed: true,
+          kind: 'electron',
+          getDeviceId: function () { return real.getDeviceId.apply(real, arguments) },
+          scheduleReminder: function (prefs) { return real.scheduleReminder(arguments[0]) },
+          cancelReminder: function () { return real.cancelReminder.apply(real, arguments) },
+          showNotification: function (payload) { return real.showNotification(arguments[0]) },
+          hash12: function (text) { return real.hash12(arguments[0]) },
+          onWritingTick: function (cb) {
+            frameCallbacks.tick.push(cb)
+            return () => {
+              frameCallbacks.tick = frameCallbacks.tick.filter((fn) => fn !== cb)
+            }
+          },
+          onWritingOpen: function (cb) {
+            frameCallbacks.open.push(cb)
+            return () => {
+              frameCallbacks.open = frameCallbacks.open.filter((fn) => fn !== cb)
+            }
+          },
+        }
+      } catch (e) { }
+    }
+
+    bindRealWritingBridge()
+    frame.addEventListener('load', injectWritingBridge)
+    injectWritingBridge()
+    // module 在 load 前执行 ⇒ 不靠事件顺序：轮询保证 shim 在新 window 上尽早可用
+    setInterval(injectWritingBridge, 250)
+  </script>
+</body>
+</html>

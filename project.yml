@@ -41,6 +41,10 @@ targets:
       - Tests/DSHRemoteTests
     dependencies:
       - target: DSHRemote
+    resources:
+      - path: ShellAssets
+        type: folder
+        group: ""
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.skyblade47.dshremote.tests

@@ -4,22 +4,24 @@ import WebKit
 // ============================================================================
 // WKWebView 封装 —— 本仓的**核心**（其余多为脚手架）
 //
-// 这里承载两件与安卓壳对应的事：
-//   ① 「回环权威门」的解法：在**页面脚本执行前**注入 `globalThis.__DSH_TRANSPORT__ = { ownsHost: true }`
-//      （对应安卓的 `addDocumentStartJavaScript`；iOS 侧用官方 `WKUserScript`）
-//      🔴 iOS 比安卓顺：`forMainFrameOnly: false` 一行即可穿透**同源 iframe**
-//         （控制台 `/app#/` 用同源 iframe 嵌内核前端 `/index.html`），且**不受页面 CSP 限制**。
-//   ② `window.wcStorage` 的消息桥**占位**：PC 客户端里写作页靠它落盘（preload.js → Electron IPC）；
-//      iOS 上要换成 WKScriptMessageHandler（P3 再实现真实落点：iCloud 目录 + 沙盒兜底）。
+// 承载三件与安卓壳对应的事：
+//   ① 「回环权威门」：页面脚本执行前（atDocumentStart，主框架+同源 iframe）注入 BridgeJS，
+//      其中含 globalThis.__DSH_TRANSPORT__ = { ownsHost: true } 与 wcStorage/wcWriting 桥。
+//   ② 本地资产：dsh-asset://local/<name> 由 ShellSchemeHandler 从 Bundle 应答（Task 4 的
+//      /__shell__/ 导航接管负责把主壳换成本地 HTML）。
+//   ③ wcStorage 消息桥：window.webkit.messageHandlers.dshBridge → NativeBridge →
+//      BridgeDispatcher（Documents 沙盒）；同步 *Sync 通道由 Task 10 的 dsh-bridge handler 承接。
 //
-// ⚠️ 已知不可行（别再试）：`WKURLSchemeHandler` **只能注册自定义 scheme**，不能拦截 http/https
-//    ⇒ 想"在网关 origin 下返回本地资产"这条路走不通，同源问题只能靠反代或让网关托管资产（见 README §4.2）。
+// 本地应答路线：WKURLSchemeHandler 不能拦 http/https，故主框架 /__shell__/ 经
+// decidePolicyFor 取消 + loadHTMLString(baseURL:网关) 虚拟同源；本地资产走自定义
+// dsh-asset://（见 ShellSchemeHandler）。iframe 与 /api 等保持直连网关。
 // ============================================================================
 
 struct ShellWebView: UIViewRepresentable {
+    let session: ShellSession
     let urlString: String
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(session: session) }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -27,23 +29,26 @@ struct ShellWebView: UIViewRepresentable {
         // 与 PC 客户端同口径：Cookie 走默认存储（同一 app 内持久）
         cfg.websiteDataStore = .default()
 
-        // ① ownsHost 注入（documentStart ⇒ 早于页面任何脚本）
-        let inject = """
-        try { globalThis.__DSH_TRANSPORT__ = { ownsHost: true }; } catch (e) {}
-        """
-        cfg.userContentController.addUserScript(
-            WKUserScript(source: inject, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-        )
+        // ② 本地壳资产（shell.html 改写后外链 dsh-asset://local/<name>）
+        cfg.setURLSchemeHandler(ShellSchemeHandler(loadData: { name in
+            guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
+            return try? Data(contentsOf: url)
+        }), forURLScheme: "dsh-asset")
 
-        // ② wcStorage 桥（占位：先只回"未实现"，避免页面静默失败时无从判断）
-        cfg.userContentController.add(context.coordinator, name: "wcStorage")
+        // ① document-start 注入（早于页面任何脚本；forMainFrameOnly:false 穿透同源 iframe）
+        cfg.userContentController.addUserScript(
+            WKUserScript(source: BridgeJS.source, injectionTime: .atDocumentStart,
+                        forMainFrameOnly: false)
+        )
 
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
-        web.customUserAgent = (web.value(forKey: "userAgent") as? String).map { $0 + " DSHRemote/0.1.0" }
-        context.coordinator.web = web
+        web.customUserAgent = (web.value(forKey: "userAgent") as? String)
+            .map { $0 + " DSHRemote/\(Coordinator.appVersion)" }
+        // ③ 桥在此创建并注册（早于下面的 web.load）；dispatcher 不可用时 attach 内部空操作
+        context.coordinator.attach(to: web)
 
         if let u = URL(string: urlString) { web.load(URLRequest(url: u)) }
         return web
@@ -58,10 +63,50 @@ struct ShellWebView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-        weak var web: WKWebView?
+    static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
+        // 断开 UCC → handler 强引用（NativeBridge 的 reply 已弱引 webView，这里再破 UCC 一侧）
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "dshBridge")
+    }
 
-        // 观测：把关键导航与失败打到 Xcode/系统日志，便于用 `ios syslog` 抓
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        weak var web: WKWebView?
+        private var bridge: NativeBridge?
+        private let dispatcher: BridgeDispatcher?
+        private let session: ShellSession
+
+        static let appVersion: String =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
+
+        init(session: ShellSession) {
+            self.session = session
+            // spec §6.1：dataDir=Documents 根（config.json/outbox.json/drafts/proofread/sync 直接在根），
+            // workspaceRoot=Documents/workspace（英文目录名，对齐安卓 getFilesDir()/workspace）
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let workspaceRoot = docs.appendingPathComponent("workspace", isDirectory: true)
+            let made = try? BridgeDispatcher(
+                dataDir: docs, workspaceRoot: workspaceRoot, appVersion: Self.appVersion)
+            if made == nil {
+                NSLog("[dsh-ios] BridgeDispatcher 构造失败，wcStorage 桥未安装（页面走未安装兜底）")
+            }
+            self.dispatcher = made
+            super.init()
+        }
+
+        func attach(to web: WKWebView) {
+            self.web = web
+            // 后台 flush 绑定（无论 dispatcher 是否可用；flushScript 只依赖页面里的 writing.js）
+            session.flusher.bind(webView: web)
+            guard let dispatcher else { return }
+            let bridge = NativeBridge(dispatcher: dispatcher, webView: web)
+            self.bridge = bridge
+            web.configuration.userContentController.add(bridge, name: "dshBridge")
+            // 同步通道（writeDocSync/writeDraftSync），与异步桥共用同一 dispatcher（ioLock 互斥）
+            web.configuration.setURLSchemeHandler(
+                BridgeSyncSchemeHandler(dispatcher: dispatcher), forURLScheme: "dsh-bridge")
+        }
+
+        // MARK: - 导航观测
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             NSLog("[dsh-ios] didFinish \(webView.url?.absoluteString ?? "-")")
         }
@@ -96,11 +141,38 @@ struct ShellWebView: UIViewRepresentable {
             return nil
         }
 
-        // ② wcStorage 桥的占位实现
-        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            NSLog("[dsh-ios] wcStorage <- \(String(describing: message.body))")
-            // TODO(P3)：在这里实现 window.wcStorage 的等价面（读/写/列/删 + 草稿兜底）。
-            //   落点建议：用户选的 iCloud 目录（UIDocumentPicker + security-scoped bookmark）+ 沙盒兜底。
+        // MARK: - /__shell__/ 主框架导航接管（Task 4）
+
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard let url = navigationAction.request.url,
+                  ShellNavPolicy.shouldTakeOver(
+                    mainFrame: navigationAction.targetFrame?.isMainFrame ?? false, url: url) else {
+                decisionHandler(.allow)
+                return
+            }
+            decisionHandler(.cancel)
+            Self.loadLocalShell(into: webView, baseURL: url)
         }
+
+        static func loadLocalShell(into webView: WKWebView, baseURL: URL) {
+            guard let u = Bundle.main.url(forResource: "shell", withExtension: "html"),
+                  let raw = try? String(contentsOf: u, encoding: .utf8),
+                  let rewritten = try? ShellHTMLRewriter.rewrite(raw) else {
+                NSLog("[DSH] 本地壳读取/改写失败，回退网络加载")
+                webView.load(URLRequest(url: baseURL))
+                return
+            }
+            webView.loadHTMLString(rewritten, baseURL: baseURL)
+        }
+    }
+}
+
+enum ShellNavPolicy {
+    static func shouldTakeOver(mainFrame: Bool, url: URL) -> Bool {
+        guard mainFrame else { return false }
+        guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return c.path.hasPrefix("/__shell__/")
     }
 }

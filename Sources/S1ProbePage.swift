@@ -20,7 +20,7 @@ enum S1ProbePage {
           .t{font-weight:600}.d{font-size:13px;color:#444;white-space:pre-wrap;word-break:break-all}
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
-        <h2>S1 四探针报告</h2><div id="out"></div>
+        <h2>S1 五探针报告</h2><div id="out"></div>
         <script>
         const EXPECT = \(expect);
         const results = [];
@@ -73,13 +73,25 @@ enum S1ProbePage {
           } catch (e) { record('④ 同步 XHR', false, String(e)); }
         }
 
+        function probe5SyncXHR(){
+          try {
+            const x = new XMLHttpRequest();
+            x.open('POST', 'dsh-bridge://sync?m=__ping__', false);
+            x.send(JSON.stringify({method:'__ping__', args:[]}));
+            const o = JSON.parse(x.responseText);
+            record('⑤ 同步 XHR dsh-bridge',
+                   x.status === 200 && o.ok === true && o.echo === 'bridge-pong',
+                   'status=' + x.status + ' body=' + x.responseText);
+          } catch (e) { record('⑤ 同步 XHR dsh-bridge', false, String(e)); }
+        }
+
         function render(){
           const el = document.getElementById('out');
           el.innerHTML = results.map(r =>
             '<div class="r"><div class="b ' + (r.pass?'g':'x') + '"></div><div>' +
             '<div class="t">' + r.name + '</div><div class="d">' + r.detail + '</div></div></div>'
-          ).join('') + '<div class="d">四项全绿才进入 M1。</div>';
-          const allGreen = results.length === 4 && results.every(r => r.pass);
+          ).join('') + '<div class="d">五项全绿才进入 M1。</div>';
+          const allGreen = results.length === 5 && results.every(r => r.pass);
           if (window.webkit && window.webkit.messageHandlers.s1Report) {
             window.webkit.messageHandlers.s1Report.postMessage(
               JSON.stringify({allGreen: allGreen, results: results}));
@@ -90,6 +102,7 @@ enum S1ProbePage {
           await probeCookie();
           await probeIframe();
           probeSyncXHR();
+          probe5SyncXHR();
           render();
         })();
         <\(slash)script></body></html>

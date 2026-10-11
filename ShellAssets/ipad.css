@@ -1,0 +1,107 @@
+/* ============================================================================
+   ipad.css —— iOS 壳侧附加样式（只在 iPad 壳经 rewriter 注入加载）
+   铁律：不改 shell.html / writing.css / writing.js 等任何共享核心；
+         本文件只做能力裁剪（按 id 隐藏）与触控可用性补偿，不新增产品语义。
+   依据：spec §7.3（≥44pt 热区 / touch-action / 惯性滚动 / 不依赖 hover）、
+         §7.4（软键盘）、行 221-222（五个选目录入口隐藏）。
+   ============================================================================ */
+
+/* ① 能力裁剪：工作区根固定沙盒 workspace/，选目录/新建到指定位置 5 入口隐藏。
+   ⚠️ 只藏 spec 行 221 明列的 5 个 id；#w-ws-create-here（当前根新建）、
+      #s-ws-create（新建工作区）不藏。!important 压过组件作者样式。 */
+#w-pick-root,
+#w-ws-switch,
+#w-create-root-here,
+#s-ws-switch,
+#s-ws-create-here {
+  display: none !important;
+}
+
+/* ② CR-6 分割条：核心已用 Pointer Events + setPointerCapture + 拖拽期 .no-pointer
+   盖 iframe（shell.html 内联样式 + writing.js wireSplitHandle），触控唯一硬缺口：
+   不声明 touch-action:none 时 WebKit 会把横向拖动识别为滚屏/手势，pointer 事件被取消。 */
+.w-split-handle {
+  touch-action: none;
+}
+
+/* ③ 触控热区补偿到 ≥44×44pt（spec §7.3；iPad 无鼠标，直接放大，不保留 28/32/36 档）。 */
+header {
+  height: 44px;
+}
+header .tab,
+header .gear {
+  height: 40px;
+  min-width: 44px;
+  padding: 0 14px;
+}
+/* 写作页按钮基线 36（.md）/28（侧栏 .sm）/24（.w-mini）—— min-height 统一抬到 44；
+   min-height 压过 height，视觉上为 44 高的大按钮（触控可用性优先于桌面密度）。 */
+#page-writing button {
+  min-height: 44px;
+}
+/* 侧栏卡片右上角 / 文档行右侧的 24×24「⋯」：本体视觉保持 24，
+   用 ::before 透明扩展命中区到 44×44（卡片本体已是 ≥56 的整行目标，仅补偿小图标）。 */
+#page-writing .w-work-item > .w-more,
+#page-writing .w-doc .w-more {
+  position: relative;
+}
+#page-writing .w-work-item > .w-more::before,
+#page-writing .w-doc .w-more::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+/* 卡片本体已是大目标（min-height 56），撤销上面对其 ::before 的误伤无需额外规则
+   （.w-card 不匹配 .w-more 选择器）；文档行 .w-doc 整行 40→44： */
+#page-writing .w-doc {
+  min-height: 44px;
+}
+/* 设置弹层按钮（.s-btn 28）与输入控件（32） */
+.s-btn {
+  min-height: 44px;
+}
+.s-modal input[type="number"],
+.s-modal input[type="text"],
+.s-modal select {
+  height: 44px;
+}
+
+/* ④ 禁双击缩放/300ms 延迟，但保留捏合缩放（spec §7.3：不设 user-scalable=no）。
+   编辑区/文档展示不列入——那里需要系统手势（选择/滚动/捏合）。 */
+html,
+body {
+  touch-action: manipulation;
+}
+button,
+a,
+header .tab,
+header .gear,
+.s-radio,
+.w-goal-chip,
+.w-split-handle {
+  touch-action: manipulation;
+}
+/* 分割条在自身规则里再钉回 none（与上面并列时按源序后者胜，本文件②在前故这里重申）： */
+.w-split-handle {
+  touch-action: none;
+}
+
+/* ⑤ 惯性滚动（iOS 传统属性；新版 WebKit 默认即 momentum，声明为兜底，无副作用）。 */
+#page-writing .w-tree,
+#page-writing .w-editor,
+#page-writing .w-sidebar > .w-hint,
+#page-writing .w-proof-list,
+#page-writing .w-modal-body,
+#page-writing .w-import-result,
+.s-body {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ⑥ 消除 iOS 点击灰色高亮（:active 在触控设备上也无意义，统一透明）。 */
+* {
+  -webkit-tap-highlight-color: transparent;
+}

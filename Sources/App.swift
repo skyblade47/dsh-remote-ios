@@ -20,6 +20,12 @@ enum Cfg {
     static let entryPath = "/app#/"
 }
 
+/// 跨 SwiftUI 视图边界共享的壳会话：让 RootView 的 scenePhase 事件够到
+/// ShellWebView.Coordinator 持有的 WKWebView（Coordinator 由 representable 私有创建）。
+final class ShellSession: ObservableObject {
+    let flusher = BackgroundFlusher(live: ())
+}
+
 @main
 struct DSHRemoteApp: App {
     var body: some Scene {
@@ -30,6 +36,9 @@ struct DSHRemoteApp: App {
 }
 
 struct RootView: View {
+    @StateObject private var session = ShellSession()
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var urlText: String = Cfg.gateway
     @State private var dropped = false
     @State private var titleTaps = 0
@@ -81,11 +90,17 @@ struct RootView: View {
                 )
             } else {
                 // TODO(P2)：改成 TabView（写作 / DSH 两个 WebView 常驻，切换不重载）
-                ShellWebView(urlString: Cfg.gateway + Cfg.entryPath)
+                let shell = (try? GatewayURL.normalize(Cfg.gateway))?.shell
+                    ?? (Cfg.gateway + Cfg.entryPath)
+                ShellWebView(session: session, urlString: shell)
                     .ignoresSafeArea(edges: .bottom)
             }
         }
         .onChange(of: Cfg.gateway) { _, _ in dropped = false }
+        .onChange(of: scenePhase) { _, phase in
+            // iOS 切后台不触发 pagehide；主动驱动 writing.js 的 session-end 同步落盘
+            if phase == .background { session.flusher.flush() }
+        }
         .alert("请先填写 https 网关", isPresented: $showS1Alert) {
             Button("好", role: .cancel) {}
         } message: {
