@@ -16,7 +16,7 @@ final class BackgroundFlusherTests: XCTestCase {
         return BackgroundFlusher(
             begin: { [weak self] work in
                 self?.begins += 1
-                if let work { self?.expirations.append(work) }
+                self?.expirations.append(work)
                 return token
             },
             end: { [weak self] t in self?.ended.append(t) })

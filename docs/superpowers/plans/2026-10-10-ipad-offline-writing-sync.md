@@ -5288,7 +5288,7 @@ final class BackgroundFlusherTests: XCTestCase {
         return BackgroundFlusher(
             begin: { [weak self] work in
                 self?.begins += 1
-                if let work { self?.expirations.append(work) }
+                self?.expirations.append(work)
                 return token
             },
             end: { [weak self] t in self?.ended.append(t) })
@@ -5501,6 +5501,8 @@ extension BackgroundFlusher {
 要点：① 内核只依赖三个注入点（`beginTask`/`endTask`/`evaluator`），无 UIKit/WebKit 符号，BackgroundFlusherTests 全程内存桩即可。② 生产入口有两个：`ShellSession` 里用 `BackgroundFlusher(live: ())` 拿接 `UIApplication` 的实例；`Coordinator.attach(to:)` 调 `bind(webView:)` 弱挂 webView。③ `token` 用 `AnyHashable` 装箱 `UIBackgroundTaskIdentifier.rawValue`（`Int`），测试传任意 `Int`；`endTask` 用 `raw.base as? Int` 还原。④ `finishOnce` 同时被 expirationHandler 与 evaluateJavaScript completion 竞争调用，`ended` 保证 begin/end 严格配对一次；每轮 flush 的 `ended`/`token` 是局部变量，互不干扰，`flushing` 复位后下一轮可重新尝试。
 
 > **主控裁决（Task 13.3 第二次 CI，2026-10-11）**：CI 报 `bind(webView:)` 76:54 `cannot convert value of type '() -> Void?' to expected argument type 'DispatchWorkItem'`。根因：`webView?.evaluateJavaScript(...) { ... }` 经可选链使闭包体产生 `Void?`，无类型标注的 `let doEvaluate = { ... }` 被推断为 `() -> Void?`；而 `DispatchQueue.main.async(execute:)` 的 `execute:` 标签精确选择 `DispatchWorkItem` 重载（尾随闭包的 `() -> Void` 重载不带该标签），故类型不匹配。围栏与落盘逐字同款缺陷，双侧修复为显式标注 `let doEvaluate: () -> Void = { _ = webView?.evaluateJavaScript(...) ... }`：显式返回类型压成 `Void`，`_ =` 显式丢弃可选链结果。主线程分支调用不变，派发时机与弱引用语义不变。
+
+> **主控裁决（Task 13.3 第七次 CI，2026-10-11）**：run 38128636668 在 BridgeJSTests 2 条清除后，全仓仅剩 1 条：11.1 围栏 L19 列 20 `initializer for conditional binding must have Optional type, not '() -> Void'`。`begin:` 注入闭包的 `work` 形参对应源码 `(@escaping () -> Void) -> AnyHashable?`——系统过期回调是非可选 `@escaping () -> Void`，`if let work` 属把非可选当可选绑定（Red 围栏笔误，此前各轮被更早日志中的错误遮蔽未暴露）。双侧改为直接 `self?.expirations.append(work)`。扫雷全 Tests `if let <name> {` 缩写绑定 4 处：本处之外的 3 处（BridgeSyncSchemeHandlerTests.request 的 `rawBody: Data?`/`method: String?`/`args: Any?`）形参确为可选，合法不改。
 
 - [ ] **11.4 运行测试，确认通过（Green）**
 
