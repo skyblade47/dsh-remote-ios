@@ -3,8 +3,8 @@ import XCTest
 
 final class PathGuardTests: XCTestCase {
 
-    func assertBad(_ expression: @autoclosure () throws -> Void,
-                   _ fragment: String,
+    func assertBad<T>(_ expression: @autoclosure () throws -> T,
+                      _ fragment: String,
                    file: StaticString = #filePath,
                    line: UInt = #line) {
         XCTAssertThrowsError(try expression(), file: file, line: line) { err in

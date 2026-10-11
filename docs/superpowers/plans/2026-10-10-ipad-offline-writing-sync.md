@@ -516,8 +516,8 @@ import XCTest
 
 final class PathGuardTests: XCTestCase {
 
-    func assertBad(_ expression: @autoclosure () throws -> Void,
-                   _ fragment: String,
+    func assertBad<T>(_ expression: @autoclosure () throws -> T,
+                      _ fragment: String,
                    file: StaticString = #filePath,
                    line: UInt = #line) {
         XCTAssertThrowsError(try expression(), file: file, line: line) { err in
@@ -660,6 +660,8 @@ final class PathGuardTests: XCTestCase {
     }
 }
 ```
+
+> **主控裁决（Task 13.3 第四次 CI，2026-10-11）**：上方 `assertBad` 围栏原样声明为 `@autoclosure () throws -> Void`，但调用点传入的表达式返回 `String`（validateSegment/assertMd）、`[String]`（splitRel）、`URL`（resolveInRoot），autoclosure 返回类型与 `Void` 不匹配——第五次 CI（run 38127620807）在 NativeBridge 错误清除后编译深入本文件，一次报 33 条 `cannot convert value of type 'String'/'[String]'/URL' to expected argument type 'Void'`（均列 33，指向首个实参）。`XCTAssertThrowsError` 本身是泛型 API，辅助函数同步泛型化：双侧改为 `func assertBad<T>(_ expression: @autoclosure () throws -> T, _ fragment: String, ...)`，丢弃返回值即可捕获错误。6.1 WorkspaceStoreTests 的同名辅助原声明为 `() throws -> [String: Any]`（仅适配字典返回，本轮侥幸未报）一并统一为 `<T>`，消除同类隐患。
 
 - [ ] **5.2 运行模拟器测试，验证失败（Red）**
 
@@ -908,8 +910,8 @@ final class WorkspaceStoreTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func assertBad(_ expression: @autoclosure () throws -> [String: Any],
-                   _ fragment: String,
+    func assertBad<T>(_ expression: @autoclosure () throws -> T,
+                      _ fragment: String,
                    file: StaticString = #filePath,
                    line: UInt = #line) {
         XCTAssertThrowsError(try expression(), file: file, line: line) { err in

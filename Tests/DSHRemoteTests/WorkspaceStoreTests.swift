@@ -21,8 +21,8 @@ final class WorkspaceStoreTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func assertBad(_ expression: @autoclosure () throws -> [String: Any],
-                   _ fragment: String,
+    func assertBad<T>(_ expression: @autoclosure () throws -> T,
+                      _ fragment: String,
                    file: StaticString = #filePath,
                    line: UInt = #line) {
         XCTAssertThrowsError(try expression(), file: file, line: line) { err in
