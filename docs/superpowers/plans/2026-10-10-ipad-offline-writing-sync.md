@@ -372,13 +372,17 @@ final class ShellNavigationTests: XCTestCase {
 执行「模拟器测试命令」。预期此时失败：`XCTUnwrap` 报资源为 nil（测试 target 默认不拷 ShellAssets），或命中数相关断言失败。**据此落实资源取法**：在 `project.yml` 的 `DSHRemoteTests` target 增加对 ShellAssets 的 resource 依赖。编辑 `project.yml`，在测试 target（`DSHRemoteTests:`）下加入：
 
 ```yaml
-    dependencies:
-      - target: DSHRemote
-    resources:
+    sources:
+      - Tests/DSHRemoteTests
       - path: ShellAssets
+        buildPhase: resources
         type: group
         group: ""
+    dependencies:
+      - target: DSHRemote
 ```
+
+> **主控补记（第十次 CI 后，2026-10-11）**：本段最初给的是独立 `resources:` 段（`resources: - path: ShellAssets / type: group / group: ""`），但第十次 CI 日志取证发现该写法在 XcodeGen 2.46 下**对 unit-test target 不产出任何 Copy Bundle Resources**（全 build 日志零条 test target 的 CpResource），`DSHRemoteTests.xctest` 内无 shell.html，`Bundle(for:).url(forResource:)` 仍为 nil。上方已改为与 app target 完全同构的 `sources:` + 显式 `buildPhase: resources`（app target 该写法已由 15 条 CpResource 验证有效，shell.html 扁平落在 Bundle 根）。若本写法在后续 CI 仍不产 CpResource，再退回 4.1 末尾的「内联引用字符串、不依赖 Bundle」兜底（与 ShellHTMLRewriterTests 同构），不得删除该测试。
 
 重新 `xcodegen generate` 后再跑，预期测试进入对改写结果的断言；因尚未接管导航（不影响本断言），此处失败点应是「取不到资源」已解除、断言针对改写——实际 `ShellHTMLRewriter.rewrite` 已存在且白名单为 12，故该断言此刻即可通过。若如此，本 Task 的 Red 由 4.3 的导航行为单测承接。
 
@@ -2740,13 +2744,19 @@ final class AppDataStore {
     }
 
     private func normalizeIntentList(_ v: Any?) -> [String] {
-        if let arr = v as? [Any] {
-            var joined = ""
-            for o in arr { joined += normalizeIntent(o) + "\n" }
-            return parseIntents(joined)
+        let items: [Any]
+        if let strs = v as? [String] {
+            items = strs
+        } else if let arr = v as? [Any] {
+            items = arr
+        } else if let s = v as? String {
+            return parseIntents(s)
+        } else {
+            return []
         }
-        if let s = v as? String { return parseIntents(s) }
-        return []
+        var joined = ""
+        for o in items { joined += normalizeIntent(o) + "\n" }
+        return parseIntents(joined)
     }
 
     private func normalizeIntent(_ v: Any?) -> String {
@@ -6299,6 +6309,13 @@ gh run list --workflow=ios-build.yml --repo skyblade47/dsh-remote-ios -L 3
 > 7. **ShellAssets 资源入包方式（配置错）**：`project.yml` 两处 `type: folder`（蓝色 folder reference，Bundle 内保留 `ShellAssets/` 目录层级）与运行时三处扁平查找（`ShellWebView` dsh-asset handler 的 `forResource:name withExtension:nil`、shell.html 的 `forResource:"shell" withExtension:"html"`、ShellNavigationTests）不匹配，资源为 nil 导致 ShellNavigation 断言失败；两处均改为默认 `type: group`（文件扁平落在 Bundle 根）。
 >
 > 方法论沿用：`gh run view --log-failed` 落盘枚举 → 读现场/源码签名/PC 蓝本定根因 → 源码与围栏双侧改 → 全仓 Grep 扩排同款（`normalizeEditor/Preview` 零残留、`directoryFlag` 仍有 9 处使用方无死码、restoreTrash 上游已有「回收站条目不存在」前置无漏网）。派发第十次 CI 验证。
+
+> **主控裁决（Task 13.3 第十次 CI，run 38132297289，2026-10-11）——第九批 13 条修复仅余 2 条失败，其余全部转绿**：本 run 编译关继续全过；模拟器测试里第九轮所修各点（BridgeDispatcher 非数组/null 两态、AppDataStore editor/preview/drafts、PathGuard 符号链接、WorkspaceStore 等）**全部 passed**，仅剩 2 条失败，逐条取证后双侧（源码/配置 + 本文件围栏）修复：
+>
+> 1. **`AppDataStoreTests.testSaveIntentsNormalizeDedupeCap` 越界崩溃（实现错）**：日志为 `ContiguousArrayBuffer.swift: Fatal error: Index out of range`，发生在测试取 `intents[0]`。根因是 Swift 数组经 `Any` 存在性容器的下转陷阱——测试直接把 Swift 原生 `[String]` 放进 `[String: Any]`（`["send": ["intents": [" A ", …]]]`），`saveConfig` 取出后 `v as? [Any]` **不命中**（原生 Array 不经 ObjC 桥接时不做协变下转；只有 `JSONSerialization` 解析出的 NSArray 才能桥 `[Any]`，故其余经 JSON 的用例全过），`normalizeIntentList` 落到 `return []`，测试随即对空数组取下标 trap。修法：`normalizeIntentList` 先判 `v as? [String]`、再判 `v as? [Any]`，两分支共用「逐项 normalizeIntent 拼 `\n` → parseIntents」，字符串直收、其它返空——与 PC `send.js` 的 `Array.isArray(v)`（不分数组来源）逐字等价。验收以该测试 `["A","多 行","a b",40 字符], count 4` 与 30→20 断言为准。
+> 2. **`ShellNavigationTests.testBundleShellHTMLRewritesFourteenReferences` 资源 nil（配置错）**：日志 `XCTUnwrap failed: expected non-nil value of type "URL"`。全 build 日志取证：app target 有 15 条 CpResource（shell.html 等扁平落 `DSHRemote.app` 根），**test target 零条 CpResource**——4.2 当初给的独立 `resources:` 段在 XcodeGen 2.46 下对 unit-test target 不产资源拷贝。修法：把 ShellAssets 挪进 test target 的 `sources:` 并显式 `buildPhase: resources`（`type: group / group: ""`），复刻 app target 已验证有效的同构写法，测试本体不动以保留「真实壳改写」的集成覆盖；若后续 CI 仍无 CpResource，再退回 4.1 预置的内联字符串兜底。全仓 Grep 确认测试侧 `Bundle(for:)` 资源读取仅此一处，改单点即覆盖。
+>
+> 非致命 warning 记录在案、本批不动：`OutboxStoreTests` 三条 `conditional downcast from 'Int?' to 'Int' does nothing`（不影响测试结果）。派发第十一次 CI 验证。
 
 - [ ] **13.4 下载未签名 IPA（Windows）**
 

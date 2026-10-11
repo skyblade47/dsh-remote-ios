@@ -39,12 +39,16 @@ targets:
     platform: iOS
     sources:
       - Tests/DSHRemoteTests
-    dependencies:
-      - target: DSHRemote
-    resources:
+      # 🔴 2026-10-11 实测：test target 用独立 `resources:` 段（type: group / group: ""）
+      #    在 XcodeGen 2.46 下**不产出** Copy Bundle Resources（第十次 CI 日志零 CpResource 取证），
+      #    DSHRemoteTests.xctest 内无 shell.html，ShellNavigationTests 的 Bundle(for:).url 为 nil。
+      #    ⇒ 复刻 app target 已验证有效的写法：放进 `sources:` 并显式 buildPhase: resources。
       - path: ShellAssets
+        buildPhase: resources
         type: group
         group: ""
+    dependencies:
+      - target: DSHRemote
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.skyblade47.dshremote.tests

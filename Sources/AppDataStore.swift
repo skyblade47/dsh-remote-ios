@@ -589,13 +589,19 @@ final class AppDataStore {
     }
 
     private func normalizeIntentList(_ v: Any?) -> [String] {
-        if let arr = v as? [Any] {
-            var joined = ""
-            for o in arr { joined += normalizeIntent(o) + "\n" }
-            return parseIntents(joined)
+        let items: [Any]
+        if let strs = v as? [String] {
+            items = strs
+        } else if let arr = v as? [Any] {
+            items = arr
+        } else if let s = v as? String {
+            return parseIntents(s)
+        } else {
+            return []
         }
-        if let s = v as? String { return parseIntents(s) }
-        return []
+        var joined = ""
+        for o in items { joined += normalizeIntent(o) + "\n" }
+        return parseIntents(joined)
     }
 
     private func normalizeIntent(_ v: Any?) -> String {
