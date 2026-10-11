@@ -228,32 +228,18 @@ final class AppDataStoreTests: XCTestCase {
     }
 
     func testSaveIntentsNormalizeDedupeCap() {
-        print("CRUMB-1 enter")
         let r = save(["send": ["intents": [" A ", "A", "多\n行", "a\r\n\r\nb", String(repeating: "x", count: 50)]]])
-        print("CRUMB-2 save-returned ok=\(r["ok"] ?? "nil")")
-        let settings = dict(r, "settings")
-        print("CRUMB-3 settings keys=\(Array(settings.keys))")
-        let rawIntents = settings["intents"]
-        print("CRUMB-4 rawIntents type=\(String(describing: type(of: rawIntents as Any))) value=\(String(describing: rawIntents ?? "nil"))")
-        let intents = arr(settings, "intents") as? [String] ?? []
-        print("CRUMB-5 intents.count=\(intents.count)")
+        let intents = arr(dict(dict(r, "settings"), "send"), "intents") as? [String] ?? []
         XCTAssertEqual(intents[0], "A")
-        print("CRUMB-6 after [0]")
         XCTAssertEqual(intents[1], "多 行")
-        print("CRUMB-7 after [1]")
         // Java replaceAll("[\\r\\n]+", " ")：连续换行只折叠成一个空格
         XCTAssertEqual(intents[2], "a b")
-        print("CRUMB-8 after [2]")
         XCTAssertEqual(intents[3].count, 40)
-        print("CRUMB-9 after [3]")
         XCTAssertEqual(intents.count, 4)
-        print("CRUMB-10 after count")
 
         let many = (0..<30).map { "意图\($0)" }
         let r2 = save(["send": ["intents": many]])
-        print("CRUMB-11 r2 ok=\(r2["ok"] ?? "nil")")
-        XCTAssertEqual((arr(dict(r2, "settings"), "intents") as? [String])?.count, 20)
-        print("CRUMB-12 done")
+        XCTAssertEqual((arr(dict(dict(r2, "settings"), "send"), "intents") as? [String])?.count, 20)
     }
 
     func testSaveEditorNormalization() {

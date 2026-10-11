@@ -1903,7 +1903,7 @@ final class AppDataStoreTests: XCTestCase {
 
     func testSaveIntentsNormalizeDedupeCap() {
         let r = save(["send": ["intents": [" A ", "A", "多\n行", "a\r\n\r\nb", String(repeating: "x", count: 50)]]])
-        let intents = arr(dict(r, "settings"), "intents") as? [String] ?? []
+        let intents = arr(dict(dict(r, "settings"), "send"), "intents") as? [String] ?? []
         XCTAssertEqual(intents[0], "A")
         XCTAssertEqual(intents[1], "多 行")
         // Java replaceAll("[\\r\\n]+", " ")：连续换行只折叠成一个空格
@@ -1913,7 +1913,7 @@ final class AppDataStoreTests: XCTestCase {
 
         let many = (0..<30).map { "意图\($0)" }
         let r2 = save(["send": ["intents": many]])
-        XCTAssertEqual((arr(dict(r2, "settings"), "intents") as? [String])?.count, 20)
+        XCTAssertEqual((arr(dict(dict(r2, "settings"), "send"), "intents") as? [String])?.count, 20)
     }
 
     func testSaveEditorNormalization() {
@@ -6323,6 +6323,19 @@ gh run list --workflow=ios-build.yml --repo skyblade47/dsh-remote-ios -L 3
 > 第十次裁决对崩溃点的判断**被本 run 证伪了一半，如实纠正**：当时以为 `normalizeIntentList` 入口对原生 `[String]` 的 `as? [Any]` 不命中是崩溃点。入口修复（先 `[String]` 后 `[Any]`，对齐 `send.js`）本身正确、予以保留，但它**不是** trap 所在。决定性取证是 `testGetStateDefaults`（L70）——它用**完全相同**的 `arr(...) as? [String]` 读默认 intents 且 passed。差异只在数据路径：`getState()` 的 intents 来自 `readConfig()`（经 JSONSerialization，是可桥 `[Any]` 的 NSArray）；而 `saveConfig()` 的返回值 `settings` 由 `settingsConfig(next)` **不经序列化直接构造**，其中 intents 是 `normalizeIntentList` 返回的 Swift 原生 `[String]`。测试读回辅助 `arr(_:_:)` 只有 `r[key] as? [Any]`，对该原生 `[String]` 不命中 → 回退 `[]` → 紧接的 `intents[0]` 越界 trap。即陷阱在**测试读回辅助**（出口），而非归一化入口。
 >
 > 修法（双侧）：`AppDataStoreTests.arr` 增加前置分支 `if let strs = r[key] as? [String] { return strs }`，再回退 `[Any]`（后者仍服务 drafts 的 `[[String: Any]]` 取值，L328/329/344/358 不受影响）。归一化入口的 `[String]` 分支保留（生产代码经 bridge 直传原生数组时同样需要，属真实防御，与 `Array.isArray` 语义一致）。派发第十二次 CI 验证。
+
+> **主控裁决（Task 13.3 第十二次 CI，run 38133740119，2026-10-11）——`arr` 下转假设同样被证伪，停止静态推断**：仅改测试辅助 `arr` 后，**同一用例同一 `ContiguousArrayBuffer Index out of range` trap 原封不动**（started 后 10ms 内崩溃，重启后其余 156 个测试 0 failures，无 XCTAssert 失败行、无编译错误）。即第十一次裁决中「真因在 `arr` 出口下转」的结论**也不成立**，如实推翻。入口 `[String]` 分支与 `arr` 的 `[String]` 前置分支作为无害防御保留，但都不是 trap 点。`--log-failed` 无符号化堆栈，两次基于 Swift `Any`/数组下转的静态推断均被 CI 否定 ⇒ 决定改用**面包屑取证**，不再猜。
+
+> **主控裁决（Task 13.3 第十三次 CI，run 38134838395，2026-10-11）——面包屑一次性定位真因：测试取数漏了 `send` 这一层**：在崩溃用例每个关键步骤前打 `CRUMB-n`，日志在 trap 前最后输出为：
+>
+> ```text
+> CRUMB-2 save-returned ok=true
+> CRUMB-3 settings keys=["drafts","general","send","theme","preview","autosave","editor","remote"]
+> CRUMB-4 rawIntents type=Optional<Any> value=nil
+> CRUMB-5 intents.count=0
+> ```
+>
+> 真因既非入口也非 `arr`，而是**测试本身取错层级**：`saveConfig()` 的返回结构与 `getState()` 一致，intents 位于 `settings.send.intents`（settings 的键里有 `send` 而无 `intents`）；该崩溃用例却写成 `dict(r,"settings")["intents"]`（漏了 `send` 层）→ 取到 nil → `?? []` → 空数组上 `intents[0]` 越界 trap。对照组 `testGetStateDefaults`（L71）一直正确地读 `arr(dict(settings,"send"),"intents")`，故从未崩溃，也反向印证了层级。修法（双侧，仅测试）：两处取数改为 `arr(dict(dict(r,"settings"),"send"),"intents")`；面包屑定位后全部移除。`arr` 的 `[String]` 前置分支与生产入口 `[String]` 分支保留（真实防御）。派发后续 CI 验证全绿。
 
 - [ ] **13.4 下载未签名 IPA（Windows）**
 
