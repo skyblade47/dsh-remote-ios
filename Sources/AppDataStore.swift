@@ -101,10 +101,10 @@ final class AppDataStore {
             ]
         }
         if patch["editor"] != nil {
-            next["editor"] = normalizeEditor(asMap(prev["editor"]), asMap(patch["editor"]))
+            next["editor"] = normalizedKnownEditor(asMap(patch["editor"]))
         }
         if patch["preview"] != nil {
-            next["preview"] = normalizePreview(asMap(prev["preview"]), asMap(patch["preview"]))
+            next["preview"] = normalizedKnownPreview(asMap(patch["preview"]))
         }
         if patch["remote"] != nil {
             var remote = asMap(prev["remote"])
@@ -232,6 +232,7 @@ final class AppDataStore {
             bytes += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
         return [
+            "ok": true,
             "dir": dir.path,
             "files": files,
             "bytes": bytes,
@@ -454,13 +455,13 @@ final class AppDataStore {
         let patch = asMap(patchObj)
         let old = draftsLimits(prev)
         let maxFiles = patch["maxFiles"] != nil
-            ? clampLong(patch["maxFiles"], 1, 10000, old.maxFiles) : old.maxFiles
+            ? clampLong(patch["maxFiles"], 1, 10000, 1) : old.maxFiles
         let maxBytes = patch["maxBytes"] != nil
-            ? clampLong(patch["maxBytes"], 1024, 256 * 1024 * 1024, old.maxBytes)
+            ? clampLong(patch["maxBytes"], 1024, 256 * 1024 * 1024, 1024)
             : old.maxBytes
         let maxTotal = patch["maxTotalBytes"] != nil
             ? clampLong(patch["maxTotalBytes"], 1024 * 1024,
-                        4 * 1024 * 1024 * 1024, old.maxTotalBytes) : old.maxTotalBytes
+                        4 * 1024 * 1024 * 1024, 1024 * 1024) : old.maxTotalBytes
         let notify: Bool
         if patch["notifyOnStartup"] != nil {
             notify = !Self.falseBool(patch["notifyOnStartup"])
@@ -506,12 +507,6 @@ final class AppDataStore {
         return s
     }
 
-    private func normalizeEditor(_ prev: [String: Any], _ patch: [String: Any]) -> [String: Any] {
-        var merged = prev
-        for (k, v) in patch { merged[k] = v }
-        return normalizedKnownEditor(merged)
-    }
-
     private func normalizedKnownEditor(_ e: [String: Any]) -> [String: Any] {
         var out = e
         out["fontSize"] = clampFontSize(e["fontSize"])
@@ -523,12 +518,6 @@ final class AppDataStore {
         let preset = e["colorPreset"] as? String
         out["colorPreset"] = ["default", "sepia", "green"].contains(preset) ? preset : "default"
         return out
-    }
-
-    private func normalizePreview(_ prev: [String: Any], _ patch: [String: Any]) -> [String: Any] {
-        var merged = prev
-        for (k, v) in patch { merged[k] = v }
-        return normalizedKnownPreview(merged)
     }
 
     private func normalizedKnownPreview(_ p: [String: Any]) -> [String: Any] {

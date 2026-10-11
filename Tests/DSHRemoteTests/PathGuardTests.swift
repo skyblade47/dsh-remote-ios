@@ -47,7 +47,7 @@ final class PathGuardTests: XCTestCase {
         assertBad(try PathGuard.validateSegment("a|<>\""), "禁用字符")
         assertBad(try PathGuard.validateSegment("a\u{0}b"), "禁用字符")
         assertBad(try PathGuard.validateSegment(" a"), "首尾不得有空白")
-        assertBad(try PathGuard.validateSegment("a\t"), "首尾不得有空白")
+        assertBad(try PathGuard.validateSegment("a\t"), "禁用字符")
         assertBad(try PathGuard.validateSegment("a "), "首尾不得有空白")
         assertBad(try PathGuard.validateSegment("a."), "不得以点或空格结尾")
         assertBad(try PathGuard.validateSegment(String(repeating: "a", count: 121)),
@@ -119,7 +119,7 @@ final class PathGuardTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
         assertBad(try PathGuard.resolveInRoot(root: root, relPath: "link/x.md"), "路径越界")
 
-        assertBad(try PathGuard.resolveInRoot(root: root, relPath: "."), "路径为空")
+        assertBad(try PathGuard.resolveInRoot(root: root, relPath: "."), "路径段不得为")
     }
 
     func testUniquePath() throws {

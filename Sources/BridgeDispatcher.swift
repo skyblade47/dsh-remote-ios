@@ -45,7 +45,15 @@ final class BridgeDispatcher {
         } catch {
             return Self.fail("参数必须是 JSON 数组: \(error.localizedDescription)")
         }
-        let args = (parsed as? [Any]) ?? []
+        let args: [Any]
+        switch parsed {
+        case nil, is NSNull:
+            args = []
+        case let arr as [Any]:
+            args = arr
+        default:
+            return Self.fail("参数必须是 JSON 数组: 收到非数组参数（对象/标量）")
+        }
         return dispatch(method, args: args)
     }
 

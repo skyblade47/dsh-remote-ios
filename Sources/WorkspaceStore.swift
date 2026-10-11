@@ -52,7 +52,11 @@ final class WorkspaceStore {
         defer { lock.unlock() }
         let realRoot = try ensureRoot()
         let abs = try resolve(realRoot, relPath)
-        guard !directoryFlag(abs) else { throw PathGuard.bad("不是文件: \(relPath)") }
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: abs.path, isDirectory: &isDir)
+        guard exists, !isDir.boolValue else {
+            throw PathGuard.bad("不是文件: \(relPath)")
+        }
         let content = try readText(abs)
         return ["ok": true, "content": content, "mtime": mtimeMillis(abs)]
     }
@@ -127,7 +131,10 @@ final class WorkspaceStore {
         let fromName = try PathGuard.assertMd(work + "/" + oldName)
         if fromName == to { return ok("relPath", work + "/" + to) }
         let fromAbs = try resolve(realRoot, work + "/" + fromName)
-        guard !directoryFlag(fromAbs) else {
+        var fromIsDir: ObjCBool = false
+        let fromExists = FileManager.default.fileExists(atPath: fromAbs.path,
+                                                        isDirectory: &fromIsDir)
+        guard fromExists, !fromIsDir.boolValue else {
             throw PathGuard.bad("文档不存在: \(work)/\(fromName)")
         }
         let toAbs = try resolve(realRoot, work + "/" + to)
@@ -151,7 +158,10 @@ final class WorkspaceStore {
             return r
         }
         let fromAbs = try resolve(realRoot, fromWork + "/" + doc)
-        guard !directoryFlag(fromAbs) else {
+        var fromIsDir: ObjCBool = false
+        let fromExists = FileManager.default.fileExists(atPath: fromAbs.path,
+                                                        isDirectory: &fromIsDir)
+        guard fromExists, !fromIsDir.boolValue else {
             throw PathGuard.bad("文档不存在: \(fromWork)/\(doc)")
         }
         let toAbs = try resolve(realRoot, toWork + "/" + doc)
@@ -172,7 +182,10 @@ final class WorkspaceStore {
         defer { lock.unlock() }
         let realRoot = try ensureRoot()
         let fromAbs = try resolve(realRoot, work + "/" + doc)
-        guard !directoryFlag(fromAbs) else {
+        var fromIsDir: ObjCBool = false
+        let fromExists = FileManager.default.fileExists(atPath: fromAbs.path,
+                                                        isDirectory: &fromIsDir)
+        guard fromExists, !fromIsDir.boolValue else {
             throw PathGuard.bad("文档不存在: \(work)/\(doc)")
         }
         let trashDir = realRoot.appendingPathComponent(PathGuard.trashDir)

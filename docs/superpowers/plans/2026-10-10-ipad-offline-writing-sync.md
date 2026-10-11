@@ -23,7 +23,7 @@
 4. 不动 web 共享核心源仓库、不动服务端（零服务端改动）。
 5. 不复制安卓个人常量：`AppData.java` 的 `DEFAULT_GATEWAY`（`http://100.99.84.35:8080`）与 `DEFAULT_PROOF_SESSION`（`session-41bcb5c2-…`）**禁止**进入 iOS；Swift 对应缺省一律为**空串 `""`**。
 6. 本机（Windows）无 Xcode，Swift 单测只能在 GitHub Actions 的 iPad 模拟器跑；因此每个含 Swift 代码的 Task 的「验证通过」步骤都给出同一条模拟器测试命令（见下）。本地可做的验证只有：文件存在性、UTF-8/BOM、哈希、`xcodegen` 不可用故跳过。
-7. 包内资产放 `e:\项目\dsh-remote-ios\ShellAssets\`（已在 `project.yml` 以 folder reference 作为 resource 打入 Bundle，根运行时路径为 Bundle 根，`Bundle.main.url(forResource:name,withExtension:nil)` 可直接取到）。
+7. 包内资产放 `e:\项目\dsh-remote-ios\ShellAssets\`（在 `project.yml` 以 `type: group` 作为 resource 打入 Bundle，各文件扁平落在 Bundle 根，运行时 `Bundle.main.url(forResource:name,withExtension:nil)` 可直接取到；**不可用 `type: folder`**——蓝色 folder reference 会保留 `ShellAssets/` 目录层级导致扁平查找为 nil）。
 
 **模拟器测试命令（CI / mac 上执行，每个 Swift Task 复用）：**
 
@@ -376,7 +376,7 @@ final class ShellNavigationTests: XCTestCase {
       - target: DSHRemote
     resources:
       - path: ShellAssets
-        type: folder
+        type: group
         group: ""
 ```
 
@@ -783,7 +783,7 @@ enum PathGuard {
             try validateSegment(seg)
             cur.appendPathComponent(seg)
         }
-        let real = cur.standardizedFileURL.resolvingSymlinksInPath()
+        let real = realpathDeep(cur)
         let c = real.path
         let r = canonicalRoot.path
         let inside = c == r || c.hasPrefix(r + "/")
@@ -792,6 +792,19 @@ enum PathGuard {
         }
         if c == r { throw bad("拒绝：路径指向根目录本身: \(relPath)") }
         return real
+    }
+
+    static func realpathDeep(_ p: URL) -> URL {
+        var cur = p.standardizedFileURL
+        var tail: [String] = []
+        while !FileManager.default.fileExists(atPath: cur.path) {
+            let parent = cur.deletingLastPathComponent()
+            if parent.path == cur.path { break }
+            tail.insert(cur.lastPathComponent, at: 0)
+            cur = parent
+        }
+        let real = cur.resolvingSymlinksInPath()
+        return tail.reduce(real) { $0.appendingPathComponent($1) }
     }
 
     static func uniquePath(_ abs: URL, isDir: Bool) throws -> URL {
@@ -860,7 +873,7 @@ private extension NSRegularExpression {
 
 - 长度口径用 `utf16.count`（Java `String.length()` 是 UTF-16 code units）。
 - `javaTrim` 复刻 Java `String.trim()`：只去除首尾 `U+0020` 及以下（`\u{0000}…\u{0020}`）的标量；**不使用** Swift `trimmingCharacters`（其空白集合不同）。
-- `resolveInRoot` 用 `standardizedFileURL.resolvingSymlinksInPath()` 对应 Java `getCanonicalFile()`；边界判定用 `c == r || c.hasPrefix(r + "/")`，对应 Java 的 `File.separator`（iOS 上即 `/`）。
+- `resolveInRoot` 用 `realpathDeep`（逐段 realpath：向上找到最深已存在祖先做 symlink 解析再拼回不存在的尾段，对齐 PC `guard.js` 的 `realpathDeep`）对应 Java `getCanonicalFile()`，可阻断「中间是符号链接、尾段尚不存在」的逃逸；边界判定用 `c == r || c.hasPrefix(r + "/")`，对应 Java 的 `File.separator`（iOS 上即 `/`）。
 - 正则全部静态预编译，模式串与 `PathGuard.java` 逐字相同（`\u{00}-\u{1f}` 在 Swift 字符串内即以真实控制字符嵌入，等价 Java 的 `\u0000-\u001f`）。
 
 - [ ] **5.4 运行全部测试，验证通过（Green）**
@@ -1191,7 +1204,11 @@ final class WorkspaceStore {
         defer { lock.unlock() }
         let realRoot = try ensureRoot()
         let abs = try resolve(realRoot, relPath)
-        guard !directoryFlag(abs) else { throw PathGuard.bad("不是文件: \(relPath)") }
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: abs.path, isDirectory: &isDir)
+        guard exists, !isDir.boolValue else {
+            throw PathGuard.bad("不是文件: \(relPath)")
+        }
         let content = try readText(abs)
         return ["ok": true, "content": content, "mtime": mtimeMillis(abs)]
     }
@@ -1266,7 +1283,10 @@ final class WorkspaceStore {
         let fromName = try PathGuard.assertMd(work + "/" + oldName)
         if fromName == to { return ok("relPath", work + "/" + to) }
         let fromAbs = try resolve(realRoot, work + "/" + fromName)
-        guard !directoryFlag(fromAbs) else {
+        var fromIsDir: ObjCBool = false
+        let fromExists = FileManager.default.fileExists(atPath: fromAbs.path,
+                                                        isDirectory: &fromIsDir)
+        guard fromExists, !fromIsDir.boolValue else {
             throw PathGuard.bad("文档不存在: \(work)/\(fromName)")
         }
         let toAbs = try resolve(realRoot, work + "/" + to)
@@ -1290,7 +1310,10 @@ final class WorkspaceStore {
             return r
         }
         let fromAbs = try resolve(realRoot, fromWork + "/" + doc)
-        guard !directoryFlag(fromAbs) else {
+        var fromIsDir: ObjCBool = false
+        let fromExists = FileManager.default.fileExists(atPath: fromAbs.path,
+                                                        isDirectory: &fromIsDir)
+        guard fromExists, !fromIsDir.boolValue else {
             throw PathGuard.bad("文档不存在: \(fromWork)/\(doc)")
         }
         let toAbs = try resolve(realRoot, toWork + "/" + doc)
@@ -1311,7 +1334,10 @@ final class WorkspaceStore {
         defer { lock.unlock() }
         let realRoot = try ensureRoot()
         let fromAbs = try resolve(realRoot, work + "/" + doc)
-        guard !directoryFlag(fromAbs) else {
+        var fromIsDir: ObjCBool = false
+        let fromExists = FileManager.default.fileExists(atPath: fromAbs.path,
+                                                        isDirectory: &fromIsDir)
+        guard fromExists, !fromIsDir.boolValue else {
             throw PathGuard.bad("文档不存在: \(work)/\(doc)")
         }
         let trashDir = realRoot.appendingPathComponent(PathGuard.trashDir)
@@ -2226,10 +2252,10 @@ final class AppDataStore {
             ]
         }
         if patch["editor"] != nil {
-            next["editor"] = normalizeEditor(asMap(prev["editor"]), asMap(patch["editor"]))
+            next["editor"] = normalizedKnownEditor(asMap(patch["editor"]))
         }
         if patch["preview"] != nil {
-            next["preview"] = normalizePreview(asMap(prev["preview"]), asMap(patch["preview"]))
+            next["preview"] = normalizedKnownPreview(asMap(patch["preview"]))
         }
         if patch["remote"] != nil {
             var remote = asMap(prev["remote"])
@@ -2357,6 +2383,7 @@ final class AppDataStore {
             bytes += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
         return [
+            "ok": true,
             "dir": dir.path,
             "files": files,
             "bytes": bytes,
@@ -2579,13 +2606,13 @@ final class AppDataStore {
         let patch = asMap(patchObj)
         let old = draftsLimits(prev)
         let maxFiles = patch["maxFiles"] != nil
-            ? clampLong(patch["maxFiles"], 1, 10000, old.maxFiles) : old.maxFiles
+            ? clampLong(patch["maxFiles"], 1, 10000, 1) : old.maxFiles
         let maxBytes = patch["maxBytes"] != nil
-            ? clampLong(patch["maxBytes"], 1024, 256 * 1024 * 1024, old.maxBytes)
+            ? clampLong(patch["maxBytes"], 1024, 256 * 1024 * 1024, 1024)
             : old.maxBytes
         let maxTotal = patch["maxTotalBytes"] != nil
             ? clampLong(patch["maxTotalBytes"], 1024 * 1024,
-                        4 * 1024 * 1024 * 1024, old.maxTotalBytes) : old.maxTotalBytes
+                        4 * 1024 * 1024 * 1024, 1024 * 1024) : old.maxTotalBytes
         let notify: Bool
         if patch["notifyOnStartup"] != nil {
             notify = !Self.falseBool(patch["notifyOnStartup"])
@@ -2631,12 +2658,6 @@ final class AppDataStore {
         return s
     }
 
-    private func normalizeEditor(_ prev: [String: Any], _ patch: [String: Any]) -> [String: Any] {
-        var merged = prev
-        for (k, v) in patch { merged[k] = v }
-        return normalizedKnownEditor(merged)
-    }
-
     private func normalizedKnownEditor(_ e: [String: Any]) -> [String: Any] {
         var out = e
         out["fontSize"] = clampFontSize(e["fontSize"])
@@ -2648,12 +2669,6 @@ final class AppDataStore {
         let preset = e["colorPreset"] as? String
         out["colorPreset"] = ["default", "sepia", "green"].contains(preset) ? preset : "default"
         return out
-    }
-
-    private func normalizePreview(_ prev: [String: Any], _ patch: [String: Any]) -> [String: Any] {
-        var merged = prev
-        for (k, v) in patch { merged[k] = v }
-        return normalizedKnownPreview(merged)
     }
 
     private func normalizedKnownPreview(_ p: [String: Any]) -> [String: Any] {
@@ -3737,7 +3752,7 @@ final class BridgeDispatcherTests: XCTestCase {
 }
 ```
 
-说明：`dispatch(_:argsJson:)` 对 `null` 按安卓 `MiniJson.parse("null")` 非 List → 空数组处理（蓝本 `parsed instanceof List ? … : new ArrayList<>()`，注意与 `directDispatch` 的 String 分支不同——`call` 入口的裸字符串不是数组也按空数组）；`now:` 闭包仅用于番茄钟行内时间，测试注入固定 Date，断言只校验固定文本片段（`1. ` 前缀、`· 专注 25 分钟`），不断言完整日期避免时区脆弱。
+说明：`dispatch(_:argsJson:)` 参数三态——损坏 JSON 走 catch 返回「参数必须是 JSON 数组: …」；`null`/缺省（`nil`/`NSNull`）按空数组处理（对齐安卓 `MiniJson.parse("null")` 非 List → 空表）；**合法但非数组的 JSON（对象/标量）iOS 端有意收紧为 fail**（前缀同为「参数必须是 JSON 数组」，不同于 PC/安卓蓝本「非 List 一律吞为空表」的宽容口径，以 Red 测试为 iOS 规格）；`now:` 闭包仅用于番茄钟行内时间，测试注入固定 Date，断言只校验固定文本片段（`1. ` 前缀、`· 专注 25 分钟`），不断言完整日期避免时区脆弱。
 
 - [ ] **8.2 运行测试，确认失败（Red）**
 
@@ -3797,7 +3812,15 @@ final class BridgeDispatcher {
         } catch {
             return Self.fail("参数必须是 JSON 数组: \(error.localizedDescription)")
         }
-        let args = (parsed as? [Any]) ?? []
+        let args: [Any]
+        switch parsed {
+        case nil, is NSNull:
+            args = []
+        case let arr as [Any]:
+            args = arr
+        default:
+            return Self.fail("参数必须是 JSON 数组: 收到非数组参数（对象/标量）")
+        }
         return dispatch(method, args: args)
     }
 
@@ -5722,7 +5745,7 @@ git commit -m "feat(lifecycle): 切后台经 __wcFlushOnSessionEnd 同步落盘�
 
 **明确不做**（防止过度设计，等价安卓壳只借模式不搬功能）：① 不重写回网补推——writing.js:3465-3467 核心已绑 `online → refreshToday().then(drainWritingQueue)`，sync-net.js 自有 online/visibility 同步补推，ipad.js **不重复绑定任何 online 钩子**；② 不隐藏 PC 同步横幅 `#w-sync-banner`（与安卓 android-shell.js:1660 相反，既定决策）；③ 不做夜间模式/手机形态改造/FAB/appbar/长按菜单；④ 不多藏任何 spec 未列的控件（特别注意 `#w-ws-create-here`（shell.html:198）与 `#s-ws-create`（:453）**不藏**——它们是「在当前沙盒根新建」，不是「选目录」）。
 
-资产加载联动（本 Task 必须一次改齐，否则启动即崩）：shell.html 原文含 **12** 个 `/__shell__/x.(js|css)` 外链；rewriter 运行时再注入 ipad.css、ipad.js 两个 `/__shell__/` 字面量，正则统一改写后命中 **14** 次；`AssetManifest.names` 必须正好 **14**，否则既有守卫 `hits == 0 || hits == names.count` 抛 `hitCountMismatch`（ShellWebView 导航接管处 `try` 失败 → 白屏）。两新文件落在 `ShellAssets/`，该目录已在 `project.yml` 以 folder reference（`type: folder`）整体入包，**无需改 project.yml / pbxproj**。
+资产加载联动（本 Task 必须一次改齐，否则启动即崩）：shell.html 原文含 **12** 个 `/__shell__/x.(js|css)` 外链；rewriter 运行时再注入 ipad.css、ipad.js 两个 `/__shell__/` 字面量，正则统一改写后命中 **14** 次；`AssetManifest.names` 必须正好 **14**，否则既有守卫 `hits == 0 || hits == names.count` 抛 `hitCountMismatch`（ShellWebView 导航接管处 `try` 失败 → 白屏）。两新文件落在 `ShellAssets/`，该目录已在 `project.yml` 以 group（`type: group`）方式整体入包、文件扁平落在 Bundle 根，**无需改 project.yml / pbxproj**。
 
 - [ ] **12.1 先改测试：AssetManifestTests 计数 12→14**
 
@@ -6261,6 +6284,21 @@ gh run list --workflow=ios-build.yml --repo skyblade47/dsh-remote-ios -L 3
 1. 「生成 .xcodeproj」成功，objectVersion 为镜像最高 Xcode 可读写；
 2. 「运行模拟器逻辑测试」输出 `** TEST SUCCEEDED **`——涵盖 Task 2-12 全部测试（AssetManifest 14、ShellHTMLRewriterTests 五测试、ShellNavigationTests 14 命中、PathGuard/WorkspaceStore/AppDataStore/OutboxStore/BridgeDispatcher/BridgeSyncSchemeHandler/BackgroundFlusher 等）；
 3. Release 编译 + 打包成功，产物 `DSHRemote-unsigned.ipa` 上传为 artifact `DSHRemote-unsigned-ipa`，`unzip -l` 自检含可执行文件。
+
+> **主控裁决（Task 13.3 第九次 CI，run 38129070710，2026-10-11）——编译关八轮收敛后首次全过、测试真正执行的里程碑**：本 run 三关中第 1 关 xcodegen、第 2 关编译均通过（前八轮共 65 条编译错误清零：主源 3/11、测试 7/4/33/2/1/2），模拟器测试首次实际执行，暴露 **13 条运行时行为断言失败**（形态从 `: error:` 编译诊断变为 `XCTAssert failed`）。逐条对照 PC `guard.js`/Electron `main.js`、安卓蓝本与 Red 测试亲验后，分七簇裁决并已双侧（源码 + 本文件围栏）修复：
+>
+> 1. **PathGuard 符号链接逃逸（实现错）**：`resolveInRoot` 原用一次性 `cur.resolvingSymlinksInPath()`，对「中间段是 symlink、尾段尚不存在」（`link/x.md`，`link → ../../outside`）无法展开中间链接而误判在根内。新增 `realpathDeep`（向上收集不存在尾段 → 对最深已存在祖先做 realpath → 拼回尾段），逐字转写自 PC `guard.js` 的同名函数。
+> 2. **PathGuardTests 两条期望错（测试错）**：Tab（U+0009）命中 `forbiddenChars` 的控制字符类，先于首尾空白检查，期望由「首尾不得有空白」改为「禁用字符」；`relPath: "."` 经 `splitRel` 保留 `"."` 段、由 `validateSegment` 以「路径段不得为」拦截，不再走到「路径为空」。
+> 3. **WorkspaceStore 缺失文件报错归一（实现错）**：`readDoc` 原只挡目录（`directoryFlag` 对不存在返 false），缺失文件会滑到 `Data(contentsOf:)` 冒英文 localizedDescription；改为 stat-first 一次 `fileExists(atPath:isDirectory:)`，不存在或为目录统一归中文「不是文件」（对齐 PC `guard.js` readDoc 的 `statSync`+`isFile()`）。`renameDoc`/`moveDoc`/`trashDoc` 同样把 `guard !directoryFlag` 升级为 `exists && !isDir` 联合判断，缺失前置抛「文档不存在」（对齐 PC renameDoc/moveDoc/trashDoc 的 `existsSync` 前置）。
+> 4. **WorkspaceStoreTests 两条（测试错）**：`String ~= String` 在 Swift 走 Equatable 字面相等而非正则匹配，改为 `range(of:options:.regularExpression)` 非空判定；`testListTrashSortedByMtimeDesc` 第二篇文档误用 `mkDoc`（其内部先 `createWork`，首次 `trashDoc` 后作品目录仍在 → 抛「已存在」），改为直接 `writeDoc`。
+> 5. **AppDataStore 配置归一（实现错，iOS 有意收紧，偏离 Electron 蓝本）**：
+>    - `mergeDrafts` 对**键存在但值非法**的 drafts 限额，回落值由「旧值」改为**该字段下限**（maxFiles→1、maxBytes→1024、maxTotalBytes→1MiB）；**键缺失**仍取旧值。理由：Red 测试注释明定「非法值回落为该字段缺省，而非旧值」，防止非法值借旧值长期驻留。Electron `main.js` 此处更宽容，iOS 以测试为规格。
+>    - `saveConfig` 的 `editor`/`preview` patch 由「与 prev 合并后归一」改为**只对 patch 整体归一后整体替换**（空 `editor:[:]` → `fontSize` 归 0，未知键仍由 `normalizedKnown*` 的 `var out = e` 保留）；删除失去调用方的 `normalizeEditor`/`normalizePreview` 两个合并包装私法。
+>    - `draftsUsage` 返回字典补 `"ok": true`，与 `listPendingDrafts`/`clearDraft`/Bridge 契约齐口径。
+> 6. **BridgeDispatcher 参数三态（实现错，iOS 有意收紧）**：损坏 JSON 仍走 catch 报「参数必须是 JSON 数组: …」；`null`/缺省 → 空参数（保安卓 `MiniJson.parse("null")` 语义）；**合法但非数组的 JSON（对象/标量）由静默吞为空表改为 fail**（前缀同为「参数必须是 JSON 数组」）。PC/安卓蓝本对非 List 一律宽容吞空表，iOS Red 测试要求显式失败，依 TDD 以测试为规格，偏离理由记录于此。
+> 7. **ShellAssets 资源入包方式（配置错）**：`project.yml` 两处 `type: folder`（蓝色 folder reference，Bundle 内保留 `ShellAssets/` 目录层级）与运行时三处扁平查找（`ShellWebView` dsh-asset handler 的 `forResource:name withExtension:nil`、shell.html 的 `forResource:"shell" withExtension:"html"`、ShellNavigationTests）不匹配，资源为 nil 导致 ShellNavigation 断言失败；两处均改为默认 `type: group`（文件扁平落在 Bundle 根）。
+>
+> 方法论沿用：`gh run view --log-failed` 落盘枚举 → 读现场/源码签名/PC 蓝本定根因 → 源码与围栏双侧改 → 全仓 Grep 扩排同款（`normalizeEditor/Preview` 零残留、`directoryFlag` 仍有 9 处使用方无死码、restoreTrash 上游已有「回收站条目不存在」前置无漏网）。派发第十次 CI 验证。
 
 - [ ] **13.4 下载未签名 IPA（Windows）**
 

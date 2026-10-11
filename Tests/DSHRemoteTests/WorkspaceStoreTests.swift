@@ -171,7 +171,9 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(items[0]["kind"] as? String, "doc")
         XCTAssertEqual(items[0]["name"] as? String, "日记.md")
         XCTAssertEqual(items[0]["work"] as? String, "作品A")
-        XCTAssertTrue(items[0]["trashName"] as? String ?? "" ~= #"^日记-\d{8}-\d{6}\.md$"#)
+        let trashName = items[0]["trashName"] as? String ?? ""
+        XCTAssertNotNil(trashName.range(of: #"^日记-\d{8}-\d{6}\.md$"#,
+                                       options: .regularExpression))
         XCTAssertEqual(items[0]["relPath"] as? String, t["relPath"] as? String)
 
         let restored = try ws.restoreTrash(relPath: t["relPath"] as! String)
@@ -200,7 +202,7 @@ final class WorkspaceStoreTests: XCTestCase {
         _ = try mkDoc("作品A", "a.md", "x")
         _ = try ws.trashDoc(work: "作品A", name: "a.md")
         Thread.sleep(forTimeInterval: 0.02)
-        _ = try mkDoc("作品A", "b.md", "y")
+        _ = try ws.writeDoc(relPath: "作品A/b.md", content: "y")
         _ = try ws.trashDoc(work: "作品A", name: "b.md")
         let items = (try ws.listTrash())["items"] as? [[String: Any]]
         XCTAssertEqual(items?.map { $0["name"] as? String }, ["b.md", "a.md"])

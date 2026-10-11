@@ -21,7 +21,7 @@ targets:
       - Sources
       - path: ShellAssets
         buildPhase: resources
-        type: folder
+        type: group
         group: ""
     info:
       path: Resources/Info.plist
@@ -43,7 +43,7 @@ targets:
       - target: DSHRemote
     resources:
       - path: ShellAssets
-        type: folder
+        type: group
         group: ""
     settings:
       base:

@@ -109,7 +109,7 @@ enum PathGuard {
             try validateSegment(seg)
             cur.appendPathComponent(seg)
         }
-        let real = cur.standardizedFileURL.resolvingSymlinksInPath()
+        let real = realpathDeep(cur)
         let c = real.path
         let r = canonicalRoot.path
         let inside = c == r || c.hasPrefix(r + "/")
@@ -118,6 +118,19 @@ enum PathGuard {
         }
         if c == r { throw bad("拒绝：路径指向根目录本身: \(relPath)") }
         return real
+    }
+
+    static func realpathDeep(_ p: URL) -> URL {
+        var cur = p.standardizedFileURL
+        var tail: [String] = []
+        while !FileManager.default.fileExists(atPath: cur.path) {
+            let parent = cur.deletingLastPathComponent()
+            if parent.path == cur.path { break }
+            tail.insert(cur.lastPathComponent, at: 0)
+            cur = parent
+        }
+        let real = cur.resolvingSymlinksInPath()
+        return tail.reduce(real) { $0.appendingPathComponent($1) }
     }
 
     static func uniquePath(_ abs: URL, isDir: Bool) throws -> URL {
