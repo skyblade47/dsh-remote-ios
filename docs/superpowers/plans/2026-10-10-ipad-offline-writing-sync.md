@@ -6336,6 +6336,10 @@ gh run list --workflow=ios-build.yml --repo skyblade47/dsh-remote-ios -L 3
 > ```
 >
 > 真因既非入口也非 `arr`，而是**测试本身取错层级**：`saveConfig()` 的返回结构与 `getState()` 一致，intents 位于 `settings.send.intents`（settings 的键里有 `send` 而无 `intents`）；该崩溃用例却写成 `dict(r,"settings")["intents"]`（漏了 `send` 层）→ 取到 nil → `?? []` → 空数组上 `intents[0]` 越界 trap。对照组 `testGetStateDefaults`（L71）一直正确地读 `arr(dict(settings,"send"),"intents")`，故从未崩溃，也反向印证了层级。修法（双侧，仅测试）：两处取数改为 `arr(dict(dict(r,"settings"),"send"),"intents")`；面包屑定位后全部移除。`arr` 的 `[String]` 前置分支与生产入口 `[String]` 分支保留（真实防御）。派发后续 CI 验证全绿。
+>
+> **同 run 的面包屑为临时诊断提交（2e99451），正式修复在 1379b21（面包屑已全部移除）。**
+>
+> **主控裁决（Task 13.3 第十四次 CI，run 38135768880，2026-10-11）——CI 三关首次全绿，13.3 迭代收敛完成**：xcodegen / iPad 模拟器逻辑测试 / Release 未签名编译 + IPA 三关 `success`。硬证据：`** TEST SUCCEEDED **`；崩溃用例 `testSaveIntentsNormalizeDedupeCap ... passed (0.003 seconds)`；**单 launch 177 tests, 0 failures (0 unexpected)**（此前连续 run 10/11/12 均因该用例 trap 触发重启）；artifact `DSHRemote-unsigned-ipa`（438897 字节）已上传。教训记录在案：两次基于 `Any`/数组下转的静态推断（入口、`arr` 出口）均被 CI 证伪，真正的根因是**测试取数漏层级**这类与生产逻辑无关的测试自身错误；当稳定复现的 trap 无符号化堆栈、且静态推演与现象矛盾时，应第一时间上面包屑取硬证据，而非继续猜。进入 13.4 下载 IPA。
 
 - [ ] **13.4 下载未签名 IPA（Windows）**
 
