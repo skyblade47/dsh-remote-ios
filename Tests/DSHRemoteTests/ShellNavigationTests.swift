@@ -13,15 +13,4 @@ final class ShellNavigationTests: XCTestCase {
         XCTAssertFalse(out.contains("/__shell__/"))
         XCTAssertTrue(out.contains("src=\"/app#/\""))
     }
-
-    func testShouldTakeOverShellNavigation() {
-        XCTAssertTrue(ShellNavPolicy.shouldTakeOver(mainFrame: true,
-            url: URL(string: "https://gw.example.com/__shell__/shell.html")!))
-        XCTAssertFalse(ShellNavPolicy.shouldTakeOver(mainFrame: false,
-            url: URL(string: "https://gw.example.com/__shell__/shell.html")!))
-        XCTAssertFalse(ShellNavPolicy.shouldTakeOver(mainFrame: true,
-            url: URL(string: "https://gw.example.com/app#/")!))
-        XCTAssertFalse(ShellNavPolicy.shouldTakeOver(mainFrame: true,
-            url: URL(string: "https://gw.example.com/auth/login")!))
-    }
 }

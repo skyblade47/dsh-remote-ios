@@ -7,19 +7,22 @@ import WebKit
 // 承载三件与安卓壳对应的事：
 //   ① 「回环权威门」：页面脚本执行前（atDocumentStart，主框架+同源 iframe）注入 BridgeJS，
 //      其中含 globalThis.__DSH_TRANSPORT__ = { ownsHost: true } 与 wcStorage/wcWriting 桥。
-//   ② 本地资产：dsh-asset://local/<name> 由 ShellSchemeHandler 从 Bundle 应答（Task 4 的
-//      /__shell__/ 导航接管负责把主壳换成本地 HTML）。
+//   ② 本地壳资产：主壳 shell.html 永远从 Bundle 经 loadHTMLString **直达**（零网络首发），
+//      其外链 dsh-asset://local/<name> 由 ShellSchemeHandler 从 Bundle 应答。
 //   ③ wcStorage 消息桥：window.webkit.messageHandlers.dshBridge → NativeBridge →
 //      BridgeDispatcher（Documents 沙盒）；同步 *Sync 通道由 Task 10 的 dsh-bridge handler 承接。
 //
-// 本地应答路线：WKURLSchemeHandler 不能拦 http/https，故主框架 /__shell__/ 经
-// decidePolicyFor 取消 + loadHTMLString(baseURL:网关) 虚拟同源；本地资产走自定义
-// dsh-asset://（见 ShellSchemeHandler）。iframe 与 /api 等保持直连网关。
+// 本地优先路线（替代旧的「先联网 /__shell__/shell.html 再 decidePolicyFor 取消换壳」）：
+//   WKURLSchemeHandler 不能拦 http/https，故主壳不发任何网络请求，直接 loadHTMLString；
+//   文档 origin 由 baseURL 决定 —— 已配网关借网关 origin（壳内同源 /app#/ 过网关
+//   frame-ancestors 'self'、Cookie 同源），未配置则用 ShellOrigin.placeholder 占位，
+//   本地写作页离线可用（见 ShellOrigin）。配置变更时由 App 侧用 .id 重建本视图。
 // ============================================================================
 
 struct ShellWebView: UIViewRepresentable {
     let session: ShellSession
-    let urlString: String
+    /// 用户配置的网关原文（可能为空/非法）；origin 解析交给 ShellOrigin。
+    let gatewayRaw: String
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
 
@@ -47,25 +50,51 @@ struct ShellWebView: UIViewRepresentable {
         web.allowsBackForwardNavigationGestures = true
         web.customUserAgent = (web.value(forKey: "userAgent") as? String)
             .map { $0 + " DSHRemote/\(Coordinator.appVersion)" }
-        // ③ 桥在此创建并注册（早于下面的 web.load）；dispatcher 不可用时 attach 内部空操作
+        // ③ 桥在此创建并注册（早于下面的本地壳加载）；dispatcher 不可用时 attach 内部空操作
         context.coordinator.attach(to: web)
 
-        if let u = URL(string: urlString) { web.load(URLRequest(url: u)) }
+        // 本地壳直达：不发任何网络请求；origin 由 baseURL 决定（网关 origin 或占位 origin）。
+        Self.loadLocalShell(into: web, gatewayRaw: gatewayRaw)
         return web
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
-        // 地址变化时重载（简单处理；P2 再谈"两个 WebView 常驻"）
-        if let cur = web.url?.absoluteString.split(separator: "#").first.map(String.init),
-           let want = URL(string: urlString),
-           cur != "\(want.scheme ?? "")://\(want.host ?? "")\(want.path)" {
-            web.load(URLRequest(url: want))
-        }
+        // 配置变更走 App 侧 .id 重建；同一实例生命周期内 gatewayRaw 不变，无需处理。
     }
 
     static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
         // 断开 UCC → handler 强引用（NativeBridge 的 reply 已弱引 webView，这里再破 UCC 一侧）
         web.configuration.userContentController.removeScriptMessageHandler(forName: "dshBridge")
+    }
+
+    /// 从 Bundle 读取 shell.html → ShellHTMLRewriter 改写 → loadHTMLString(baseURL:) 直达。
+    /// 资产缺失/改写失败属于安装包损坏类致命错误：记录日志并加载最小错误页，绝不回退网络首发。
+    static func loadLocalShell(into webView: WKWebView, gatewayRaw: String) {
+        guard let u = Bundle.main.url(forResource: "shell", withExtension: "html"),
+              let raw = try? String(contentsOf: u, encoding: .utf8) else {
+            NSLog("[dsh-ios] 本地壳 shell.html 读取失败（Bundle 资产缺失）")
+            webView.loadHTMLString(Self.fatalPage("本地壳资源缺失"),
+                                   baseURL: ShellOrigin.baseURL(gatewayRaw: gatewayRaw))
+            return
+        }
+        do {
+            let rewritten = try ShellHTMLRewriter.rewrite(raw)
+            webView.loadHTMLString(rewritten, baseURL: ShellOrigin.baseURL(gatewayRaw: gatewayRaw))
+        } catch {
+            NSLog("[dsh-ios] 本地壳改写失败：\(error.localizedDescription)")
+            webView.loadHTMLString(Self.fatalPage("本地壳改写失败：\(error.localizedDescription)"),
+                                   baseURL: ShellOrigin.baseURL(gatewayRaw: gatewayRaw))
+        }
+    }
+
+    private static func fatalPage(_ message: String) -> String {
+        // 不依赖任何外部资源的最小内联错误页（数据转义，避免把错误文本当 HTML 注入）
+        let escaped = message
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+        return "<!doctype html><meta charset=\"utf-8\">"
+            + "<body style=\"font-family:-apple-system;padding:24px\">"
+            + "<h3>DSH Remote 启动失败</h3><p>\(escaped)</p></body>"
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
@@ -140,39 +169,5 @@ struct ShellWebView: UIViewRepresentable {
             if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
             return nil
         }
-
-        // MARK: - /__shell__/ 主框架导航接管（Task 4）
-
-        func webView(_ webView: WKWebView,
-                     decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            guard let url = navigationAction.request.url,
-                  ShellNavPolicy.shouldTakeOver(
-                    mainFrame: navigationAction.targetFrame?.isMainFrame ?? false, url: url) else {
-                decisionHandler(.allow)
-                return
-            }
-            decisionHandler(.cancel)
-            Self.loadLocalShell(into: webView, baseURL: url)
-        }
-
-        static func loadLocalShell(into webView: WKWebView, baseURL: URL) {
-            guard let u = Bundle.main.url(forResource: "shell", withExtension: "html"),
-                  let raw = try? String(contentsOf: u, encoding: .utf8),
-                  let rewritten = try? ShellHTMLRewriter.rewrite(raw) else {
-                NSLog("[DSH] 本地壳读取/改写失败，回退网络加载")
-                webView.load(URLRequest(url: baseURL))
-                return
-            }
-            webView.loadHTMLString(rewritten, baseURL: baseURL)
-        }
-    }
-}
-
-enum ShellNavPolicy {
-    static func shouldTakeOver(mainFrame: Bool, url: URL) -> Bool {
-        guard mainFrame else { return false }
-        guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
-        return c.path.hasPrefix("/__shell__/")
     }
 }

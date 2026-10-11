@@ -15,9 +15,6 @@ enum Cfg {
         get { UserDefaults.standard.string(forKey: "gateway") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "gateway") }
     }
-
-    /// 入口页：默认控制台（`/app#/`）。内核前端 UI 是 `/index.html`。
-    static let entryPath = "/app#/"
 }
 
 /// 跨 SwiftUI 视图边界共享的壳会话：让 RootView 的 scenePhase 事件够到
@@ -40,7 +37,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var urlText: String = Cfg.gateway
-    @State private var dropped = false
+    @State private var shellToken = 0
     @State private var titleTaps = 0
     @State private var showS1 = false
     @State private var showS1Alert = false
@@ -64,7 +61,8 @@ struct RootView: View {
                     }
                 }
 
-            // 顶部一条窄地址栏：只在"没配/改址"时用，正常使用可折叠
+            // 临时网关条（增量 2 会被原生设置页的「网关连接」分区取代）：
+            // 未配置时也不挡本地写作页 —— 壳永远直达，仅 [DSH] 对话需要网关。
             HStack {
                 TextField("网关 https 地址，例如 https://<xxx>.ts.net", text: $urlText)
                     .textFieldStyle(.roundedBorder)
@@ -73,7 +71,8 @@ struct RootView: View {
                     .textInputAutocapitalization(.never)
                 Button("连接") {
                     Cfg.gateway = urlText.trimmingCharacters(in: .whitespaces)
-                    dropped = false
+                    // baseURL 只能在 loadHTMLString 时定下；改网关 ⇒ 以新 origin 重建壳视图。
+                    shellToken += 1
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -82,21 +81,12 @@ struct RootView: View {
 
             Divider()
 
-            if Cfg.gateway.isEmpty || dropped {
-                ContentUnavailableView(
-                    "还没有配置网关",
-                    systemImage: "network",
-                    description: Text("填上面的 https 网关地址后点「连接」。\n免费账号路径不使用 Tailscale，网关需已开启 HTTPS（Funnel）。")
-                )
-            } else {
-                // TODO(P2)：改成 TabView（写作 / DSH 两个 WebView 常驻，切换不重载）
-                let shell = (try? GatewayURL.normalize(Cfg.gateway))?.shell
-                    ?? (Cfg.gateway + Cfg.entryPath)
-                ShellWebView(session: session, urlString: shell)
-                    .ignoresSafeArea(edges: .bottom)
-            }
+            // 本地壳永远创建：未配网关走占位 origin，本地写作页离线可用；
+            // .id 随 shellToken 变化，使「连接」后以网关 origin 重建（换 baseURL/Cookie 同源）。
+            ShellWebView(session: session, gatewayRaw: Cfg.gateway)
+                .id(shellToken)
+                .ignoresSafeArea(edges: .bottom)
         }
-        .onChange(of: Cfg.gateway) { _, _ in dropped = false }
         .onChange(of: scenePhase) { _, phase in
             // iOS 切后台不触发 pagehide；主动驱动 writing.js 的 session-end 同步落盘
             if phase == .background { session.flusher.flush() }
@@ -108,7 +98,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $showS1) {
             UIViewControllerBridge {
-                S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway))?.origin ?? "")
+                S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway)) ?? "")
             }
         }
     }

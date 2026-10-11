@@ -13,7 +13,10 @@ enum GatewayURLError: LocalizedError {
 }
 
 enum GatewayURL {
-    static func normalize(_ raw: String) throws -> (origin: String, shell: String) {
+    /// 校验并归一化网关地址，返回其 origin（无尾斜杠；保留可能的子路径前缀与端口）。
+    /// 本地优先架构下壳不再做网络首发，故只产出 origin —— 它作为壳文档 baseURL 使用
+    /// （见 ShellOrigin）。
+    static func normalize(_ raw: String) throws -> String {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw GatewayURLError.empty }
         guard let url = URL(string: text), let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
@@ -26,7 +29,6 @@ enum GatewayURL {
         let path = comps.path.hasSuffix("/")
             ? String(comps.path.dropLast())
             : comps.path
-        let origin = base + path
-        return (origin, origin + "/__shell__/shell.html")
+        return base + path
     }
 }

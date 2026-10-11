@@ -9,14 +9,15 @@ final class GatewayURLTests: XCTestCase {
     }
 
     func testAcceptsHttpsAndStripsTrailingSlash() throws {
-        let (origin, shell) = try GatewayURL.normalize("https://x.ts.net/")
-        XCTAssertEqual(origin, "https://x.ts.net")
-        XCTAssertEqual(shell, "https://x.ts.net/__shell__/shell.html")
+        XCTAssertEqual(try GatewayURL.normalize("https://x.ts.net/"), "https://x.ts.net")
     }
 
     func testAcceptsHttpsWithPathPreserved() throws {
-        let (origin, _) = try GatewayURL.normalize("https://x.ts.net/gw")
-        XCTAssertEqual(origin, "https://x.ts.net/gw")
+        XCTAssertEqual(try GatewayURL.normalize("https://x.ts.net/gw"), "https://x.ts.net/gw")
+    }
+
+    func testAcceptsHttpsWithPortPreserved() throws {
+        XCTAssertEqual(try GatewayURL.normalize("https://x.ts.net:8443/"), "https://x.ts.net:8443")
     }
 
     func testRejectsMissingHost() {
