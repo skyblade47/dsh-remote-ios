@@ -38,7 +38,7 @@ final class OutboxStoreTests: XCTestCase {
     // MARK: - 缺失文件
 
     func testListMissingFileIsEmpty() {
-        XCTAssertEqual(store.list(), [])
+        XCTAssertTrue(store.list().isEmpty)
         XCTAssertEqual(store.count(), 0)
         XCTAssertEqual(store.countByDoc(), [:])
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
@@ -166,13 +166,13 @@ final class OutboxStoreTests: XCTestCase {
 
     func testListToleratesCorruptJson() throws {
         try readRaw("{这不是 JSON")
-        XCTAssertEqual(store.list(), [])
+        XCTAssertTrue(store.list().isEmpty)
         XCTAssertEqual(store.count(), 0)
     }
 
     func testListToleratesNonArrayJson() throws {
         try readRaw("{\"relPath\":\"a.md\"}")
-        XCTAssertEqual(store.list(), [])
+        XCTAssertTrue(store.list().isEmpty)
     }
 
     func testListSkipsBadEntriesAndDefaultsQueuedAt() throws {

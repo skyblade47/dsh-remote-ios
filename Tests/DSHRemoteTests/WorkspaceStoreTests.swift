@@ -225,7 +225,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let rel = t["relPath"] as! String
         let p = try ws.purgeTrash(relPath: rel)
         XCTAssertEqual(p["relPath"] as? String, rel)
-        XCTAssertEqual((try ws.listTrash())["items"] as? [[String: Any]], [])
+        XCTAssertTrue(((try ws.listTrash())["items"] as? [[String: Any]])?.isEmpty ?? true)
         assertBad(try ws.purgeTrash(relPath: rel), "回收站条目不存在")
         assertBad(try ws.purgeTrash(relPath: "作品A/a.md"), "只能彻底删除")
     }

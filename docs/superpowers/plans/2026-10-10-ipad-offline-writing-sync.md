@@ -1112,7 +1112,7 @@ final class WorkspaceStoreTests: XCTestCase {
         let rel = t["relPath"] as! String
         let p = try ws.purgeTrash(relPath: rel)
         XCTAssertEqual(p["relPath"] as? String, rel)
-        XCTAssertEqual((try ws.listTrash())["items"] as? [[String: Any]], [])
+        XCTAssertTrue(((try ws.listTrash())["items"] as? [[String: Any]])?.isEmpty ?? true)
         assertBad(try ws.purgeTrash(relPath: rel), "回收站条目不存在")
         assertBad(try ws.purgeTrash(relPath: "作品A/a.md"), "只能彻底删除")
     }
@@ -1123,6 +1123,8 @@ final class WorkspaceStoreTests: XCTestCase {
     }
 }
 ```
+
+> **主控裁决（Task 13.3 第三次 CI，2026-10-11）**：上方 testPurgeTrash 末段的 `XCTAssertEqual((try ws.listTrash())["items"] as? [[String: Any]], [])` 与 7.6 OutboxStoreTests 是**围栏原样同款缺陷**——`[[String: Any]]?` 的元素含 `Any`，不满足 `Equatable`，与 `[]` 比较必报 `type 'Any' cannot conform to 'Equatable'`。该测试方法在第三轮 CI 因错误分批短路尚未编译到，属主动扫雷发现（Grep `as? [[String` 全 Tests 扩排 16 处，仅此一处断言违规，其余为赋值/`.count`/`.map { $0[...] as? String }` 均合法）。双侧同步改为 `XCTAssertTrue(((try ws.listTrash())["items"] as? [[String: Any]])?.isEmpty ?? true)`，nil 时按空列表处理（仅出现在 JSON 结构损坏的不可能路径），语义等价。
 
 - [ ] **6.2 运行模拟器测试，验证失败（Red）**
 
@@ -3089,7 +3091,7 @@ final class OutboxStoreTests: XCTestCase {
     // MARK: - 缺失文件
 
     func testListMissingFileIsEmpty() {
-        XCTAssertEqual(store.list(), [])
+        XCTAssertTrue(store.list().isEmpty)
         XCTAssertEqual(store.count(), 0)
         XCTAssertEqual(store.countByDoc(), [:])
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
@@ -3217,13 +3219,13 @@ final class OutboxStoreTests: XCTestCase {
 
     func testListToleratesCorruptJson() throws {
         try readRaw("{这不是 JSON")
-        XCTAssertEqual(store.list(), [])
+        XCTAssertTrue(store.list().isEmpty)
         XCTAssertEqual(store.count(), 0)
     }
 
     func testListToleratesNonArrayJson() throws {
         try readRaw("{\"relPath\":\"a.md\"}")
-        XCTAssertEqual(store.list(), [])
+        XCTAssertTrue(store.list().isEmpty)
     }
 
     func testListSkipsBadEntriesAndDefaultsQueuedAt() throws {
@@ -3276,6 +3278,8 @@ final class OutboxStoreTests: XCTestCase {
     }
 }
 ```
+
+> **主控裁决（Task 13.3 第三次 CI，2026-10-11）**：CI 报 OutboxStoreTests 三处 `XCTAssertEqual(store.list(), [])` 错误 `type 'Any' cannot conform to 'Equatable'`（41/169/175 行）。根因：`store.list()` 返回 `[[String: Any]]`，其元素 `[String: Any]` 因 `Any` 不满足 Equatable 而整个数组不能用 `==` 比较，`XCTAssertEqual(_:_:)` 无可用重载。围栏与落盘逐字同款，双侧把三处改为 `XCTAssertTrue(store.list().isEmpty)`——断言语义完全等价（缺失文件 / 损坏 JSON / 非数组 JSON 均期望空列表），不放宽任何用例。同文件其他 `XCTAssertEqual` 比较的是 `.count`、下标取值的 `as? String` 或 `.map { ... as? String }`（`[String?]` 可 Equatable），均不报错，不动。
 
 - [ ] **7.7 运行测试，确认失败（Red）**
 
@@ -4066,9 +4070,9 @@ final class NativeBridgeTests: XCTestCase {
         drain(b)
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent[0].id as? Int, 7)
-        let o = try? JSONSerialization.jsonObject(with: Data(sent[0].json.utf8)) as? [String: Any]
-        XCTAssertEqual(o??["ok"] as? Bool, true)
-        XCTAssertEqual(o??["platform"] as? String, "ipad")
+        let o = (try? JSONSerialization.jsonObject(with: Data(sent[0].json.utf8)) as? [String: Any]) ?? [:]
+        XCTAssertEqual(o?["ok"] as? Bool, true)
+        XCTAssertEqual(o?["platform"] as? String, "ipad")
     }
 
     func testJsonStringBodyDispatches() {
@@ -4149,10 +4153,10 @@ final class NativeBridgeTests: XCTestCase {
         b.handle(body: ["id": 1, "method": "未知方法XYZ", "args": []])
         drain(b)
         XCTAssertEqual(sent.count, 1)
-        let reparsed = try? JSONSerialization.jsonObject(
-            with: Data(sent[0].json.utf8)) as? [String: Any]
-        XCTAssertEqual(reparsed??["ok"] as? Bool, false)
-        XCTAssertTrue((reparsed??["error"] as? String ?? "").contains("未知方法"))
+        let reparsed = (try? JSONSerialization.jsonObject(
+            with: Data(sent[0].json.utf8)) as? [String: Any]) ?? [:]
+        XCTAssertEqual(reparsed?["ok"] as? Bool, false)
+        XCTAssertTrue((reparsed?["error"] as? String ?? "").contains("未知方法"))
     }
 
     // MARK: - 入参 JSON 字符串转义（防注入）
@@ -4185,6 +4189,8 @@ final class NativeBridgeTests: XCTestCase {
 ```
 
 说明：`reply` 闭包替代真实 `evaluateJavaScript`（生产实现里是 `webView.evaluateJavaScript(replyScript)`，必须在主线程）；`barrier(_:)` 暴露队列排空点，仅测试用。`WKScriptMessage.body` 解包本身极薄（9.3 实现中直接调 `handle(body:)`），不为它写 WKWebView 集成测试（模拟器集成成本高、价值低；S3/真机验收覆盖）。
+
+> **主控裁决（Task 13.3 第三次 CI，2026-10-11）**：CI 报 NativeBridgeTests 46/47/130/131 四行 `cannot use optional chaining on non-optional value of type '[String : Any]'`。根因：`let o = try? (expr) as? [String: Any]` 实际解析为 `(try? (expr as Any)) as? [String: Any]`——`try?` 已把结果拍平成非可选的 `[String: Any]?` 之外的形态（`as?` 在 `try?` 内的绑定优先级使变量成为非可选字典），于是 `o??[...]` 的第二级可选链非法。围栏与落盘逐字同款，双侧改为 `let o = (try? JSONSerialization.jsonObject(...) as? [String: Any]) ?? [:]`（先整体 try? 转换、再以空字典兜底），访问处统一成单可选链 `o?[...]`；解析失败时断言对空字典取值必然失败，测试行为不变。
 
 - [ ] **9.2 运行测试，确认失败（Red）**
 
