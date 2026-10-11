@@ -661,7 +661,7 @@ final class PathGuardTests: XCTestCase {
 }
 ```
 
-> **主控裁决（Task 13.3 第四次 CI，2026-10-11）**：上方 `assertBad` 围栏原样声明为 `@autoclosure () throws -> Void`，但调用点传入的表达式返回 `String`（validateSegment/assertMd）、`[String]`（splitRel）、`URL`（resolveInRoot），autoclosure 返回类型与 `Void` 不匹配——第五次 CI（run 38127620807）在 NativeBridge 错误清除后编译深入本文件，一次报 33 条 `cannot convert value of type 'String'/'[String]'/URL' to expected argument type 'Void'`（均列 33，指向首个实参）。`XCTAssertThrowsError` 本身是泛型 API，辅助函数同步泛型化：双侧改为 `func assertBad<T>(_ expression: @autoclosure () throws -> T, _ fragment: String, ...)`，丢弃返回值即可捕获错误。6.1 WorkspaceStoreTests 的同名辅助原声明为 `() throws -> [String: Any]`（仅适配字典返回，本轮侥幸未报）一并统一为 `<T>`，消除同类隐患。
+> **主控裁决（Task 13.3 第五次 CI，2026-10-11）**：上方 `assertBad` 围栏原样声明为 `@autoclosure () throws -> Void`，但调用点传入的表达式返回 `String`（validateSegment/assertMd）、`[String]`（splitRel）、`URL`（resolveInRoot），autoclosure 返回类型与 `Void` 不匹配——第五次 CI（run 38127620807）在 NativeBridge 错误清除后编译深入本文件，一次报 33 条 `cannot convert value of type 'String'/'[String]'/URL' to expected argument type 'Void'`（均列 33，指向首个实参）。`XCTAssertThrowsError` 本身是泛型 API，辅助函数同步泛型化：双侧改为 `func assertBad<T>(_ expression: @autoclosure () throws -> T, _ fragment: String, ...)`，丢弃返回值即可捕获错误。6.1 WorkspaceStoreTests 的同名辅助原声明为 `() throws -> [String: Any]`（仅适配字典返回，本轮侥幸未报）一并统一为 `<T>`，消除同类隐患。
 
 - [ ] **5.2 运行模拟器测试，验证失败（Red）**
 
@@ -4333,7 +4333,7 @@ final class BridgeJSTests: XCTestCase {
         }
         // postMessage 桩：抓取异步通道包
         let post: @convention(block) (JSValue?) -> Void = { [weak self] msg in
-            if let d = msg?.toDictionary() { self?.posted.append(d) }
+            if let d = msg?.toDictionary() as? [String: Any] { self?.posted.append(d) }
         }
         let handlers = JSValue(newObjectIn: ctx)
         let dsh = JSValue(newObjectIn: ctx)
@@ -4344,7 +4344,7 @@ final class BridgeJSTests: XCTestCase {
         ctx.setObject(webkit, forKeyedSubscript: "webkit" as NSString)
         // 同步 XHR 桩：Task 10 的 dsh-bridge://sync 行为在此模拟
         let xhrCtor: @convention(block) () -> JSValue? = { [weak self] in
-            let x = JSValue(newObjectIn: self.ctx)
+            let x = JSValue(newObjectIn: self?.ctx)
             x?.setObject(true, forKeyedSubscript: "isDSHSync" as NSString)
             x?.setObject(200, forKeyedSubscript: "status" as NSString)
             x?.setObject(JSValue(object: { (method: String, url: String, async: Bool) in
@@ -4490,6 +4490,8 @@ final class BridgeJSTests: XCTestCase {
 ```
 
 > JavaScriptCore 在 iOS 模拟器与 mac 测试宿主均可用（`import JavaScriptCore`，非 WebKit 私有 API）。微任务经 Promise 桩排空；若某 CI 上 JSC 的微任务时序不同，`testResolveByIdFulfillsPromise` 已用 expectation 等待，不依赖固定轮次。
+
+> **主控裁决（Task 13.3 第六次 CI，2026-10-11）**：run 38127978505 在 PathGuard 33 条清除后编译深入本文件，全仓仅剩 2 条错误，均在上方围栏 setUp 的两个 `@convention(block)` 桩闭包内。① L21 列 66：`JSValue.toDictionary()` 经 JavaScriptCore Swift overlay 返回 `[AnyHashable: Any]`，不能直接 append 进 `[[String: Any]]`（`posted`），须 `msg?.toDictionary() as? [String: Any]` 在 `if let` 内收窄键类型。② L32 列 42：`xhrCtor` 以 `[weak self]` 捕获，闭包内 `self` 恒为可选，`JSValue(newObjectIn:)` 须传 `self?.ctx`（同闭包后续 L44/L51 本就正确使用 `self?.`，仅此一处漏 `?`）。扫雷：全仓 `toDictionary|weak self` 共 9 处，BackgroundFlusher（源码与测试）、NativeBridgeTests、本文件其余位置均已正确收窄/加可选链，无同款残留。本文件 L42 的 `try? ... as? [String: Any]` 处于 `guard let` 绑定，合法不改。
 
 - [ ] **9.5 写实现 `Sources/BridgeJS.swift` 通过 9.4（Green 第二半）**
 

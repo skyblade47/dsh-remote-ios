@@ -18,7 +18,7 @@ final class BridgeJSTests: XCTestCase {
         }
         // postMessage 桩：抓取异步通道包
         let post: @convention(block) (JSValue?) -> Void = { [weak self] msg in
-            if let d = msg?.toDictionary() { self?.posted.append(d) }
+            if let d = msg?.toDictionary() as? [String: Any] { self?.posted.append(d) }
         }
         let handlers = JSValue(newObjectIn: ctx)
         let dsh = JSValue(newObjectIn: ctx)
@@ -29,7 +29,7 @@ final class BridgeJSTests: XCTestCase {
         ctx.setObject(webkit, forKeyedSubscript: "webkit" as NSString)
         // 同步 XHR 桩：Task 10 的 dsh-bridge://sync 行为在此模拟
         let xhrCtor: @convention(block) () -> JSValue? = { [weak self] in
-            let x = JSValue(newObjectIn: self.ctx)
+            let x = JSValue(newObjectIn: self?.ctx)
             x?.setObject(true, forKeyedSubscript: "isDSHSync" as NSString)
             x?.setObject(200, forKeyedSubscript: "status" as NSString)
             x?.setObject(JSValue(object: { (method: String, url: String, async: Bool) in
