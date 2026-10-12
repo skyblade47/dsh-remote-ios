@@ -173,7 +173,8 @@ __JS__
         let out = try ShellHTMLRewriter.rewrite(fullHTML, js: { name in
             name == "writing.js" ? "var a=1</script>var b=2</SCRIPT>var c=3" : nil
         })
-        XCTAssertTrue(out.contains(#"var a=1<\/script>var b=2<\/SCRIPT>var c=3"#))
+        // 大小写不敏感匹配、统一替换为小写形式（JS 字符串/正则/注释语境下语义不变）
+        XCTAssertTrue(out.contains(#"var a=1<\/script>var b=2<\/script>var c=3"#))
         XCTAssertFalse(out.contains("</script>var b"))
     }
 
