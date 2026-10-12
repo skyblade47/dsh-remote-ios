@@ -197,6 +197,23 @@
     syncKeepLocal: document.getElementById('w-sync-keep-local'),
     syncTrashLocal: document.getElementById('w-sync-trash-local'),
     syncState: document.getElementById('w-sync'),
+    // ⑪ D-sync-1：横幅「看远端内容」入口 + 只读浮层（看清远端新旧再决定，不碰本地一字）
+    syncRemoteView: document.getElementById('w-sync-remote-view'),
+    remoteView: document.getElementById('w-remote-view'),
+    remoteViewTitle: document.getElementById('w-remote-view-title'),
+    remoteViewBody: document.getElementById('w-remote-view-body'),
+    remoteViewClose: document.getElementById('w-remote-view-close'),
+    // ③ 查找/替换条（Ctrl+F 开合；纯逻辑在 editor-plain.js 与 node 单测同一份）
+    findbar: document.getElementById('w-findbar'),
+    findInput: document.getElementById('w-find-input'),
+    findCount: document.getElementById('w-find-count'),
+    findPrev: document.getElementById('w-find-prev'),
+    findNext: document.getElementById('w-find-next'),
+    findCase: document.getElementById('w-find-case'),
+    replaceInput: document.getElementById('w-replace-input'),
+    replaceOne: document.getElementById('w-replace-one'),
+    replaceAll: document.getElementById('w-replace-all'),
+    findClose: document.getElementById('w-find-close'),
     // 中栏（B4 起只有写作区）/ 番茄钟
     editor: document.getElementById('w-editor'),
     // 🔴 D-6：写作区锁定时的覆盖层（未选文档 / 未选工作区）
@@ -278,6 +295,12 @@
     var box = els.editor
     var Plain = window.WCEditorPlain
 
+    /** 编辑器全文（判据与发送/校对同一份：`Plain.domToText`） */
+    function getText() {
+      if (!box) return ''
+      return Plain ? Plain.domToText(box) : (box.textContent || '')
+    }
+
     /** 把光标处的选区替换成一段纯文本（`execCommand` 失败时手工做 range 插节点） */
     function insertText(text) {
       try {
@@ -295,6 +318,124 @@
       r.collapse(true)
       sel.removeAllRanges()
       sel.addRange(r)
+      box.dispatchEvent(new Event('input', { bubbles: true })) // 手工路径不触发 input ⇒ 补（自动保存靠它）
+    }
+
+    // ── 纯文本下标 ⇄ DOM 选区 的换算（③ 查找替换 / Shift+Tab 用）──────────────
+    // 走法与 `Plain.domToText` **同一套**（文本节点原样、BR 算 1、块元素前补 \n）⇒ 下标对得上。
+    // 正常路径整篇是一个文本节点 ⇒ 换算就是加减法；多节点是输入法/浏览器的偶发兜底，尽量一致。
+    function indexOf(target, offset) {
+      var idx = 0
+      var done = false
+      var lastChar = ''
+      function walk(n) {
+        if (done) return
+        if (n.nodeType === 3) {
+          if (n === target) { idx += offset; done = true; return }
+          var v = n.nodeValue || ''
+          idx += v.length
+          if (v) lastChar = v.charAt(v.length - 1)
+          return
+        }
+        if (n.nodeType !== 1) return
+        if (n.nodeName === 'BR') { idx += 1; lastChar = '\n'; return }
+        if (n === target) {
+          // 端点落在元素上：offset 是子节点序号 ⇒ 累计前 offset 个子节点的文本长
+          var kids = n.childNodes
+          for (var i = 0; i < offset && i < kids.length; i++) walk(kids[i])
+          done = true
+          return
+        }
+        if (Plain && Plain.BLOCK_TAGS[n.nodeName] && idx > 0 && lastChar !== '\n') { idx += 1; lastChar = '\n' }
+        var ks = n.childNodes
+        for (var j = 0; j < ks.length; j++) walk(ks[j])
+      }
+      walk(box)
+      return idx
+    }
+
+    /** 当前选区的纯文本下标（无选区 / 选区不在写作区内 ⇒ null） */
+    function caretOffsets() {
+      var sel = window.getSelection()
+      if (!sel || !sel.rangeCount) return null
+      var r = sel.getRangeAt(0)
+      if (!box.contains(r.startContainer) || !box.contains(r.endContainer)) return null
+      return { start: indexOf(r.startContainer, r.startOffset), end: indexOf(r.endContainer, r.endOffset) }
+    }
+
+    /** 纯文本下标 ⇒ DOM 位置（超界 ⇒ 夹到末尾） */
+    function locate(pos) {
+      var idx = 0
+      var lastChar = ''
+      var found = null
+      function walk(n) {
+        if (found) return
+        if (n.nodeType === 3) {
+          var v = n.nodeValue || ''
+          if (v.length && pos <= idx + v.length) { found = { node: n, offset: pos - idx }; return }
+          idx += v.length
+          if (v) lastChar = v.charAt(v.length - 1)
+          return
+        }
+        if (n.nodeType !== 1) return
+        if (n.nodeName === 'BR') { idx += 1; lastChar = '\n'; return }
+        if (Plain && Plain.BLOCK_TAGS[n.nodeName] && idx > 0 && lastChar !== '\n') { idx += 1; lastChar = '\n' }
+        var ks = n.childNodes
+        for (var i = 0; i < ks.length; i++) walk(ks[i])
+      }
+      walk(box)
+      if (found) return found
+      var lastText = null
+      ;(function scan(n) {
+        if (n.nodeType === 3) { lastText = n; return }
+        if (n.nodeType !== 1) return
+        var ks = n.childNodes
+        for (var i = 0; i < ks.length; i++) scan(ks[i])
+      })(box)
+      if (lastText) return { node: lastText, offset: (lastText.nodeValue || '').length }
+      return { node: box, offset: 0 }
+    }
+
+    /** 把选区设到纯文本下标 [start,end)（查找命中高亮 / Shift+Tab 选中缩进用） */
+    function selectOffsets(start, end) {
+      var a = locate(start)
+      var b = end === start ? a : locate(end)
+      var sel = window.getSelection()
+      if (!sel) return
+      var r = document.createRange()
+      r.setStart(a.node, a.offset)
+      r.setEnd(b.node, b.offset)
+      sel.removeAllRanges()
+      sel.addRange(r)
+    }
+
+    /** 把当前选区滚进写作区可视区（查找跳转用；滚动体就是 `.w-editor` 自己） */
+    function scrollSelectionIntoView() {
+      var sel = window.getSelection()
+      if (!sel || !sel.rangeCount) return
+      var rect = sel.getRangeAt(0).getBoundingClientRect()
+      if (!rect) return
+      var host = box.getBoundingClientRect()
+      if (rect.top < host.top || rect.bottom > host.bottom) {
+        box.scrollTop = Math.max(0, box.scrollTop + (rect.top - host.top) - host.height / 3)
+      }
+    }
+
+    /** Shift+Tab：删行首缩进（选中后走原生 delete ⇒ 进 undo 栈；失败才整篇重设） */
+    function dedentAtCaret() {
+      var off = caretOffsets()
+      if (!off) return
+      var r = Plain.dedentLine(getText(), off.start)
+      if (!r) return
+      selectOffsets(r.start, r.end)
+      var ok = false
+      try { ok = document.execCommand('delete') } catch (e) { ok = false }
+      if (!ok) {
+        var t = getText()
+        box.textContent = t.slice(0, r.start) + t.slice(r.end)
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      selectOffsets(r.caret, r.caret)
     }
 
     /** 占位提示：contentEditable 没有 ::placeholder ⇒ 用 `data-empty` 标记（`:empty` 会被一个空 `<br>` 破掉） */
@@ -302,6 +443,26 @@
       if (!box) return
       var empty = (Plain ? Plain.domToText(box) : box.textContent || '') === ''
       box.setAttribute('data-empty', empty ? '1' : '0')
+    }
+
+    /**
+     * 🔴 复制/剪切黏连修复（2026-10-13 用户报「复制到别的富文本编辑器里不同行黏连」）：
+     *   整篇是一个文本节点 ⇒ 浏览器默认生成的 text/html 里**没有换行标签**，
+     *   贴进 Word/飞书等外部富文本时 `\n` 被当空白折叠 ⇒ 行黏连。
+     *   这里把两种格式写全：`text/plain` 原样、`text/html` 按行给 `<div>`（外部按块解析）。
+     * @returns {string} 取出的选区文本（空 ⇒ 调用方不动剪贴板）
+     */
+    function fillClipboard(e) {
+      var sel = window.getSelection()
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return ''
+      var r = sel.getRangeAt(0)
+      if (!box.contains(r.startContainer) || !box.contains(r.endContainer)) return ''
+      var text = String(sel.toString() || '')
+      if (!text) return ''
+      e.preventDefault()
+      e.clipboardData.setData('text/plain', text)
+      e.clipboardData.setData('text/html', Plain.buildCopyHtml(text))
+      return text
     }
 
     function init() {
@@ -324,12 +485,25 @@
         })
         if (!d.prevent) return
         e.preventDefault()
-        if (d.insert) insertText(d.insert)
+        if (d.insert) { insertText(d.insert); return }
+        if (d.dedent) dedentAtCaret()
       })
       box.addEventListener('paste', function (e) {
         e.preventDefault()
         var text = Plain.pastePlain(e.clipboardData)
         if (text) insertText(text) // 插入会触发 input ⇒ onChange（undo 栈也保住了）
+      })
+      box.addEventListener('copy', function (e) { if (e.clipboardData) fillClipboard(e) })
+      // 剪切 = 复制 + 删掉选区（preventDefault 后浏览器不删 ⇒ 自己删，走原生 delete 保 undo 栈）
+      box.addEventListener('cut', function (e) {
+        if (!e.clipboardData || !fillClipboard(e)) return
+        var ok = false
+        try { ok = document.execCommand('delete') } catch (err) { ok = false }
+        if (!ok) {
+          var sel = window.getSelection()
+          if (sel && sel.rangeCount) sel.getRangeAt(0).deleteContents()
+          box.dispatchEvent(new Event('input', { bubbles: true }))
+        }
       })
       box.addEventListener('input', syncEmpty)
     }
@@ -351,10 +525,7 @@
     return {
       el: box,
       setEditable: setEditable,
-      getText: function () {
-        if (!box) return ''
-        return Plain ? Plain.domToText(box) : (box.textContent || '')
-      },
+      getText: getText,
       setValue: function (v) {
         if (!box) return
         box.textContent = v == null ? '' : String(v)
@@ -366,8 +537,143 @@
       focus: function () {
         if (box) box.focus()
       },
+      // ③ 查找替换 / 缩进用（纯逻辑在 editor-plain.js；这些是 DOM 侧仅有的几个钩子）
+      insertText: insertText,
+      caretOffsets: caretOffsets,
+      selectOffsets: selectOffsets,
+      scrollSelectionIntoView: scrollSelectionIntoView,
     }
   })()
+
+  // ── ③ 查找/替换条（2026-10-13 三段优化 · 第一段）──────────────────────────
+  // 纯逻辑（findMatches / replaceAt / replaceAll）在 editor-plain.js、与 node 单测跑同一份；
+  // 这里只做 DOM：命中用**原生选区**选中并滚进可视区（不改正文 DOM、不打断输入）。
+  var findState = { matches: [], current: -1 }
+
+  function findIsOpen() { return !!(els.findbar && !els.findbar.hidden) }
+  function findQuery() { return els.findInput ? els.findInput.value : '' }
+  function findCaseOn() { return !!(els.findCase && els.findCase.checked) }
+
+  function findOpen() {
+    if (!els.findbar) return
+    els.findbar.hidden = false
+    // 预填：写作区里有**单行**选区 ⇒ 拿它当查找词
+    var selText = ''
+    try {
+      var sel = window.getSelection()
+      if (sel && !sel.isCollapsed && sel.rangeCount) {
+        var r = sel.getRangeAt(0)
+        if (Editor.el && Editor.el.contains(r.startContainer) && Editor.el.contains(r.endContainer)) {
+          selText = String(sel.toString() || '')
+          if (selText.indexOf('\n') >= 0) selText = ''
+        }
+      }
+    } catch (e) { selText = '' }
+    if (els.findInput) {
+      if (selText) els.findInput.value = selText
+      els.findInput.focus()
+      els.findInput.select()
+    }
+    findRefresh(true)
+  }
+
+  /** 只收条、清状态（`focusEditor=false` 供切文档等内部路径用） */
+  function findHide(focusEditor) {
+    if (els.findbar) els.findbar.hidden = true
+    findState.matches = []
+    findState.current = -1
+    if (focusEditor !== false) Editor.focus()
+  }
+  function findClose() { findHide(true) }
+
+  /**
+   * 重算命中，并把"当前命中"对齐到光标（光标正落在某命中上 ⇒ 以它为准，替换后不跳走）。
+   * @param {boolean} jump true ⇒ 把当前命中选上并滚进可视区；false ⇒ 只刷新计数（写作区输入时）
+   */
+  function findRefresh(jump) {
+    if (!findIsOpen()) return
+    var Plain = window.WCEditorPlain
+    var q = findQuery()
+    findState.matches = Plain && q ? Plain.findMatches(Editor.getText(), q, { caseSensitive: findCaseOn() }) : []
+    var n = findState.matches.length
+    if (!n) {
+      findState.current = -1
+      if (els.findCount) els.findCount.textContent = q ? '无结果' : ''
+      return
+    }
+    var off = Editor.caretOffsets()
+    var pos = off ? off.start : 0
+    var cur = 0
+    for (var i = 0; i < n; i++) {
+      if (findState.matches[i].start >= pos) { cur = i; break }
+    }
+    for (var j = 0; j < n; j++) {
+      var m = findState.matches[j]
+      if (off && off.start === m.start && off.end === m.end) { cur = j; break }
+    }
+    findState.current = cur
+    if (jump) findSelectCurrent()
+    else if (els.findCount) els.findCount.textContent = (cur + 1) + '/' + n
+  }
+
+  function findSelectCurrent() {
+    var m = findState.matches[findState.current]
+    if (!m) return
+    Editor.selectOffsets(m.start, m.end)
+    Editor.scrollSelectionIntoView()
+    if (els.findCount) els.findCount.textContent = (findState.current + 1) + '/' + findState.matches.length
+  }
+
+  function findNext(dir) {
+    var n = findState.matches.length
+    if (!n) return
+    findState.current = (((findState.current + dir) % n) + n) % n
+    findSelectCurrent()
+  }
+
+  /** 替换当前命中：选中后走原生 insertText ⇒ 进 undo 栈、自然触发 input（自动保存不用补） */
+  function findReplaceOne() {
+    var m = findState.matches[findState.current]
+    if (!m) return
+    Editor.selectOffsets(m.start, m.end)
+    Editor.insertText(els.replaceInput ? els.replaceInput.value : '')
+    findRefresh(true) // 光标落在替换后文本的末尾 ⇒ 当前命中 = 下一个
+  }
+
+  /** 全部替换：整篇重设（undo 栈让位于批量操作）+ 手动补 input（程序化 setValue 不触发） */
+  function findReplaceAll() {
+    var Plain = window.WCEditorPlain
+    var q = findQuery()
+    if (!Plain || !q) return
+    var r = Plain.replaceAll(Editor.getText(), q, els.replaceInput ? els.replaceInput.value : '', { caseSensitive: findCaseOn() })
+    if (!r.count) return
+    Editor.setValue(r.text)
+    if (Editor.el) Editor.el.dispatchEvent(new Event('input', { bubbles: true }))
+    notice('已替换 ' + r.count + ' 处')
+    findRefresh(true)
+  }
+
+  function wireFind() {
+    if (els.findClose) els.findClose.addEventListener('click', findClose)
+    if (els.findNext) els.findNext.addEventListener('click', function () { findNext(1) })
+    if (els.findPrev) els.findPrev.addEventListener('click', function () { findNext(-1) })
+    if (els.replaceOne) els.replaceOne.addEventListener('click', findReplaceOne)
+    if (els.replaceAll) els.replaceAll.addEventListener('click', findReplaceAll)
+    if (els.findCase) els.findCase.addEventListener('change', function () { findRefresh(true) })
+    if (els.findInput) {
+      els.findInput.addEventListener('input', function () { findRefresh(true) })
+      els.findInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); findNext(e.shiftKey ? -1 : 1) }
+        else if (e.key === 'Escape') { e.preventDefault(); findClose() }
+      })
+    }
+    if (els.replaceInput) {
+      els.replaceInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); findReplaceOne() }
+        else if (e.key === 'Escape') { e.preventDefault(); findClose() }
+      })
+    }
+  }
 
   // ── 小工具 ──────────────────────────────────────────────────────────────
   function countWords(text) {
@@ -1738,6 +2044,8 @@
       state.lastSavedAt = 0
       Editor.setValue(res.content)
       proofReset() // B5：换文档 ⇒ 上一份的建议必须清掉（判据是"文本匹配"，留着会指错地方）
+      findHide(false) // ③ 换文档 ⇒ 旧文档的查找命中作废（不抢焦点）
+      remoteViewHide() // ⑪ D-sync-1：「看远端内容」浮层不跨文档留
       // 分栏下：选中文档后自动收起左栏浮层 —— 否则它正好盖着刚打开的正文（"用完即收"）
       if (state.split.on && state.split.docs) state.split.docs = false
       renderSidebar()
@@ -2718,6 +3026,7 @@
   function syncHideBanner() {
     state.sync.pending = null
     if (els.syncBanner) els.syncBanner.hidden = true
+    remoteViewHide() // 「看远端内容」浮层跟着横幅一起收
   }
 
   function syncBtn(btn, on) {
@@ -2761,6 +3070,8 @@
     syncBtn(els.syncTakeRemote, kind !== 'remote-deleted')
     syncBtn(els.syncKeepLocal, true)
     syncBtn(els.syncTrashLocal, kind === 'remote-deleted')
+    // ⑪ D-sync-1（b）：远端**有内容可看**的两种横幅才给「看远端内容」（已删除/缺件没得看）
+    syncBtn(els.syncRemoteView, kind === 'remote-newer' || kind === 'conflict')
     els.syncBanner.hidden = false
   }
 
@@ -2856,6 +3167,7 @@
 
   /** 真正推一次（判据在决定，这里只编排 + 上报） */
   function syncPush(rel, text) {
+    var seq = state.sync.seq // D-sync-1：重新上传成功后这个号会变 ⇒ 过期结论不许再**弹横幅**（推送本身照常）
     var localVersion = SYNC.versionOf(text)
     var base = SYNC.baselineVersionOf(state.sync.baseline, rel)
     return syncRemoteIndex(false).then(function (idx) {
@@ -2873,6 +3185,7 @@
       state.sync.last = { relPath: rel, action: d.action, at: Date.now(), dir: 'push' }
       if (d.action !== 'push') {
         // 远端动过 / 远端已删 / 无从比较 ⇒ **不推**，把决定权交回用户（复用打开时那套横幅）
+        if (seq !== state.sync.seq) return null // 🔴 D-sync-1：结论已过期（刚完成过重新上传等）⇒ 不弹横幅
         if (d.action === 'remote-newer') syncShowBanner(rel, 'remote-newer', { remoteVersion: hit ? hit.version : '' })
         else if (d.action === 'remote-deleted') syncShowBanner(rel, 'remote-deleted', { tomb: idx.tomb[rel] || null })
         else if (d.action === 'conflict') syncShowBanner(rel, 'conflict', { remoteVersion: hit ? hit.version : '' })
@@ -2923,6 +3236,13 @@
   /**
    * 「重新上传到服务器」：服务器缺这份、又没有删除墓碑时，把本地内容以 force 强覆盖写回，
    * 成功后更新基线、作废清单缓存。本地内容只读不改。
+   *
+   * 🔴 D-sync-1 修复（2026-10-12 真机首报，2026-10-13 修）：旧版在这里 `api.readDoc(rel)` 读
+   *    **正式盘快照**强推 —— 编辑器里还没落盘的新输入（自动保存去抖未触发 / 保存中又在输入）
+   *    会被旧稿盖掉 ⇒ **云端变成更旧的版本**。修复后，横幅针对的正是当前打开的文档时：
+   *    ① 先 `flush(force)` 把编辑器内容落盘；② 推 **编辑器当前稿**（flush 期间又有输入 ⇒
+   *    那份才是最新的）；③ 推送期间编辑器又变了 ⇒ 补一次 flush 让盘追上。
+   *    横幅针对的不是当前文档（开着横幅又切了篇）⇒ 该篇没有编辑缓冲，读盘即最新，走旧路径。
    */
   function syncReupload() {
     var p = state.sync.pending
@@ -2930,31 +3250,72 @@
     var rel = p.relPath
     if (p.kind === 'remote-deleted' && p.detail && p.detail.tomb) return
     syncNotice('重新上传中…')
-    api.readDoc(rel).then(function (rd) {
-      if (!rd || !rd.ok) {
-        notice('上传已中止：读不到本地这份（' + ((rd && rd.error) || '未知错误') + '）', true)
+    var isCurrent = !!(state.current && state.current.relPath === rel)
+    var step = isCurrent ? flush({ force: true, reason: 'reupload' }) : Promise.resolve({ ok: true })
+    Promise.resolve(step).then(function (fl) {
+      if (isCurrent && fl && fl.ok === false) {
+        notice('上传已中止：本地这份保存失败（' + (fl.error || '未知错误') + '）—— 未推送', true)
         return null
       }
-      return window.WCSyncNet.saveDraft(rel, rd.content, { force: true }).then(function (r) {
-        if (r && r.ok) {
-          state.sync.lastPushAt = Date.now()
-          state.sync.list = null
-          syncHideBanner()
-          syncNotice('已重新上传：' + rel)
-          notice('已重新上传到服务器：' + rel)
-          return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, r.version, Date.now()))
-        }
-        if (r && r.conflict) {
-          syncNotice('上传被拒（远端版本冲突）—— 请改用其它处理')
-          notice('服务器仍报版本冲突，未覆盖（' + ((r && r.error) || '409') + '）', true)
+      var read = isCurrent
+        ? Promise.resolve({ ok: true, content: Editor.getText() })
+        : api.readDoc(rel)
+      return read.then(function (rd) {
+        if (!rd || !rd.ok) {
+          notice('上传已中止：读不到本地这份（' + ((rd && rd.error) || '未知错误') + '）', true)
           return null
         }
-        syncNotice('未上传（' + ((r && r.error) || '失败') + '）—— 本地内容未动')
-        notice('重新上传失败：' + ((r && r.error) || '未知错误') + '（本地内容未动）', true)
-        return null
+        return window.WCSyncNet.saveDraft(rel, rd.content, { force: true }).then(function (r) {
+          if (r && r.ok) {
+            state.sync.lastPushAt = Date.now()
+            state.sync.list = null
+            state.sync.seq++ // 让重传期间并发的比对/推送结论**过期**（见 syncPush 的闸）
+            syncHideBanner()
+            syncNotice('已重新上传：' + rel)
+            notice('已重新上传到服务器：' + rel)
+            // 推送期间编辑器又有新输入 ⇒ 补一次落盘（盘追上编辑器；下一拍自动保存也会兜）
+            if (isCurrent && Editor.getText() !== rd.content) flush({ reason: 'reupload-after' })
+            return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, r.version, Date.now()))
+          }
+          if (r && r.conflict) {
+            syncNotice('上传被拒（远端版本冲突）—— 请改用其它处理')
+            notice('服务器仍报版本冲突，未覆盖（' + ((r && r.error) || '409') + '）', true)
+            return null
+          }
+          syncNotice('未上传（' + ((r && r.error) || '失败') + '）—— 本地内容未动')
+          notice('重新上传失败：' + ((r && r.error) || '未知错误') + '（本地内容未动）', true)
+          return null
+        })
       })
     }).catch(function (e) {
       notice('重新上传失败：' + ((e && e.message) || String(e)) + '（本地内容未动）', true)
+    })
+  }
+
+  /** 「看远端内容」浮层的收起（横幅收起 / 切文档时一起走） */
+  function remoteViewHide() { if (els.remoteView) els.remoteView.hidden = true }
+
+  /**
+   * ⑪ D-sync-1（b）：「看远端内容」—— **只读**浮层显示远端正文。
+   * 弹覆盖横幅时用户无从判断远端新旧（之前只能盲选）⇒ 先看清再决定；本函数不碰本地一字。
+   */
+  function syncRemoteView() {
+    var p = state.sync.pending
+    if (!p || !p.relPath || !syncReady()) return
+    var rel = p.relPath
+    if (els.remoteViewTitle) els.remoteViewTitle.textContent = '远端内容：' + rel + '（读取中…）'
+    if (els.remoteViewBody) els.remoteViewBody.textContent = ''
+    if (els.remoteView) els.remoteView.hidden = false
+    window.WCSyncNet.readDraft(rel).then(function (r) {
+      if (!r || !r.ok) {
+        if (els.remoteViewTitle) els.remoteViewTitle.textContent = '远端内容：' + rel
+        if (els.remoteViewBody) els.remoteViewBody.textContent = '（读取失败：' + ((r && r.error) || '未知错误') + '）'
+        return
+      }
+      if (els.remoteViewTitle) {
+        els.remoteViewTitle.textContent = '远端内容：' + rel + (r.version ? '（版本 ' + r.version + '）' : '')
+      }
+      if (els.remoteViewBody) els.remoteViewBody.textContent = r.content || '（远端是空文档）'
     })
   }
 
@@ -3153,6 +3514,8 @@
     if (els.syncTakeRemote) els.syncTakeRemote.addEventListener('click', syncTakeRemote)
     if (els.syncKeepLocal) els.syncKeepLocal.addEventListener('click', syncKeepLocal)
     if (els.syncTrashLocal) els.syncTrashLocal.addEventListener('click', syncTrashLocal)
+    if (els.syncRemoteView) els.syncRemoteView.addEventListener('click', syncRemoteView)
+    if (els.remoteViewClose) els.remoteViewClose.addEventListener('click', remoteViewHide)
   }
 
   // 给 sync-net.js 的窄桥（与 __wcSendBridge / __wcProofBridge 同口径）
@@ -3275,6 +3638,7 @@
       if (state.saveState !== 'saving') { state.saveState = 'dirty'; renderSaveState() }
       renderStatusBar()
       scheduleAutosave()
+      if (findIsOpen()) findRefresh(false) // ③ 查找条开着 ⇒ 重算命中与计数（不动选区、不抢焦点）
     })
 
     if (els.saveBtn) els.saveBtn.addEventListener('click', function () { flush({ force: true, reason: 'manual' }) })
@@ -3404,14 +3768,21 @@
     if (els.focusMin) els.focusMin.addEventListener('change', onPomodoroConfigChange)
     if (els.breakMin) els.breakMin.addEventListener('change', onPomodoroConfigChange)
 
-    // Ctrl/Cmd+S = 手动保存；Esc = 收起「▾ 切换」菜单 / 关掉导入模态
+    // Ctrl/Cmd+S = 手动保存；Ctrl/Cmd+F = 查找条；Esc = 收查找条/设置弹层/「▾ 切换」菜单/导入模态
     window.addEventListener('keydown', function (e) {
       if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 's') {
         e.preventDefault()
         flush({ force: true, reason: 'manual' })
         return
       }
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'f') {
+        e.preventDefault()
+        findOpen() // ③ 查找/替换（写作页主导键；浏览器默认查找对长文写作不够用）
+        return
+      }
       if (e.key === 'Escape') {
+        // ③ 查找条优先收（它浮在写作区上，最近的"弹层"）
+        if (findIsOpen()) { findClose(); return }
         // ⑤ 设置弹层在最上层 ⇒ 先关它
         if (settingsIsOpen()) { settingsClose(); return }
         if (els.importBox && !els.importBox.hidden) { importClose(); return }
@@ -3640,6 +4011,7 @@
       return
     }
     wire()
+    wireFind() // ③ 查找/替换条（按钮与输入框事件；条本身默认 hidden）
     // ⑪ C11：同步的按钮接线与基线装载（**与写作主流程解耦**：模块缺失只会让状态栏说一句实话）
     wireSync()
     initSync()

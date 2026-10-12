@@ -11,7 +11,11 @@
 //
 // 本模块只负责**判据与串行化规则**（零 DOM、零 IPC），与渲染层分工照 send.js / send-net.js 的先例：
 //   · domToText     —— contentEditable 子树 ⇒ 纯文本（BR/块元素 ⇒ `\n`）**兜底**用
-//   · decideKey     —— 键盘该不该拦（Enter 插字面换行；输入法组词中**一律不拦**）
+//   · decideKey     —— 键盘该不该拦（Enter/Shift+Enter 插字面换行；Tab 插两个全角空格缩进；
+//                     Shift+Tab 打 dedent 标记；输入法组词中**一律不拦**）
+//   · dedentLine    —— Shift+Tab 取消缩进：算出行首要删的区间与新光标
+//   · findMatches / replaceAt / replaceAll —— 查找替换的纯逻辑（Ctrl+F 查找条）
+//   · buildCopyHtml —— 复制时给剪贴板补 `text/html`（每行一个 `<div>` ⇒ 外部富文本不再行黏连）
 //   · pastePlain    —— 从剪贴板只取**纯文本**（不许外部 HTML 带样式进来）
 //
 // 🔴 两个不能省的拦截（否则纯文本不成立）：
@@ -85,18 +89,142 @@
 
   /**
    * 键盘判据（**纯函数**，只读事件字段）。
-   * @returns {{prevent:boolean, insert:(string|null)}} prevent=true 时调用方要 `preventDefault()`；
-   *   insert 非空则插入这个字面文本（Enter ⇒ `'\n'`）。
+   * @returns {{prevent:boolean, insert:(string|null), dedent?:boolean}} prevent=true 时调用方要 `preventDefault()`；
+   *   insert 非空则插入这个字面文本（Enter ⇒ `'\n'`；Tab ⇒ 两个全角空格）；
+   *   dedent=true（Shift+Tab）则由调用方走 `dedentLine` 删行首缩进。
    */
   function decideKey(ev) {
     ev = ev || {}
-    // 🔴 输入法组词中：Enter/空格 是"确认候选"，**绝不能拦**（中文输入必踩；拦了就打不出字）
+    // 🔴 输入法组词中：Enter/空格/Tab 是"确认候选"，**绝不能拦**（中文输入必踩；拦了就打不出字）
     if (ev.isComposing === true || ev.keyCode === 229) return { prevent: false, insert: null }
-    // Enter ⇒ 字面换行（不新建块；Shift/修饰键走浏览器默认：Shift+Enter 也会落到 domToText 的兜底里）
-    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    // Tab ⇒ 段落缩进（插两个全角空格，中文排版惯例）；Shift+Tab ⇒ 取消缩进（dedent 标记）。
+    // Ctrl/Alt/Meta+Tab **不拦**：系统切窗 / 浏览器切焦点的语义不能抢。
+    if (ev.key === 'Tab' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      if (ev.shiftKey) return { prevent: true, insert: null, dedent: true }
+      return { prevent: true, insert: '　　' }
+    }
+    // Enter / Shift+Enter ⇒ 字面换行（不新建块）。
+    // Shift+Enter 原先漏给浏览器默认（会造 `<div>` 靠 domToText 兜底），2026-10-13 起显式同 Enter。
+    // Ctrl/Alt/Meta+Enter 仍走浏览器默认（domToText 兜底）。
+    if (ev.key === 'Enter' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
       return { prevent: true, insert: '\n' }
     }
     return { prevent: false, insert: null }
+  }
+
+  /**
+   * 取消缩进（Shift+Tab）：删 caret 所在行的**行首缩进**，返回要删的区间与新光标。
+   * 只动行首：两个全角空格 ＞ 单个全角 ＞ 两个半角 ＞ 单个半角（按这个顺序认）。
+   * @param {string} text 编辑器全文
+   * @param {number} caret 光标（纯文本下标）
+   * @returns {{start:number, end:number, caret:number}|null} 删 `[start,end)`、光标落到 caret；行首无缩进 ⇒ `null`
+   */
+  function dedentLine(text, caret) {
+    var s = String(text == null ? '' : text)
+    var c = Number(caret)
+    if (!isFinite(c) || c < 0) c = 0
+    if (c > s.length) c = s.length
+    var lineStart = s.lastIndexOf('\n', c - 1) + 1
+    var remove = 0
+    if (s.substr(lineStart, 2) === '　　') remove = 2
+    else if (s.charAt(lineStart) === '　') remove = 1
+    else if (s.substr(lineStart, 2) === '  ') remove = 2
+    else if (s.charAt(lineStart) === ' ') remove = 1
+    if (!remove) return null
+    return { start: lineStart, end: lineStart + remove, caret: Math.max(lineStart, c - remove) }
+  }
+
+  /**
+   * 全文查找（**纯函数**，node 可单测）。
+   * @param {string} text 编辑器全文
+   * @param {string} query 查找词（空串 ⇒ 无命中）
+   * @param {{caseSensitive?:boolean}} [opts] 默认**不区分大小写**
+   * @returns {Array<{start:number, end:number}>} 按出现顺序、**不重叠**（命中后从 end 继续找）
+   */
+  function findMatches(text, query, opts) {
+    var s = String(text == null ? '' : text)
+    var q = String(query == null ? '' : query)
+    if (!q) return []
+    var cs = !!(opts && opts.caseSensitive === true)
+    var hay = cs ? s : s.toLowerCase()
+    var needle = cs ? q : q.toLowerCase()
+    var out = []
+    var pos = 0
+    for (;;) {
+      var i = hay.indexOf(needle, pos)
+      if (i < 0) break
+      out.push({ start: i, end: i + needle.length })
+      pos = i + needle.length
+    }
+    return out
+  }
+
+  /**
+   * 替换 `[start,end)` 区间 ⇒ `{text, caret}`（caret 落在替换后文本的末尾；区间自动夹紧，不抛）。
+   */
+  function replaceAt(text, start, end, replacement) {
+    var s = String(text == null ? '' : text)
+    var a = Number(start) || 0
+    var b = Number(end) || 0
+    a = Math.max(0, Math.min(a, s.length))
+    b = Math.max(a, Math.min(b, s.length))
+    var rep = String(replacement == null ? '' : replacement)
+    return { text: s.slice(0, a) + rep + s.slice(b), caret: a + rep.length }
+  }
+
+  /**
+   * 全部替换 ⇒ `{text, count}`。大小写口径与 `findMatches` 一致；
+   * 🔴 扫的是**原文**（替换串里含 query 也不会死循环）；query 为空 ⇒ 原样 + 0。
+   */
+  function replaceAll(text, query, replacement, opts) {
+    var s = String(text == null ? '' : text)
+    var q = String(query == null ? '' : query)
+    if (!q) return { text: s, count: 0 }
+    var cs = !!(opts && opts.caseSensitive === true)
+    var hay = cs ? s : s.toLowerCase()
+    var needle = cs ? q : q.toLowerCase()
+    var rep = String(replacement == null ? '' : replacement)
+    var out = []
+    var pos = 0
+    var count = 0
+    for (;;) {
+      var i = hay.indexOf(needle, pos)
+      if (i < 0) break
+      out.push(s.slice(pos, i), rep)
+      pos = i + needle.length
+      count += 1
+    }
+    if (!count) return { text: s, count: 0 }
+    out.push(s.slice(pos))
+    return { text: out.join(''), count: count }
+  }
+
+  /** HTML 转义（`buildCopyHtml` 用；原文里的 `< & > "` 不能变成标签） */
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  /**
+   * 纯文本 ⇒ 复制用的 `text/html`：**每行一个 `<div>`，空行补 `<br>`**。
+   * 🔴 为什么必须有它（2026-10-13 用户报「复制到别的富文本编辑器里不同行黏连」）：
+   *   写作区整篇是**一个文本节点**，换行只是字面 `\n`，DOM 里没有 `<br>`/`<div>` ——
+   *   浏览器默认生成的 text/html 里也就没有换行标签，贴进 Word/飞书等时 `\n` 被当空白折叠 ⇒ 行黏连。
+   *   复制时显式给出块结构，外部富文本按块解析，行就不再黏。
+   *   CRLF 文本的行尾 `\r` 顺手剥掉（不把 `\r` 带进 HTML）。
+   */
+  function buildCopyHtml(text) {
+    var lines = String(text == null ? '' : text).split('\n')
+    var out = []
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (line.slice(-1) === '\r') line = line.slice(0, -1)
+      out.push(line === '' ? '<div><br></div>' : '<div>' + escapeHtml(line) + '</div>')
+    }
+    return out.join('')
   }
 
   /**
@@ -156,6 +284,12 @@
     BLOCK_TAGS: BLOCK_TAGS,
     domToText: domToText,
     decideKey: decideKey,
+    dedentLine: dedentLine,
+    findMatches: findMatches,
+    replaceAt: replaceAt,
+    replaceAll: replaceAll,
+    escapeHtml: escapeHtml,
+    buildCopyHtml: buildCopyHtml,
     pastePlain: pastePlain,
     lockState: lockState,
   }

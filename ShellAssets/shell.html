@@ -168,6 +168,8 @@
         </div>
         <div class="w-banner-note" id="w-sync-note"></div>
         <div class="w-banner-actions">
+          <!-- ⑪ D-sync-1（b）：先「看远端内容」再决定盖不盖（只读浮层，不碰本地一字） -->
+          <button id="w-sync-remote-view" class="w-mini">看远端内容</button>
           <button id="w-sync-reupload">重新上传到服务器</button>
           <button id="w-sync-take-remote">用远端覆盖本地</button>
           <button id="w-sync-keep-local">保留本地</button>
@@ -284,6 +286,19 @@
              占位提示走 `data-empty` + `:before`（contentEditable 没有 ::placeholder）。 -->
         <div class="w-center">
           <div class="w-editor-host">
+            <!-- ③ 查找/替换条（2026-10-13 三段优化 · 第一段）：Ctrl/Cmd+F 开合，Enter 下一个、Shift+Enter 上一个、Esc 收。
+                 判据纯逻辑在 editor-plain.js（findMatches / replaceAt / replaceAll），命中用原生选区高亮（不改正文 DOM）。 -->
+            <div class="w-findbar" id="w-findbar" hidden>
+              <input type="text" id="w-find-input" placeholder="查找" autocomplete="off" />
+              <span class="w-find-count" id="w-find-count"></span>
+              <button id="w-find-prev" class="w-mini" title="上一个（Shift+Enter）">↑</button>
+              <button id="w-find-next" class="w-mini" title="下一个（Enter）">↓</button>
+              <label class="w-find-case" title="区分大小写"><input type="checkbox" id="w-find-case" />Aa</label>
+              <input type="text" id="w-replace-input" placeholder="替换为" autocomplete="off" />
+              <button id="w-replace-one" class="w-mini" title="替换当前命中（Enter）">替换</button>
+              <button id="w-replace-all" class="w-mini" title="替换全部命中">全部</button>
+              <button id="w-find-close" class="w-mini" title="关闭（Esc）">✕</button>
+            </div>
             <!-- 🔴 D-6（2026-09-28 用户实测）：**没有归属就不让写**。
                  写作区是常开的，但没选文档时写进来的内容**没有保存目标** —— 自动保存（flush）与
                  草稿兜底都会静默跳过，切文档时又被 `Editor.setValue()` 直接覆盖 ⇒ **丢字且无提示**。
@@ -298,6 +313,15 @@
             <div id="w-editor" class="w-editor" contenteditable="true" spellcheck="false"
                  role="textbox" aria-multiline="true" aria-label="写作区"
                  data-placeholder="在此写正文…"></div>
+          </div>
+          <!-- ⑪ D-sync-1（b）：「看远端内容」只读浮层 —— 弹覆盖横幅时先看清远端新旧再决定。
+               只读：不碰本地一字；跟着横幅 / 切文档一起收（见 writing.js syncHideBanner / selectDoc）。 -->
+          <div class="w-remote-view" id="w-remote-view" hidden>
+            <div class="w-remote-view-head">
+              <span class="w-remote-view-title" id="w-remote-view-title"></span>
+              <button id="w-remote-view-close" class="w-mini" title="关闭">✕</button>
+            </div>
+            <pre class="w-remote-view-body" id="w-remote-view-body"></pre>
           </div>
         </div>
 
