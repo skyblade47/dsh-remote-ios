@@ -261,6 +261,8 @@ final class BridgeDispatcherTests: XCTestCase {
         // 草稿按根隔离：乙根下读不到甲根的草稿
         let draft = mcall("readDraft", ["作品/甲.md"])
         XCTAssertEqual(draft["ok"] as? Bool, false)
+        // 番茄钟记录按根各写一份（甲根在切换前已记一次，乙根这里再记一次）
+        mcall("appendPomodoro", [[:]])
         // 番茄钟记录落在乙根
         let pomoB = container.appendingPathComponent("乙").appendingPathComponent("番茄钟记录.md")
         XCTAssertTrue(FileManager.default.fileExists(atPath: pomoB.path))
