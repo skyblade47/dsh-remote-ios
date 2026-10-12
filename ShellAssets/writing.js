@@ -214,6 +214,10 @@
     replaceOne: document.getElementById('w-replace-one'),
     replaceAll: document.getElementById('w-replace-all'),
     findClose: document.getElementById('w-find-close'),
+    // ③ 实体按钮入口（iPad 无 Tab/Ctrl 键，见 shell.html 工具栏注释）
+    findOpenBtn: document.getElementById('w-find-open'),
+    indentBtn: document.getElementById('w-indent'),
+    dedentBtn: document.getElementById('w-dedent'),
     // 中栏（B4 起只有写作区）/ 番茄钟
     editor: document.getElementById('w-editor'),
     // 🔴 D-6：写作区锁定时的覆盖层（未选文档 / 未选工作区）
@@ -539,6 +543,7 @@
       },
       // ③ 查找替换 / 缩进用（纯逻辑在 editor-plain.js；这些是 DOM 侧仅有的几个钩子）
       insertText: insertText,
+      dedent: dedentAtCaret,
       caretOffsets: caretOffsets,
       selectOffsets: selectOffsets,
       scrollSelectionIntoView: scrollSelectionIntoView,
@@ -654,6 +659,8 @@
   }
 
   function wireFind() {
+    // 实体按钮入口（iPad 触屏没有 Ctrl+F；PC 快捷键在 window keydown 里）
+    if (els.findOpenBtn) els.findOpenBtn.addEventListener('click', function () { findOpen() })
     if (els.findClose) els.findClose.addEventListener('click', findClose)
     if (els.findNext) els.findNext.addEventListener('click', function () { findNext(1) })
     if (els.findPrev) els.findPrev.addEventListener('click', function () { findNext(-1) })
@@ -3642,6 +3649,9 @@
     })
 
     if (els.saveBtn) els.saveBtn.addEventListener('click', function () { flush({ force: true, reason: 'manual' }) })
+    // ③ 缩进/取消缩进的实体按钮（iPad 虚拟键盘没有 Tab；与键盘路径同走 Editor 钩子，undo 行为一致）
+    if (els.indentBtn) els.indentBtn.addEventListener('click', function () { Editor.focus(); Editor.insertText('　　') })
+    if (els.dedentBtn) els.dedentBtn.addEventListener('click', function () { Editor.focus(); Editor.dedent() })
     if (els.pickRoot) els.pickRoot.addEventListener('click', function () { pickRoot() })
     if (els.newWork) els.newWork.addEventListener('click', newWork)
     if (els.newDoc) els.newDoc.addEventListener('click', newDoc)

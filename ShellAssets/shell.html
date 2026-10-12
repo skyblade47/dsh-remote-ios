@@ -125,6 +125,11 @@
         <!-- B5 / CR-4①：AI 校对 —— 把正文 + 固定提示词发给「校对助手」会话，结果出在右栏；
              🔴 只给建议，正文一字不改（点某一条的「应用」才改那一处）。 -->
         <button id="w-proof" title="把正文发给校对助手，只给建议、不改正文；结果出在右栏">✎ 校对</button>
+        <!-- ③ 编辑工具实体按钮（2026-10-13）：iPad 触屏没有 Tab/Ctrl 键，WKWebView 里 Ctrl+F
+             也被系统吃掉 —— 查找/缩进必须有可点的入口；PC 上它们与快捷键等价共存。 -->
+        <button id="w-find-open" title="查找 / 替换（PC：Ctrl/Cmd+F）">查找</button>
+        <button id="w-indent" title="行首缩进两个全角空格（PC：Tab）">缩进</button>
+        <button id="w-dedent" title="取消行首缩进（PC：Shift+Tab）">取消缩进</button>
         <span class="w-note" id="w-autosave">✓ 自动保存「开」</span>
         <span class="w-sep"></span>
         <div class="w-pomo">
