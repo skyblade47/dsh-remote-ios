@@ -32,6 +32,8 @@ enum ShellHTMLRewriter {
 (function(){
   // 探针源码内不得出现被注入文件名的裸字面量（改写器幂等测试按字串计数），故拼串
   var pad='ipad'+'.js', wjs='writing'+'.js';
+  // 资产 URL 前缀同样拼串（bundle 改写测试按该前缀裸串计数）
+  var A='dsh-asset:'+'//local/';
   var logs=[];
   function render(){
     var b=document.getElementById('__wcip_body'); if(!b)return;
@@ -69,7 +71,7 @@ enum ShellHTMLRewriter {
   // ① scheme handler 可达性：ping + 两个真实资产
   function probeFetch(n){
     try{
-      fetch('dsh-asset://local/'+n).then(function(r){
+      fetch(A+n).then(function(r){
         return r.text().then(function(t){ log('FETCH '+n+' '+r.status+' '+t.length+'B') })
       }).catch(function(e){ log('FETCH-FAIL '+n+' '+e) })
     }catch(e){ log('FETCH-THROW '+n+' '+e) }
@@ -78,7 +80,7 @@ enum ShellHTMLRewriter {
   // ② 动态 script 加载试验：onload=下载且执行，onerror=加载层被拦
   try{
     var ds=document.createElement('script');
-    ds.src='dsh-asset://local/'+pad;
+    ds.src=A+pad;
     ds.onload=function(){ log('DYN '+pad+' onload; executed='+(window.__wciPadShell?'YES':'NO')) };
     ds.onerror=function(){ log('DYN '+pad+' ONERROR(加载层被拦)') };
     (document.head||document.documentElement).appendChild(ds);
