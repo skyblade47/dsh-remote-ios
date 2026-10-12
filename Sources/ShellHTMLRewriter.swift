@@ -30,11 +30,13 @@ enum ShellHTMLRewriter {
     var scripts=Array.prototype.slice.call(document.querySelectorAll('script[src]')).map(function(s){
       try{return s.src.split('/').pop()}catch(e){return '?'}
     });
+    // 探针源码内不得出现被注入文件名的裸字面量（改写器幂等测试按字串计数），故拼串
+    var pad='ipad'+'.js';
     b.textContent =
       'INLINE PROBE ran ✓\n'+
       'readyState='+document.readyState+'\n'+
-      'ipad.js tag in DOM='+(scripts.indexOf('ipad.js')>=0?'YES':'NO')+'\n'+
-      'ipad.js executed='+(window.__wciPadShell?'YES':'NO')+'\n'+
+      pad+' tag in DOM='+(scripts.indexOf(pad)>=0?'YES':'NO')+'\n'+
+      pad+' executed='+(window.__wciPadShell?'YES':'NO')+'\n'+
       'wcStorage='+(typeof window.wcStorage)+'\n'+
       ((window.__wciDiagLog||[]).join('\n'));
   }
