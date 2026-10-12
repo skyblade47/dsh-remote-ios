@@ -49,6 +49,12 @@ struct ShellWebView: UIViewRepresentable {
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator
         web.allowsBackForwardNavigationGestures = true
+        // 整页橡皮筋：壳文档恒 100% 高、滚动全在内层容器（.w-tree/.w-editor 等），
+        // 外层 scrollView 的回弹只会让「整个页面被上下拉动」（用户感知像被浏览器窗口包住）
+        // ⇒ 关掉。内层列表的滚动由 WebKit 滚动树处理，不受此开关影响。
+        web.scrollView.bounces = false
+        web.scrollView.alwaysBounceVertical = false
+        web.scrollView.alwaysBounceHorizontal = false
         web.customUserAgent = (web.value(forKey: "userAgent") as? String)
             .map { $0 + " DSHRemote/\(Coordinator.appVersion)" }
         // ③ 桥在此创建并注册（早于下面的本地壳加载）；dispatcher 不可用时 attach 内部空操作
@@ -130,6 +136,9 @@ struct ShellWebView: UIViewRepresentable {
             }
             self.dispatcher = made
             super.init()
+            // 首启迁移：老版本经原生条配的网关在 UserDefaults ⇒ 回填 config.json，
+            // 让设置弹层「网关地址」显示当前生效值（config 已有值时不动）。
+            made?.seedGatewayFromShellIfNeeded(Cfg.gateway)
         }
 
         func attach(to web: WKWebView) {

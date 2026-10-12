@@ -192,6 +192,56 @@ final class AppDataStoreTests: XCTestCase {
         XCTAssertEqual(dict(dict(data.getState(), "settings"), "remote")["gateway"] as? String, "")
     }
 
+    // MARK: - saveConfig：网关保存钩子（壳以新 origin 重建的触发点）
+
+    func testSaveGatewayFiresHookWithTrimmedValue() {
+        var got: [String] = []
+        AppDataStore.onGatewaySaved = { got.append($0) }
+        defer { AppDataStore.onGatewaySaved = nil }
+        save(["remote": ["gateway": "  https://example.com:9000/x  "]])
+        XCTAssertEqual(got, ["https://example.com:9000/x"])
+    }
+
+    func testSaveGatewayInvalidDoesNotFireHook() {
+        var got: [String] = []
+        AppDataStore.onGatewaySaved = { got.append($0) }
+        defer { AppDataStore.onGatewaySaved = nil }
+        let r = data.saveConfig(["remote": ["gateway": "ftp://nope"]])
+        XCTAssertFalse((r["ok"] as? Bool) == true)
+        XCTAssertTrue(got.isEmpty)
+    }
+
+    func testSaveNonGatewayDoesNotFireHook() {
+        var called = false
+        AppDataStore.onGatewaySaved = { _ in called = true }
+        defer { AppDataStore.onGatewaySaved = nil }
+        save(["theme": "dark"])
+        XCTAssertFalse(called)
+    }
+
+    // MARK: - 首启迁移 seedGatewayIfEmpty（原生条 → config.json 回填）
+
+    func testSeedGatewayFillsEmptyConfig() {
+        data.seedGatewayIfEmpty(" https://example.com:9000/x/ ")
+        let remote = dict(dict(data.getState(), "settings"), "remote")
+        XCTAssertEqual(remote["gateway"] as? String, "https://example.com:9000/x")
+    }
+
+    func testSeedGatewayKeepsExistingConfig() {
+        save(["remote": ["gateway": "https://keep.example"]])
+        data.seedGatewayIfEmpty("https://other.example")
+        let remote = dict(dict(data.getState(), "settings"), "remote")
+        XCTAssertEqual(remote["gateway"] as? String, "https://keep.example")
+    }
+
+    func testSeedGatewayIgnoresUnnormalizable() {
+        data.seedGatewayIfEmpty("http://plain.example") // GatewayURL 只收 https
+        data.seedGatewayIfEmpty("")
+        data.seedGatewayIfEmpty("not-a-url")
+        let remote = dict(dict(data.getState(), "settings"), "remote")
+        XCTAssertEqual(remote["gateway"] as? String, "")
+    }
+
     // MARK: - saveConfig：proofread / writingPrefs / ui / intents / editor / preview
 
     func testSaveProofreadSessionValidation() {

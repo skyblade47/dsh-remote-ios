@@ -10,11 +10,16 @@ import SwiftUI
 // ============================================================================
 
 enum Cfg {
-    /// 网关基址（如 `http://100.64.0.1:8080` —— 走 tailnet 明文；或 Funnel 的 https 域名）
+    /// 网关基址（如 `https://<xxx>.ts.net` —— Funnel HTTPS；归一化口径见 GatewayURL）
     static var gateway: String {
         get { UserDefaults.standard.string(forKey: "gateway") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "gateway") }
     }
+}
+
+extension Notification.Name {
+    /// 设置弹层保存了新网关 ⇒ 壳需以新 origin 重建（baseURL 只能在 loadHTMLString 时定下）。
+    static let dshGatewayChanged = Notification.Name("dsh.gatewayChanged")
 }
 
 /// 跨 SwiftUI 视图边界共享的壳会话：让 RootView 的 scenePhase 事件够到
@@ -25,6 +30,18 @@ final class ShellSession: ObservableObject {
 
 @main
 struct DSHRemoteApp: App {
+    init() {
+        // 设置弹层（壳内 Web 侧 saveConfig）保存的网关 ⇒ 归一化后落 UserDefaults 并
+        // 通知壳重建。异步发通知：让桥的应答先回 JS，重建在下一拍发生。
+        AppDataStore.onGatewaySaved = { raw in
+            guard let origin = try? GatewayURL.normalize(raw) else { return }
+            Cfg.gateway = origin
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .dshGatewayChanged, object: nil)
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -36,7 +53,6 @@ struct RootView: View {
     @StateObject private var session = ShellSession()
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var urlText: String = Cfg.gateway
     @State private var shellToken = 0
     @State private var titleTaps = 0
     @State private var showS1 = false
@@ -61,28 +77,11 @@ struct RootView: View {
                     }
                 }
 
-            // 临时网关条（增量 2 会被原生设置页的「网关连接」分区取代）：
-            // 未配置时也不挡本地写作页 —— 壳永远直达，仅 [DSH] 对话需要网关。
-            HStack {
-                TextField("网关 https 地址，例如 https://<xxx>.ts.net", text: $urlText)
-                    .textFieldStyle(.roundedBorder)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                Button("连接") {
-                    Cfg.gateway = urlText.trimmingCharacters(in: .whitespaces)
-                    // baseURL 只能在 loadHTMLString 时定下；改网关 ⇒ 以新 origin 重建壳视图。
-                    shellToken += 1
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            .padding(8)
-
             Divider()
 
             // 本地壳永远创建：未配网关走占位 origin，本地写作页离线可用；
-            // .id 随 shellToken 变化，使「连接」后以网关 origin 重建（换 baseURL/Cookie 同源）。
+            // .id 随 shellToken 变化，使网关变更后以新 origin 重建（换 baseURL/Cookie 同源）。
+            // 网关配置入口在壳内「⚙ 设置 → 远程 → 网关地址」（saveConfig 钩子见 App init）。
             ShellWebView(session: session, gatewayRaw: Cfg.gateway)
                 .id(shellToken)
                 .ignoresSafeArea(edges: .bottom)
@@ -91,10 +90,13 @@ struct RootView: View {
             // iOS 切后台不触发 pagehide；主动驱动 writing.js 的 session-end 同步落盘
             if phase == .background { session.flusher.flush() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .dshGatewayChanged)) { _ in
+            shellToken += 1
+        }
         .alert("请先填写 https 网关", isPresented: $showS1Alert) {
             Button("好", role: .cancel) {}
         } message: {
-            Text("先在上方填写已开启 HTTPS 的网关地址并点「连接」。")
+            Text("请先在「⚙ 设置 → 远程 → 网关地址」填写已开启 HTTPS 的网关地址。")
         }
         .sheet(isPresented: $showS1) {
             UIViewControllerBridge {

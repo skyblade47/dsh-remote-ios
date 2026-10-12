@@ -187,6 +187,14 @@ final class BridgeDispatcher {
         }
     }
 
+    // MARK: - 首启迁移
+
+    /// 老版本网关经顶部原生条存在 UserDefaults ⇒ 回填 config.json（见 AppDataStore）。
+    /// 在 Coordinator 装好 dispatcher 后调用一次；config 已有值时内部不动。
+    func seedGatewayFromShellIfNeeded(_ gatewayRaw: String) {
+        appData.seedGatewayIfEmpty(gatewayRaw)
+    }
+
     // MARK: - 编排私法
 
     private func state() -> [String: Any] {

@@ -20,6 +20,11 @@ final class AppDataStore {
     private let lock = NSLock()
     private var tmpSeq: Int64 = 0
 
+    /// 网关经设置弹层保存后的应用钩子（App 侧安装：落 UserDefaults + 通知壳以新 origin
+    /// 重建）。放在 store 层只是「上报一件已落盘的事实」，store 不依赖 App/SwiftUI；
+    /// 测试里可替换为捕获闭包或留空（留空 = 纯写 config.json 的旧行为）。
+    static var onGatewaySaved: ((String) -> Void)?
+
     init(dataDir: URL) {
         self.dataDir = dataDir
     }
@@ -84,6 +89,7 @@ final class AppDataStore {
         defer { lock.unlock() }
         var prev = readConfig()
         var next = prev
+        var savedGateway: String? = nil
 
         if patch["pomodoro"] != nil {
             next["pomodoro"] = mergePomodoro(prev["pomodoro"], patch["pomodoro"])
@@ -150,6 +156,7 @@ final class AppDataStore {
                     return fail("BadRequest: gateway 必须是 http(s):// 地址")
                 }
                 remote["gateway"] = gw
+                savedGateway = gw
             }
             if pr["port"] != nil {
                 remote["port"] = clampLong(pr["port"], 1024, 65535, Self.defaultPort)
@@ -167,6 +174,10 @@ final class AppDataStore {
         }
         _ = prev
 
+        // 网关已校验并落盘 ⇒ 上报 App 侧（写 UserDefaults + 通知壳重建 origin）；
+        // 仍在锁内同步调用，钩子里若有重活应自行 async（App 侧实现即如此）。
+        if let gw = savedGateway { Self.onGatewaySaved?(gw) }
+
         var configView: [String: Any] = [:]
         configView["pomodoro"] = next["pomodoro"] ?? NSNull()
         configView["ui"] = next["ui"] ?? NSNull()
@@ -178,6 +189,25 @@ final class AppDataStore {
             "config": configView,
             "settings": settingsConfig(next)
         ]
+    }
+
+    // MARK: - 首启迁移
+
+    /// 老版本经顶部原生条配置的网关只在 UserDefaults，config.json 里没有 ⇒ 回填一次，
+    /// 让设置弹层的「网关地址」显示当前生效值。config 已有值时不动（以 config 为准）。
+    /// 与壳 origin 同一口径归一化（GatewayURL）；归一化失败（如 http）不回填。
+    func seedGatewayIfEmpty(_ gatewayRaw: String) {
+        let gw = gatewayRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !gw.isEmpty, let origin = try? GatewayURL.normalize(gw) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        var cfg = readConfig()
+        var remote = asMap(cfg["remote"])
+        let existing = Self.stringOf(remote["gateway"]).trimmingJava()
+        guard existing.isEmpty else { return }
+        remote["gateway"] = origin
+        cfg["remote"] = remote
+        try? writeConfig(cfg)
     }
 
     // MARK: - 草稿
