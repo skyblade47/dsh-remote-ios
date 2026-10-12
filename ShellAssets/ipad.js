@@ -1,10 +1,13 @@
 /* ipad.js —— iOS 壳侧附加脚本（rewriter 在 sync-net.js 之后、内联 tab 脚本之前注入）
- * 本地优先壳的 iPad 适配，做三件事：
+ * 本地优先壳的 iPad 适配，做四件事：
  *   0. 默认落在[写作]页（本地程序与工作区）；未配网关时让 [DSH] iframe 不发无效请求，
  *      配了网关则恢复同源 /app#/（对话=网关虚拟同源）；
  *   1. visualViewport resize 时让光标行保持可见（interactive-widget=resizes-content
  *      已由 rewriter 写进 viewport meta，此为 WebKit 支持不全时的兜底）；
- *   2. 点编辑区/输入框之外的空白主动 blur 收键盘，并暴露 window.__wciPadDismissKeyboard。
+ *   2. 点编辑区/输入框之外的空白主动 blur 收键盘，并暴露 window.__wciPadDismissKeyboard；
+ *   3. 沙盒多工作区：覆盖 pickRoot/pickDir —— iOS 无系统选目录能力，改为枚举
+ *      Documents/workspace 容器内的子工作区（listRoots/switchRoot/createRoot），
+ *      用壳层自带浮层完成「选择 / 新建」，writing.js 与 PC 契约一行不改。
  * 明确不做：online 回网补推（writing.js 核心已绑 online 钩子，不重复）、
  *           分栏 pointer 交互（核心已实现，CSS touch-action 即够）、横幅/主题/手机形态。
  */
@@ -110,9 +113,216 @@
     dismissKeyboard()
   }, true)
 
+  // ───────────────────────── 3. 沙盒多工作区 ─────────────────────────
+  //
+  // PC 上 pickRoot/pickDir 弹的是系统目录选择器；iOS 沙盒里应用只能读写自己的容器，
+  // 不存在「任选宿主目录」。原生侧因此对这两个方法回 NotSupported，改由这里在 JS 层
+  // 覆盖（BridgeJS 的 wcStorage 是 Proxy，对同名属性赋函数即覆盖，见 testShellCanOverride…）：
+  //   · pickRoot()：列出容器内已有子工作区，点选 ⇒ switchRoot；浮层里也能直接新建 ⇒ createRoot。
+  //   · pickDir() ：「新建到指定位置」在 iPad 上唯一合法的父目录就是容器本身，
+  //                 直接回容器路径（由 listRoots().container 取得），不再让用户选宿主路径。
+  // 返回形状严格对齐 writing.js 的消费：
+  //   pickRoot ⇒ {ok:true,root} | {ok:false,canceled:true} | {ok:false,error}
+  //   pickDir  ⇒ {ok:true,dir}    | {ok:false,canceled:true} | {ok:false,error}
+
+  var api = window.wcStorage
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag)
+    if (cls) n.className = cls
+    if (text != null) n.textContent = text
+    return n
+  }
+
+  // 自建浮层（不依赖 writing.css 的模态类，壳层自治；样式见 ipad.css 的 .wci-*）。
+  // 返回 {overlay, box, body, close}，body 由调用方填充，close 负责移除并还原滚动。
+  // onClose 在用户点「取消」或点遮罩时触发一次（程序化 close 不触发），供调用方 resolve(canceled)。
+  function openOverlay(titleText, onClose) {
+    var overlay = el('div', 'wci-overlay')
+    var box = el('div', 'wci-box')
+    var head = el('div', 'wci-head')
+    head.appendChild(el('span', 'wci-title', titleText))
+    var closeBtn = el('button', 'wci-x', '取消')
+    head.appendChild(closeBtn)
+    var body = el('div', 'wci-body')
+    box.appendChild(head)
+    box.appendChild(body)
+    overlay.appendChild(box)
+
+    var prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    var removed = false
+    function dismiss() {
+      if (removed) return
+      removed = true
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay)
+      document.body.style.overflow = prevOverflow
+    }
+    function close() {
+      dismiss()
+      if (typeof onClose === 'function') onClose()
+    }
+    closeBtn.addEventListener('click', close)
+    overlay.addEventListener('pointerdown', function (e) {
+      if (e.target === overlay) close()
+    })
+    document.body.appendChild(overlay)
+    return { overlay: overlay, box: box, body: body, close: dismiss }
+  }
+
+  // 「新建工作区」小块：输入名 + 按钮，promise 成功回 root 路径，取消/关闭不 resolve。
+  function mountCreateBlock(body, onCreated, defaultName) {
+    var row = el('div', 'wci-create')
+    var input = el('input')
+    input.type = 'text'
+    input.setAttribute('aria-label', '新工作区名')
+    input.placeholder = '新工作区名'
+    input.value = defaultName || ''
+    var btn = el('button', 'wci-primary', '新建并进入')
+    row.appendChild(input)
+    row.appendChild(btn)
+    body.appendChild(row)
+
+    function submit() {
+      var name = input.value.trim()
+      if (!name) { input.focus(); return }
+      btn.disabled = true
+      // parentDir 传 null：iPad 一律落在容器内；createRoot 成功后原生已把它切为当前根。
+      Promise.resolve(api.createRoot(name, null)).then(function (res) {
+        if (res && res.ok) { onCreated(res.root); return }
+        btn.disabled = false
+        showError(res && res.error)
+      }).catch(function (e) {
+        btn.disabled = false
+        showError(e && e.message ? e.message : String(e))
+      })
+    }
+    btn.addEventListener('click', submit)
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); submit() }
+    })
+    setTimeout(function () { input.focus() }, 0)
+    return input
+  }
+
+  function showError(message) {
+    var existing = document.querySelector('.wci-box .wci-err')
+    var node = existing || el('div', 'wci-err')
+    node.textContent = message || '未知错误'
+    if (!existing) {
+      var box = document.querySelector('.wci-box')
+      if (box) box.appendChild(node)
+    }
+  }
+
+  // pickRoot 的浮层内容：已有工作区列表（点选切换）+ 底部新建块。
+  function openRootPicker() {
+    return new Promise(function (resolve) {
+      var settled = false
+      function done(val) {
+        if (settled) return
+        settled = true
+        ui.close()
+        resolve(val)
+      }
+      // 用户点「取消」/遮罩 ⇒ 对齐 PC 的 canceled，writing.js 静默收束。
+      var ui = openOverlay('选择沙盒内工作区', function () {
+        done({ ok: false, canceled: true })
+      })
+      ui.body.appendChild(el('p', 'wci-sub',
+        '工作区都在本应用沙盒的 workspace 容器内；点一个进入，或在下面新建。'))
+
+      Promise.resolve(api.listRoots()).then(function (res) {
+        if (!res || !res.ok) { done({ ok: false, error: (res && res.error) || '读取工作区列表失败' }); return }
+        var roots = Array.isArray(res.roots) ? res.roots : []
+        if (roots.length) {
+          var list = el('div', 'wci-list')
+          roots.forEach(function (r) {
+            var item = el('button', 'wci-item')
+            item.appendChild(el('span', 'wci-item-name', r.name))
+            if (r.current) item.appendChild(el('span', 'wci-badge', '当前'))
+            item.addEventListener('click', function () {
+              if (r.current) { done({ ok: true, root: r.root }); return }
+              item.disabled = true
+              Promise.resolve(api.switchRoot(r.name)).then(function (sr) {
+                if (sr && sr.ok) { done({ ok: true, root: sr.root }); return }
+                item.disabled = false
+                showError(sr && sr.error)
+              }).catch(function (e) {
+                item.disabled = false
+                showError(e && e.message ? e.message : String(e))
+              })
+            })
+            list.appendChild(item)
+          })
+          ui.body.appendChild(list)
+        } else {
+          ui.body.appendChild(el('p', 'wci-empty', '容器内还没有工作区，请在下面新建第一个。'))
+        }
+
+        ui.body.appendChild(el('div', 'wci-sep'))
+        mountCreateBlock(ui.body, function (root) { done({ ok: true, root: root }) },
+          defaultRootName())
+      }).catch(function (e) {
+        done({ ok: false, error: e && e.message ? e.message : String(e) })
+      })
+    })
+  }
+
+  // 默认名与 writing.js 空态输入框保持一致（它在 getState 后回填 w-new-root-name）。
+  function defaultRootName() {
+    var n = document.getElementById('w-new-root-name')
+    var v = n && n.value ? n.value.trim() : ''
+    return v || '我的小说'
+  }
+
+  function installSandboxWorkspace() {
+    if (!api || typeof api !== 'object') return false
+    api.pickRoot = function () { return openRootPicker() }
+    // 「新建到指定位置…」：iPad 唯一合法父目录是容器，直接回它，跳过目录选择。
+    api.pickDir = function () {
+      return Promise.resolve(api.listRoots()).then(function (res) {
+        if (res && res.ok && res.container) return { ok: true, dir: res.container, canceled: false }
+        return { ok: false, error: (res && res.error) || '无法取得沙盒容器路径' }
+      })
+    }
+    return true
+  }
+
+  // 文案适配：放出的入口原指「系统目录」，沙盒语境下统一说「工作区」（只改文本，不改结构）。
+  function relabelWorkspaceEntries() {
+    var pick = document.getElementById('w-pick-root')
+    if (pick) pick.textContent = '选择已有工作区…'
+  }
+
+  // BridgeJS 在 document-start 注入，wcStorage 已存在；轮询仅为防御未来注入顺序变化。
+  if (!installSandboxWorkspace()) {
+    var pickTries = 0
+    var pickTimer = setInterval(function () {
+      pickTries += 1
+      if (installSandboxWorkspace() || pickTries > 50) clearInterval(pickTimer)
+    }, 100)
+  }
+
+  function relabelWhenReady() {
+    var tries = 0
+    var timer = setInterval(function () {
+      tries += 1
+      var pick = document.getElementById('w-pick-root')
+      if (pick) {
+        relabelWorkspaceEntries()
+        clearInterval(timer)
+      } else if (tries > 50) {
+        clearInterval(timer)
+      }
+    }, 100)
+  }
+
   // 未配网关：尽早撤掉 [DSH] iframe 的 /app#/ 请求（本脚本在解析到尾部外链时同步执行，
   // 即便 iframe 已发起一次占位请求，改成 about:blank 也会立即中止它）。
   neutralizeDshFrameWhenOffline()
   // 默认进[写作]页（__wcTabs 由其后的内联脚本定义，故内部轮询）。
   showWritingByDefault()
+  // 入口文案适配（DOM 可能尚未解析，内部轮询）。
+  relabelWhenReady()
 })()

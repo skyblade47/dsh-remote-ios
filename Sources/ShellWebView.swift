@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 
 // ============================================================================
 // WKWebView 封装 —— 本仓的**核心**（其余多为脚手架）
@@ -114,12 +115,14 @@ struct ShellWebView: UIViewRepresentable {
 
         init(session: ShellSession) {
             self.session = session
-            // spec §6.1：dataDir=Documents 根（config.json/outbox.json/drafts/proofread/sync 直接在根），
-            // workspaceRoot=Documents/workspace（英文目录名，对齐安卓 getFilesDir()/workspace）
+            // dataDir=Documents 根（config.json/outbox.json/drafts/proofread/sync 直接在根）。
+            // 沙盒多工作区：容器 Documents/workspace，其下每个子目录是一个工作区，
+            // 当前工作区名持久化在 config.json 的 currentWorkspace。
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let workspaceRoot = docs.appendingPathComponent("workspace", isDirectory: true)
+            let container = docs.appendingPathComponent("workspace", isDirectory: true)
             let made = try? BridgeDispatcher(
-                dataDir: docs, workspaceRoot: workspaceRoot, appVersion: Self.appVersion)
+                dataDir: docs, workspaceRoot: container,
+                multiWorkspace: true, appVersion: Self.appVersion)
             if made == nil {
                 NSLog("[dsh-ios] BridgeDispatcher 构造失败，wcStorage 桥未安装（页面走未安装兜底）")
             }
@@ -174,6 +177,60 @@ struct ShellWebView: UIViewRepresentable {
         ) -> WKWebView? {
             if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
             return nil
+        }
+
+        // MARK: - JS alert/confirm 面板
+
+        // writing.js 有三处 window.confirm（切换工作区前落盘确认 / 回收站彻底删除 /
+        // 重启客户端）。WKUIDelegate 不实现 confirm 时 WebKit 默认按「取消」处理，
+        // 会把带未保存修改的工作区切换**静默挡掉** ⇒ 必须给原生确认面板。
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(
+                title: "取消", style: .cancel, handler: { _ in completionHandler(false) }))
+            alert.addAction(UIAlertAction(
+                title: "确定", style: .default, handler: { _ in completionHandler(true) }))
+            // 找不到可承载 VC（极端时序）时按「取消」兜底，与 WebKit 默认结论一致。
+            presentFromTop(alert) { completionHandler(false) }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptAlertPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping () -> Void
+        ) {
+            let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(
+                title: "知道了", style: .default, handler: { _ in completionHandler() }))
+            presentFromTop(alert) { completionHandler() }
+        }
+
+        /// 取 key window 最上层 VC 承载 JS 面板；取不到时走 fallback，避免 WebKit 回调悬挂。
+        private func presentFromTop(_ controller: UIViewController, fallback: () -> Void) {
+            guard var top = Self.topViewController() else { fallback(); return }
+            while let presented = top.presentedViewController { top = presented }
+            top.present(controller, animated: true)
+        }
+
+        static func topViewController(
+            base: UIViewController? =
+                UIApplication.shared.connectedScenes
+                .compactMap({ ($0 as? UIWindowScene)?.keyWindow?.rootViewController })
+                .first
+        ) -> UIViewController? {
+            guard let base else { return nil }
+            if let nav = base as? UINavigationController { return topViewController(base: nav.visibleViewController) }
+            if let tab = base as? UITabBarController, let sel = tab.selectedViewController {
+                return topViewController(base: sel)
+            }
+            if let presented = base.presentedViewController { return topViewController(base: presented) }
+            return base
         }
     }
 }

@@ -2,7 +2,12 @@ import Foundation
 
 final class BridgeDispatcher {
 
+    /// 多工作区模式下它是容器根；单根模式下它就是唯一工作区根。
     private let workspaceRoot: URL
+    /// true = 沙盒多工作区（容器下每个子目录一个工作区，当前根可切换/持久化）。
+    private let multiWorkspace: Bool
+    /// 当前生效的工作区根；多工作区模式首启未选/建时为 nil。
+    private var currentRoot: URL?
     private let appVersion: String
     private let appData: AppDataStore
     private let workspace: WorkspaceStore
@@ -10,9 +15,11 @@ final class BridgeDispatcher {
     private let ioLock = NSLock()
     private let now: () -> Date
 
-    init(dataDir: URL, workspaceRoot: URL, appVersion: String,
+    init(dataDir: URL, workspaceRoot: URL, multiWorkspace: Bool = false,
+         appVersion: String,
          now: @escaping () -> Date = Date.init) throws {
         self.workspaceRoot = workspaceRoot
+        self.multiWorkspace = multiWorkspace
         self.appVersion = appVersion
         self.now = now
         let fm = FileManager.default
@@ -33,6 +40,20 @@ final class BridgeDispatcher {
         self.appData = AppDataStore(dataDir: dataDir)
         self.workspace = WorkspaceStore(root: workspaceRoot)
         self.outbox = OutboxStore(dataDir: dataDir)
+        if multiWorkspace {
+            // 恢复上次选中的容器内子工作区；目录已不在（被删/迁）则回到"未选择"。
+            if let name = appData.currentWorkspaceName() {
+                let child = workspaceRoot.appendingPathComponent(name, isDirectory: true)
+                if isDirectory(child) {
+                    self.currentRoot = child.standardizedFileURL
+                    self.workspace.rebind(root: child.standardizedFileURL)
+                } else {
+                    appData.setCurrentWorkspaceName(nil)
+                }
+            }
+        } else {
+            self.currentRoot = workspaceRoot
+        }
     }
 
     // MARK: - 两个入口
@@ -57,13 +78,33 @@ final class BridgeDispatcher {
         return dispatch(method, args: args)
     }
 
+    /// 多工作区模式下，这些方法要求已选定一个子工作区。
+    private static let requiresRootMethods: Set<String> = [
+        "listWorkspace", "readDoc", "writeDoc", "writeDocSync",
+        "createWork", "createDoc", "renameWork", "renameDoc", "moveDoc",
+        "trashDoc", "trashWork", "listTrash", "restoreTrash", "purgeTrash",
+        "writeDraft", "writeDraftSync", "readDraft", "clearDraft",
+        "listPendingDrafts", "proofSave", "proofLoad", "appendPomodoro"
+    ]
+
     func dispatch(_ method: String?, args: [Any]) -> [String: Any] {
         ioLock.lock()
         defer { ioLock.unlock() }
         do {
-            switch method ?? "" {
+            let m = method ?? ""
+            if multiWorkspace, currentRoot == nil,
+               Self.requiresRootMethods.contains(m) {
+                return Self.fail("尚未选择工作区：请先新建或选择一个沙盒内工作区")
+            }
+            switch m {
             case "getState":
                 return state()
+            case "createRoot":
+                return try createRoot(str(args, 0), args.count > 1 ? asString(args[1]) : nil)
+            case "listRoots":
+                return try listRoots()
+            case "switchRoot":
+                return try switchRoot(str(args, 0))
             case "listWorkspace":
                 return try workspace.listWorkspace()
             case "readDoc":
@@ -98,24 +139,24 @@ final class BridgeDispatcher {
             case "saveConfig":
                 return appData.saveConfig(args.isEmpty ? [:] : asMap(args[0]))
             case "writeDraft", "writeDraftSync":
-                return appData.writeDraft(root: workspaceRoot.path,
+                return appData.writeDraft(root: try currentRootPath(),
                                           relPath: str(args, 0),
                                           content: args.count > 1 ? asString(args[1]) : nil)
             case "readDraft":
-                return appData.readDraft(root: workspaceRoot.path, relPath: str(args, 0))
+                return appData.readDraft(root: try currentRootPath(), relPath: str(args, 0))
             case "clearDraft":
-                return appData.clearDraft(root: workspaceRoot.path, relPath: str(args, 0))
+                return appData.clearDraft(root: try currentRootPath(), relPath: str(args, 0))
             case "listPendingDrafts":
-                return appData.listPendingDrafts(root: workspaceRoot.path)
+                return appData.listPendingDrafts(root: try currentRootPath())
             case "draftsUsage":
                 return appData.draftsUsage()
             case "getLastSession":
                 return appData.readLastSession()
             case "proofSave":
-                return appData.proofSave(root: workspaceRoot.path,
+                return appData.proofSave(root: try currentRootPath(),
                                          payload: args.isEmpty ? [:] : asMap(args[0]))
             case "proofLoad":
-                return appData.proofLoad(root: workspaceRoot.path,
+                return appData.proofLoad(root: try currentRootPath(),
                                          relPath: str(args, 0))
             case "syncBaseline":
                 return appData.readBaseline()
@@ -150,14 +191,119 @@ final class BridgeDispatcher {
 
     private func state() -> [String: Any] {
         var s = appData.getState()
-        s["root"] = workspaceRoot.path
-        var isDir: ObjCBool = false
-        let exists = FileManager.default.fileExists(atPath: workspaceRoot.path,
-                                                    isDirectory: &isDir)
-        s["rootExists"] = exists && isDir.boolValue
+        if let root = currentRoot?.path {
+            s["root"] = root
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: root, isDirectory: &isDir)
+            s["rootExists"] = exists && isDir.boolValue
+        } else {
+            // 多工作区首启尚未选择：root 显式为 null
+            s["root"] = NSNull()
+            s["rootExists"] = false
+        }
         s["platform"] = "ipad"
         s["appVersion"] = appVersion
         return s
+    }
+
+    // MARK: - 沙盒内多工作区
+
+    private func currentRootPath() throws -> String {
+        guard let r = currentRoot else {
+            throw PathGuard.bad("尚未选择工作区：请先新建或选择一个沙盒内工作区")
+        }
+        return r.path
+    }
+
+    /// 容器下建子工作区：校验名字、mkdir、真写自检，成功后切换为当前根并持久化。
+    /// parentDir 仅用于对齐 PC 契约（返回 parentSource 描述），iPad 一律落在容器内。
+    private func createRoot(_ nameRaw: String, _ parentDir: String?) throws -> [String: Any] {
+        guard multiWorkspace else {
+            throw PathGuard.bad("当前为单工作区模式，不支持 createRoot")
+        }
+        let name = try PathGuard.validateSegment(nameRaw)
+        let child = workspaceRoot.appendingPathComponent(name, isDirectory: true)
+        if FileManager.default.fileExists(atPath: child.path) {
+            throw PathGuard.bad("已存在同名工作区: \(name)")
+        }
+        do {
+            try FileManager.default.createDirectory(at: child,
+                                                    withIntermediateDirectories: true)
+        } catch {
+            throw PathGuard.bad("无法创建工作区: \(error.localizedDescription)")
+        }
+        // 真写自检：写一个探针文件再删掉，确认目录可写（对齐 PC 的 mkdir+自检）。
+        let probe = child.appendingPathComponent(".dsh-probe")
+        do {
+            try Data("ok".utf8).write(to: probe, options: .atomic)
+            try FileManager.default.removeItem(at: probe)
+        } catch {
+            try? FileManager.default.removeItem(at: child)
+            throw PathGuard.bad("工作区不可写: \(error.localizedDescription)")
+        }
+        let real = child.standardizedFileURL
+        currentRoot = real
+        workspace.rebind(root: real)
+        let saved = appData.setCurrentWorkspaceName(name)
+        if saved["ok"] as? Bool != true {
+            throw PathGuard.bad((saved["error"] as? String) ?? "当前工作区持久化失败")
+        }
+        let source = (parentDir?.isEmpty == false) ? parentDir! : "iPad 沙盒容器"
+        return ["ok": true, "root": real.path, "name": name, "parentSource": source]
+    }
+
+    /// 枚举容器内的子工作区（跳过点开头/回收站/非目录）。
+    private func listRoots() throws -> [String: Any] {
+        guard multiWorkspace else {
+            throw PathGuard.bad("当前为单工作区模式，不支持 listRoots")
+        }
+        let container = workspaceRoot.standardizedFileURL
+        if !FileManager.default.fileExists(atPath: container.path) {
+            try FileManager.default.createDirectory(at: container,
+                                                    withIntermediateDirectories: true)
+        }
+        var roots: [[String: Any]] = []
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: container, includingPropertiesForKeys: nil)) ?? []
+        let currentName = currentRoot?.lastPathComponent
+        for ent in entries {
+            let name = ent.lastPathComponent
+            guard !name.hasPrefix("."), name != PathGuard.trashDir,
+                  isDirectory(ent) else { continue }
+            roots.append([
+                "name": name,
+                "root": ent.standardizedFileURL.path,
+                "current": name == currentName
+            ])
+        }
+        roots.sort { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        return ["ok": true, "container": container.path, "roots": roots]
+    }
+
+    /// 切换到容器内已存在的子工作区，成功后重绑 store 并持久化。
+    private func switchRoot(_ nameRaw: String) throws -> [String: Any] {
+        guard multiWorkspace else {
+            throw PathGuard.bad("当前为单工作区模式，不支持 switchRoot")
+        }
+        let name = try PathGuard.validateSegment(nameRaw)
+        let child = workspaceRoot.appendingPathComponent(name, isDirectory: true)
+        guard isDirectory(child) else {
+            throw PathGuard.bad("工作区不存在: \(name)")
+        }
+        let real = child.standardizedFileURL
+        currentRoot = real
+        workspace.rebind(root: real)
+        let saved = appData.setCurrentWorkspaceName(name)
+        if saved["ok"] as? Bool != true {
+            throw PathGuard.bad((saved["error"] as? String) ?? "当前工作区持久化失败")
+        }
+        return ["ok": true, "root": real.path, "name": name]
+    }
+
+    private func isDirectory(_ u: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir)
+            && isDir.boolValue
     }
 
     private func writeDoc(_ relPath: String, _ content: String?) throws -> [String: Any] {
@@ -185,7 +331,8 @@ final class BridgeDispatcher {
         }
         let doc = (payload["doc"] as? String) ?? ""
 
-        let record = workspaceRoot.appendingPathComponent("番茄钟记录.md")
+        let record = URL(fileURLWithPath: try currentRootPath())
+            .appendingPathComponent("番茄钟记录.md")
         let fm = FileManager.default
         try fm.createDirectory(at: record.deletingLastPathComponent(),
                                withIntermediateDirectories: true)

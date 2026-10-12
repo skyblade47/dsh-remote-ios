@@ -3,7 +3,7 @@ import Foundation
 final class WorkspaceStore {
     static let maxDocBytes = 2 * 1024 * 1024
 
-    private let root: URL
+    private var root: URL
     private let lock = NSLock()
     private var tmpSeq: Int64 = 0
 
@@ -12,6 +12,13 @@ final class WorkspaceStore {
 
     init(root: URL) {
         self.root = root
+    }
+
+    /// 多工作区：切换到容器内另一个子工作区（调用方已校验名字与目录存在）。
+    func rebind(root newRoot: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        root = newRoot
     }
 
     func listWorkspace() throws -> [String: Any] {

@@ -20,7 +20,8 @@ globalThis.__DSH_TRANSPORT__ = { ownsHost: true };
     nativeOnline: 1, reportDirty: 1, onFlushRequest: 1, flushDone: 1, relaunch: 1,
     scheduleReminder: 1, cancelReminder: 1, getDeviceId: 1, hash12: 1,
     pickRoot: 1, pickDir: 1, pickImportFiles: 1, pickImportDir: 1, importInto: 1, onImportProgress: 1,
-    notifyWriting: 1
+    notifyWriting: 1,
+    createRoot: 1, listRoots: 1, switchRoot: 1
   };
 
   // ---- 异步通道：postMessage 发包，__dshBridgeResolve 按 id 配对 ----

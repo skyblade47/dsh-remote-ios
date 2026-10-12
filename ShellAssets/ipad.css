@@ -3,16 +3,18 @@
    铁律：不改 shell.html / writing.css / writing.js 等任何共享核心；
          本文件只做能力裁剪（按 id 隐藏）与触控可用性补偿，不新增产品语义。
    依据：spec §7.3（≥44pt 热区 / touch-action / 惯性滚动 / 不依赖 hover）、
-         §7.4（软键盘）、行 221-222（五个选目录入口隐藏）。
+         §7.4（软键盘）、行 221-222（选目录入口裁剪原则）。
+   2026-10-12 放宽：ipad.js 已把 pickRoot 覆盖为容器内选择浮层，原拟隐藏的五个入口中
+         三个「选择/切换」放出，仅藏两个与普通新建等价的「新建到指定位置」（见规则①）。
    ============================================================================ */
 
-/* ① 能力裁剪：工作区根固定沙盒 workspace/，选目录/新建到指定位置 5 入口隐藏。
-   ⚠️ 只藏 spec 行 221 明列的 5 个 id；#w-ws-create-here（当前根新建）、
-      #s-ws-create（新建工作区）不藏。!important 压过组件作者样式。 */
-#w-pick-root,
-#w-ws-switch,
+/* ① 能力裁剪：工作区根固定沙盒 workspace/ 容器。
+   · pickRoot 已由 ipad.js 覆盖为「容器内子工作区选择浮层」，故三个「选择/切换」入口
+     （#w-pick-root 空态选择、#w-ws-switch 栏内切换、#s-ws-switch 设置页切换）**放出**。
+   · 仅继续隐藏两个「新建到指定位置…」：iPad 没有宿主目录可选，pickDir 恒回容器，
+     它与普通「新建工作区」完全等价，留着是重复入口（#w-ws-create-here / #s-ws-create 不藏）。
+   !important 压过组件作者样式。 */
 #w-create-root-here,
-#s-ws-switch,
 #s-ws-create-here {
   display: none !important;
 }
@@ -106,6 +108,148 @@ header .gear,
 #page-writing .w-import-result,
 .s-body {
   -webkit-overflow-scrolling: touch;
+}
+
+/* ⑦ 沙盒多工作区选择浮层（ipad.js 动态创建；不依赖 writing.css 的模态类，壳层自治）。
+   目标：遮罩居中、≥44pt 热区、与三栏深色基调协调、键盘弹起时仍可滚动。 */
+.wci-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+}
+.wci-box {
+  width: min(460px, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: #1f2430;
+  color: #e8eaf0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.wci-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.wci-title {
+  font-size: 17px;
+  font-weight: 600;
+}
+.wci-x {
+  min-height: 44px;
+  min-width: 64px;
+  padding: 0 16px;
+  background: transparent;
+  color: #aeb6c8;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+}
+.wci-body {
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.wci-sub {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #aeb6c8;
+}
+.wci-empty {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #aeb6c8;
+}
+.wci-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.wci-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8eaf0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  font-size: 16px;
+  text-align: left;
+}
+.wci-item:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+.wci-item-name {
+  word-break: break-all;
+}
+.wci-badge {
+  flex: none;
+  margin-left: 12px;
+  padding: 2px 10px;
+  font-size: 13px;
+  color: #c8d4ff;
+  background: rgba(120, 150, 255, 0.18);
+  border-radius: 999px;
+}
+.wci-sep {
+  height: 1px;
+  margin: 6px 0 14px;
+  background: rgba(255, 255, 255, 0.1);
+}
+.wci-create {
+  display: flex;
+  gap: 8px;
+}
+.wci-create input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  font-size: 16px;
+  color: #e8eaf0;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+}
+.wci-primary {
+  flex: none;
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 16px;
+  color: #fff;
+  background: #4c6ef5;
+  border: none;
+  border-radius: 10px;
+}
+.wci-primary:disabled {
+  opacity: 0.5;
+}
+.wci-err {
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #ffb4b4;
+  background: rgba(255, 90, 90, 0.12);
+  border: 1px solid rgba(255, 90, 90, 0.3);
+  border-radius: 10px;
+  word-break: break-all;
 }
 
 /* ⑥ 消除 iOS 点击灰色高亮（:active 在触控设备上也无意义，统一透明）。 */

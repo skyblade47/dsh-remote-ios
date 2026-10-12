@@ -90,9 +90,10 @@ final class BridgeJSTests: XCTestCase {
             "nativeOnline", "reportDirty", "onFlushRequest", "flushDone", "relaunch",
             "scheduleReminder", "cancelReminder", "getDeviceId", "hash12",
             "pickRoot", "pickDir", "pickImportFiles", "pickImportDir", "importInto",
-            "onImportProgress", "notifyWriting"
+            "onImportProgress", "notifyWriting",
+            "createRoot", "listRoots", "switchRoot"
         ]
-        XCTAssertEqual(expected.count, 46)
+        XCTAssertEqual(expected.count, 49)
         for m in expected {
             XCTAssertTrue(BridgeJS.source.contains(m), "白名单缺少 \(m)")
         }

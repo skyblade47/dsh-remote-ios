@@ -46,6 +46,37 @@ final class AppDataStore {
         return s
     }
 
+    // MARK: - 当前沙盒工作区（多工作区模式）
+
+    /// 读取上次选中的容器内子工作区名；未设置/为空返回 nil。
+    func currentWorkspaceName() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let n = (readConfig()["currentWorkspace"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (n?.isEmpty == false) ? n : nil
+    }
+
+    /// 持久化当前工作区名；name 为 nil/空时清除该键（回到"未选择"首启态）。
+    @discardableResult
+    func setCurrentWorkspaceName(_ name: String?) -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        var cfg = readConfig()
+        let n = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let n = n, !n.isEmpty {
+            cfg["currentWorkspace"] = n
+        } else {
+            cfg.removeValue(forKey: "currentWorkspace")
+        }
+        do {
+            try writeConfig(cfg)
+            return ["ok": true]
+        } catch {
+            return fail(error.localizedDescription)
+        }
+    }
+
     // MARK: - saveConfig
 
     func saveConfig(_ patch: [String: Any]) -> [String: Any] {
