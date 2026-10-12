@@ -16,6 +16,73 @@
   if (window.__wciPadShell) return
   window.__wciPadShell = true
 
+  // ── 临时真机自检（诊断条，不依赖任何其它脚本/样式）────────────────────
+  // 目的：真机上 ipad.js 是否执行、dsh-asset 资源能否加载、改写注入在不在。
+  // 竖排红底白字固定在屏幕底部，z-index 顶格，确认根因后整块移除。
+  window.__wciDiagLog = window.__wciDiagLog || []
+  window.addEventListener('error', function (e) {
+    try {
+      window.__wciDiagLog.push('JSERR ' + (e && e.message ? e.message : e) +
+        ' @' + (e && e.filename ? e.filename.split('/').pop() : '?') +
+        ':' + (e && e.lineno ? e.lineno : '?'))
+      window.__wciDiagRender && window.__wciDiagRender()
+    } catch (_) {}
+  })
+  function diag(kind, text) {
+    window.__wciDiagLog.push(kind + ' ' + text)
+    if (window.__wciDiagRender) window.__wciDiagRender()
+  }
+  function diagBoot() {
+    if (document.getElementById('__wci_diag')) return
+    var box = document.createElement('div')
+    box.id = '__wci_diag'
+    box.setAttribute('style',
+      'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;' +
+      'background:rgba(120,0,0,.92);color:#fff;font:12px/1.35 -apple-system,monospace;' +
+      'padding:6px 8px;max-height:46vh;overflow:auto;white-space:pre-wrap;' +
+      '-webkit-text-size-adjust:100%;pointer-events:auto')
+    var close = document.createElement('div')
+    close.textContent = '诊断（确认后由下一版移除）点此收起 ×'
+    close.setAttribute('style', 'font-weight:bold;margin-bottom:3px;opacity:.9')
+    close.onclick = function () { box.style.display = 'none' }
+    box.appendChild(close)
+    var pre = document.createElement('div')
+    pre.id = '__wci_diag_body'
+    box.appendChild(pre)
+    document.body ? document.body.appendChild(box)
+      : document.documentElement.appendChild(box)
+    window.__wciDiagRender = function () {
+      var scripts = Array.prototype.slice.call(
+        document.querySelectorAll('script[src]')).map(function (s) {
+          try { return s.src.split('/').pop() } catch (_) { return '?' }
+        })
+      var injected = scripts.indexOf('ipad.js') >= 0
+      pre.textContent =
+        'ipad.js EXECUTED ✓\n' +
+        'readyState=' + document.readyState + '\n' +
+        'injected ipad.js tag=' + (injected ? 'YES' : 'NO') + '\n' +
+        'wcStorage=' + (typeof window.wcStorage) + ' wcTabs=' + (typeof window.__wcTabs) + '\n' +
+        (window.__wciDiagLog || []).join('\n')
+    }
+    window.__wciDiagRender()
+  }
+  diagBoot()
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { diagBoot(); window.__wciDiagRender && window.__wciDiagRender() })
+  }
+  diag('BOOT', 'ipad.js top-level ran; host=' + location.hostname)
+  // 实测各 dsh-asset 资源能否取到（fetch 自定义 scheme）
+  ;['ipad.js', 'writing.js', 'sync-net.js', 'ipad.css', 'writing.css'].forEach(function (n) {
+    try {
+      fetch('dsh-asset://local/' + n).then(function (r) {
+        return r.text().then(function (t) { diag('FETCH', n + ' ' + r.status + ' ' + t.length + 'B') })
+      }).catch(function (e) { diag('FETCH-FAIL', n + ' ' + e) })
+    } catch (e) { diag('FETCH-THROW', n + ' ' + e) }
+  })
+  // 延迟再渲染一次，采集加载/切换结果
+  setTimeout(function () { diagBoot(); window.__wciDiagRender && window.__wciDiagRender() }, 1500)
+  setTimeout(function () { diagBoot(); window.__wciDiagRender && window.__wciDiagRender() }, 4000)
+
   // 未配网关时，壳文档 baseURL 是原生侧固定占位 origin（主机名 local.dsh-remote.invalid）。
   // 据此区分「离线/未配置」与「已配网关」，不必再让原生注入配置。
   var PLACEHOLDER_HOST = 'local.dsh-remote.invalid'

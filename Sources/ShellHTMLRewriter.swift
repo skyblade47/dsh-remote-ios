@@ -19,6 +19,47 @@ enum ShellHTMLRewriter {
     private static let jsAnchor = #"<script src="/__shell__/sync-net.js"></script>"#
     private static let jsInjected = #"<script src="/__shell__/ipad.js"></script>"#
 
+    // 临时真机自检探针（内联，随主文档执行，不依赖 ipad.js 自身）：
+    // 报告改写注入是否进了最终 HTML、ipad.js 外链是否成功加载执行。
+    // 诊断完成后随本块一并移除。
+    private static let probeInjected = #"""
+<script>
+(function(){
+  function render(){
+    var b=document.getElementById('__wcip_body'); if(!b)return;
+    var scripts=Array.prototype.slice.call(document.querySelectorAll('script[src]')).map(function(s){
+      try{return s.src.split('/').pop()}catch(e){return '?'}
+    });
+    b.textContent =
+      'INLINE PROBE ran ✓\n'+
+      'readyState='+document.readyState+'\n'+
+      'ipad.js tag in DOM='+(scripts.indexOf('ipad.js')>=0?'YES':'NO')+'\n'+
+      'ipad.js executed='+(window.__wciPadShell?'YES':'NO')+'\n'+
+      'wcStorage='+(typeof window.wcStorage)+'\n'+
+      ((window.__wciDiagLog||[]).join('\n'));
+  }
+  function boot(){
+    if(document.getElementById('__wcip'))return;
+    var box=document.createElement('div');box.id='__wcip';
+    box.setAttribute('style','position:fixed;left:0;right:0;top:0;z-index:2147483646;'+
+      'background:rgba(0,40,120,.92);color:#fff;font:12px/1.35 -apple-system,monospace;'+
+      'padding:6px 8px;max-height:40vh;overflow:auto;white-space:pre-wrap;'+
+      '-webkit-text-size-adjust:100%');
+    var h=document.createElement('div');
+    h.textContent='PROBE（内联，确认后移除）';h.style.fontWeight='bold';
+    var b=document.createElement('div');b.id='__wcip_body';
+    box.appendChild(h);box.appendChild(b);
+    (document.body||document.documentElement).appendChild(box);
+    window.__wcipRender=render;render();
+  }
+  boot();
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){boot();render()});
+  setTimeout(function(){boot();render()},1200);
+  setTimeout(function(){boot();render()},3500);
+})();
+</script>
+"""#
+
     /// 仅在锚点存在且未注入过时插入，保证对任意输入（含测试里的无锚点片段）幂等、可重入。
     private static func injectOnce(_ html: String, anchor: String, insertion: String) -> String {
         guard html.contains(anchor), !html.contains(insertion) else { return html }
@@ -31,7 +72,9 @@ enum ShellHTMLRewriter {
             ? html
             : html.replacingOccurrences(of: viewportOld, with: viewportNew)
         let withCSS = injectOnce(withViewport, anchor: cssAnchor, insertion: cssInjected)
-        let withJS = injectOnce(withCSS, anchor: jsAnchor, insertion: jsInjected)
+        let withPadJS = injectOnce(withCSS, anchor: jsAnchor, insertion: jsInjected)
+        // 临时：探针紧随 ipad.js 外链之后（一起幂等；__wcip 已存在则不重复）
+        let withJS = injectOnce(withPadJS, anchor: jsInjected, insertion: probeInjected)
 
         // 第二步：白名单引用统一改写（既有逻辑，不动）
         var hits = 0
