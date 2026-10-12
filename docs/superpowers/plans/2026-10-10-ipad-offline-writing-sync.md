@@ -6501,6 +6501,37 @@ git commit -m "chore(s1): 移除探针临时 httpBody 观察日志（五探针�
 - 导入两键（`#w-import-works` 等）仍无能力：下一轮用 ipad.css 隐藏（原生保持 NotSupported 测试不变，ios-import）。
 - 本期 CI 暴露的新 warning（WebKit Sendable 建议加 @preconcurrency、AppDataStore `prev` 可改 let）为提示级，不影响功能，收尾时统一清理。
 
+### 14.5 根因修复：JS 与 CSS 同法内联（2026-10-12 下午）
+
+**症状**：用户真机装 run 38217301128（CI 全绿包），既不落在写作页也不弹工作区浮层——
+连最早版本的 showWritingByDefault 都未生效，怀疑 ipad.js 整体未执行。
+
+**取证（两轮临时屏幕内探针）**：
+- 探针 v1（ipad.js 内红条 + rewriter 内联蓝条）：蓝条显示 `tag in DOM=YES` 但
+  `executed=NO`——注入成功、脚本一行未跑；红条未出现（寄生于 ipad.js，同死）。
+- 探针 v2（全部移入内联蓝条）：动态插入 script 同样 `onerror`（加载层被拦），
+  `location=https://local.dsh-remote.invalid/`（https 占位 origin）。
+  另：`BRIDGE listRoots → {}` 系探针误报——listRoots 走异步 postMessage 通道
+  返回 Promise，`JSON.stringify(Promise)` 即 `{}`，数据桥不经子资源通道，无恙。
+
+**根因**：shell 页面 origin 恒为 https（配网关借网关 origin，未配用占位 https），
+WebKit 拦截 https 页面中自定义 scheme（dsh-asset://）的**全部**子资源——CSS 外链
+不应用（此前已发现并用内联绕过）、静态与动态 `<script>` 同样整批 onerror。
+旧注释「同 scheme script 正常执行」证伪：**12 个外链 JS 在真机从未执行**，
+此前真机"活着"只是内联 tab 脚本 + 远程 https iframe 的假象。
+
+**修复**：rewrite 增加 `js:` 闭包参数（与 `css:` 对称、缺省 nil 保持旧行为），
+`<script src="dsh-asset://…">` 就地换成 `<script data-asset="…">…</script>`，
+壳页面零子资源依赖；内容 `</script` 防御性转义 `<\/script`（12 资产均无此串）。
+TDD 新增 5 用例（内联/转义/幂等/nil 兼容/全内联无 scheme 残留）。
+
+**教训**：① WebKit 自定义 scheme 子资源在 https origin 下的拦截是整批的，
+"CSS 拦而 JS 放行"的非对称假设必须真机逐类验证，不可类推；② 真机黑盒排查用
+"不依赖被测件的屏幕内自证探针"两轮即可定位，远胜静态推演。
+
+**真机终验**（用户 2026-10-12 确认）：装修复包（run 38254773601，197 测试全绿）
+→ 自动弹出沙盒工作区选择浮层 → 新建后进入写作页。探针/红条已随本任务移除。
+
 ---
 
 

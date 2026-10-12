@@ -19,89 +19,6 @@ enum ShellHTMLRewriter {
     private static let jsAnchor = #"<script src="/__shell__/sync-net.js"></script>"#
     private static let jsInjected = #"<script src="/__shell__/ipad.js"></script>"#
 
-    // 临时真机自检探针 v2（内联，随主文档执行，不依赖任何外链脚本）：
-    // 已证实 https origin 下 dsh-asset 外链 script 标签在 DOM 但不执行（疑似 WebKit
-    // 对自定义 scheme 主动内容的拦截，与早前 CSS 外链不应用同根）。本探针做决定性取证：
-    // ① fetch 各 dsh-asset 资产（scheme handler 可达性）
-    // ② 动态插入 script 标签的 onload/onerror（区分「加载被拦」与「下载成功但不执行」）
-    // ③ wcStorage 桥实调（同步 XHR 走 dsh-bridge，验证数据面是否也被拦）
-    // ④ location/UA（确认真实 origin 与 iPadOS 版本）
-    // 诊断完成后随本块一并移除。
-    private static let probeInjected = #"""
-<script>
-(function(){
-  // 探针源码内不得出现被注入文件名的裸字面量（改写器幂等测试按字串计数），故拼串
-  var pad='ipad'+'.js', wjs='writing'+'.js';
-  // 资产 URL 前缀同样拼串（bundle 改写测试按该前缀裸串计数）
-  var A='dsh-asset:'+'//local/';
-  var logs=[];
-  function render(){
-    var b=document.getElementById('__wcip_body'); if(!b)return;
-    var scripts=Array.prototype.slice.call(document.querySelectorAll('script[src]')).map(function(s){
-      try{return s.src.split('/').pop()}catch(e){return '?'}
-    });
-    b.textContent =
-      'INLINE PROBE v2 ✓\n'+
-      'readyState='+document.readyState+'\n'+
-      'location='+location.href+'\n'+
-      'ua='+navigator.userAgent+'\n'+
-      pad+' tag in DOM='+(scripts.indexOf(pad)>=0?'YES':'NO')+'\n'+
-      pad+' executed='+(window.__wciPadShell?'YES':'NO')+'\n'+
-      'wcStorage='+(typeof window.wcStorage)+'\n'+
-      logs.join('\n');
-  }
-  function log(s){ logs.push(s); render(); }
-  function boot(){
-    if(document.getElementById('__wcip'))return;
-    var box=document.createElement('div');box.id='__wcip';
-    box.setAttribute('style','position:fixed;left:0;right:0;top:0;z-index:2147483646;'+
-      'background:rgba(0,40,120,.92);color:#fff;font:12px/1.35 -apple-system,monospace;'+
-      'padding:6px 8px;max-height:55vh;overflow:auto;white-space:pre-wrap;'+
-      '-webkit-text-size-adjust:100%');
-    var h=document.createElement('div');
-    h.textContent='PROBE v2（内联，确认后移除）点此收起 ×';
-    h.style.fontWeight='bold';
-    h.onclick=function(){box.style.display='none'};
-    var b=document.createElement('div');b.id='__wcip_body';
-    box.appendChild(h);box.appendChild(b);
-    (document.body||document.documentElement).appendChild(box);
-    window.__wcipRender=render;render();
-  }
-  boot();
-  // ① scheme handler 可达性：ping + 两个真实资产
-  function probeFetch(n){
-    try{
-      fetch(A+n).then(function(r){
-        return r.text().then(function(t){ log('FETCH '+n+' '+r.status+' '+t.length+'B') })
-      }).catch(function(e){ log('FETCH-FAIL '+n+' '+e) })
-    }catch(e){ log('FETCH-THROW '+n+' '+e) }
-  }
-  probeFetch('ping'); probeFetch(pad); probeFetch(wjs);
-  // ② 动态 script 加载试验：onload=下载且执行，onerror=加载层被拦
-  try{
-    var ds=document.createElement('script');
-    ds.src=A+pad;
-    ds.onload=function(){ log('DYN '+pad+' onload; executed='+(window.__wciPadShell?'YES':'NO')) };
-    ds.onerror=function(){ log('DYN '+pad+' ONERROR(加载层被拦)') };
-    (document.head||document.documentElement).appendChild(ds);
-  }catch(e){ log('DYN-THROW '+e) }
-  // ③ 数据桥实调（同步 XHR→dsh-bridge；放最后，万一阻塞不影响上面已渲染内容）
-  setTimeout(function(){
-    try{
-      if(window.wcStorage&&window.wcStorage.listRoots){
-        var r=window.wcStorage.listRoots([]);
-        var s; try{ s=JSON.stringify(r) }catch(_){ s=String(r) }
-        log('BRIDGE listRoots → '+String(s).slice(0,140));
-      }else{ log('BRIDGE wcStorage.listRoots 缺失') }
-    }catch(e){ log('BRIDGE-THROW '+e) }
-  },100);
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){boot();render()});
-  setTimeout(function(){boot();render()},1500);
-  setTimeout(function(){boot();render()},4000);
-})();
-</script>
-"""#
-
     /// 仅在锚点存在且未注入过时插入，保证对任意输入（含测试里的无锚点片段）幂等、可重入。
     private static func injectOnce(_ html: String, anchor: String, insertion: String) -> String {
         guard html.contains(anchor), !html.contains(insertion) else { return html }
@@ -116,9 +33,7 @@ enum ShellHTMLRewriter {
             ? html
             : html.replacingOccurrences(of: viewportOld, with: viewportNew)
         let withCSS = injectOnce(withViewport, anchor: cssAnchor, insertion: cssInjected)
-        let withPadJS = injectOnce(withCSS, anchor: jsAnchor, insertion: jsInjected)
-        // 临时：探针紧随 ipad.js 外链之后（一起幂等；__wcip 已存在则不重复）
-        let withJS = injectOnce(withPadJS, anchor: jsInjected, insertion: probeInjected)
+        let withJS = injectOnce(withCSS, anchor: jsAnchor, insertion: jsInjected)
 
         // 第二步：白名单引用统一改写（既有逻辑，不动）
         var hits = 0
