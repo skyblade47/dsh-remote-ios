@@ -290,7 +290,7 @@ final class BridgeDispatcherTests: XCTestCase {
 
     func testCurrentRootPersistsAcrossDispatcherRebuild() throws {
         XCTAssertEqual(mcall("createRoot", ["长期", nil])["ok"] as? Bool, true)
-        XCTAssertEqual(mcall("writeDoc", ["作品/x.md", "内容"]))["ok"] as? Bool,
+        XCTAssertEqual(mcall("writeDoc", ["作品/x.md", "内容"])["ok"] as? Bool,
                        true)
         let rebuilt = try BridgeDispatcher(dataDir: root.appendingPathComponent("mdata"),
                                            workspaceRoot: container,
