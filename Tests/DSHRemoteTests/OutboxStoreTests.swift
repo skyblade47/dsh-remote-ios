@@ -209,9 +209,9 @@ final class OutboxStoreTests: XCTestCase {
                     + "{\"relPath\":\"作品B/x.md\",\"queuedAt\":3},"
                     + "{\"relPath\":\"根文档.md\",\"queuedAt\":4}]")
         let counts = store.countByDoc()
-        XCTAssertEqual(counts["作品A"] as? Int, 2)
-        XCTAssertEqual(counts["作品B"] as? Int, 1)
-        XCTAssertEqual(counts[""] as? Int, 1)
+        XCTAssertEqual(counts["作品A"], 2)
+        XCTAssertEqual(counts["作品B"], 1)
+        XCTAssertEqual(counts[""], 1)
         XCTAssertEqual(counts.keys.sorted(), ["", "作品A", "作品B"])
     }
 

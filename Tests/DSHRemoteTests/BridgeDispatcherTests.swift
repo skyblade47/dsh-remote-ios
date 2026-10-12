@@ -31,6 +31,7 @@ final class BridgeDispatcherTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    @discardableResult
     func call(_ method: String, _ args: [Any] = []) -> [String: Any] {
         dispatcher.dispatch(method, args: args)
     }
@@ -38,6 +39,10 @@ final class BridgeDispatcherTests: XCTestCase {
     func callJson(_ method: String, _ argsJson: String) -> [String: Any] {
         dispatcher.dispatch(method, argsJson: argsJson)
     }
+
+    /// createRoot 第二参（parentDir）置空实参：与桥侧「未传/传 null」等价，
+    /// 显式包装为 Any，消除 nil 字面量进 [Any] 的隐式可选包装警告。
+    var nullParent: Any { Optional<String>.none as Any }
 
     // MARK: - getState
 
@@ -190,6 +195,7 @@ final class BridgeDispatcherTests: XCTestCase {
 
     // MARK: - 沙盒内多工作区
 
+    @discardableResult
     func mcall(_ method: String, _ args: [Any] = []) -> [String: Any] {
         multi.dispatch(method, args: args)
     }
@@ -206,7 +212,7 @@ final class BridgeDispatcherTests: XCTestCase {
     }
 
     func testCreateRootMakesChildUnderContainer() {
-        let r = mcall("createRoot", ["小说集", nil])
+        let r = mcall("createRoot", ["小说集", nullParent])
         XCTAssertEqual(r["ok"] as? Bool, true)
         let child = container.appendingPathComponent("小说集", isDirectory: true)
         XCTAssertEqual(r["root"] as? String, child.path)
@@ -223,11 +229,11 @@ final class BridgeDispatcherTests: XCTestCase {
     }
 
     func testCreateRootRejectsDuplicateAndBadName() {
-        XCTAssertEqual(mcall("createRoot", ["小说集", nil])["ok"] as? Bool, true)
-        let dup = mcall("createRoot", ["小说集", nil])
+        XCTAssertEqual(mcall("createRoot", ["小说集", nullParent])["ok"] as? Bool, true)
+        let dup = mcall("createRoot", ["小说集", nullParent])
         XCTAssertEqual(dup["ok"] as? Bool, false)
         XCTAssertTrue((dup["error"] as? String ?? "").contains("已存在"))
-        let bad = mcall("createRoot", ["a/b", nil])
+        let bad = mcall("createRoot", ["a/b", nullParent])
         XCTAssertEqual(bad["ok"] as? Bool, false)
         XCTAssertFalse((bad["error"] as? String ?? "").isEmpty)
         // 失败不改变当前根
@@ -244,12 +250,12 @@ final class BridgeDispatcherTests: XCTestCase {
     }
 
     func testSwitchRootMovesAllIoToNewRoot() throws {
-        XCTAssertEqual(mcall("createRoot", ["甲", nil])["ok"] as? Bool, true)
+        XCTAssertEqual(mcall("createRoot", ["甲", nullParent])["ok"] as? Bool, true)
         XCTAssertEqual(mcall("writeDoc", ["作品/甲.md", "甲正文"])["ok"] as? Bool, true)
         XCTAssertEqual(mcall("writeDraft", ["作品/甲.md", "甲草稿"])["ok"] as? Bool, true)
         mcall("appendPomodoro", [[:]])
 
-        XCTAssertEqual(mcall("createRoot", ["乙", nil])["ok"] as? Bool, true)
+        XCTAssertEqual(mcall("createRoot", ["乙", nullParent])["ok"] as? Bool, true)
         // 新根下看不到旧根的作品
         let ws = mcall("listWorkspace")
         XCTAssertEqual((ws["works"] as? [[String: Any]])?.count, 0)
@@ -283,7 +289,7 @@ final class BridgeDispatcherTests: XCTestCase {
     }
 
     func testSwitchRootRejectsUnknownAndStays() {
-        XCTAssertEqual(mcall("createRoot", ["甲", nil])["ok"] as? Bool, true)
+        XCTAssertEqual(mcall("createRoot", ["甲", nullParent])["ok"] as? Bool, true)
         let r = mcall("switchRoot", ["不存在"])
         XCTAssertEqual(r["ok"] as? Bool, false)
         XCTAssertEqual(mcall("getState")["root"] as? String,
@@ -291,7 +297,7 @@ final class BridgeDispatcherTests: XCTestCase {
     }
 
     func testCurrentRootPersistsAcrossDispatcherRebuild() throws {
-        XCTAssertEqual(mcall("createRoot", ["长期", nil])["ok"] as? Bool, true)
+        XCTAssertEqual(mcall("createRoot", ["长期", nullParent])["ok"] as? Bool, true)
         XCTAssertEqual(mcall("writeDoc", ["作品/x.md", "内容"])["ok"] as? Bool,
                        true)
         let rebuilt = try BridgeDispatcher(dataDir: root.appendingPathComponent("mdata"),
@@ -309,7 +315,7 @@ final class BridgeDispatcherTests: XCTestCase {
 
     func testSingleRootModeRejectsMultiRootApis() {
         // 单根模式（旧测试构造）不暴露多工作区 API
-        XCTAssertEqual(call("createRoot", ["x", nil])["ok"] as? Bool, false)
+        XCTAssertEqual(call("createRoot", ["x", nullParent])["ok"] as? Bool, false)
         XCTAssertEqual(call("switchRoot", ["x"])["ok"] as? Bool, false)
         XCTAssertEqual(call("listRoots")["ok"] as? Bool, false)
     }

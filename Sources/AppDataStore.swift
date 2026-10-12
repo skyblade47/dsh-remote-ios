@@ -87,7 +87,7 @@ final class AppDataStore {
     func saveConfig(_ patch: [String: Any]) -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
-        var prev = readConfig()
+        let prev = readConfig()
         var next = prev
         var savedGateway: String? = nil
 
@@ -172,7 +172,6 @@ final class AppDataStore {
         } catch {
             return fail(error.localizedDescription)
         }
-        _ = prev
 
         // 网关已校验并落盘 ⇒ 上报 App 侧（写 UserDefaults + 通知壳重建 origin）；
         // 仍在锁内同步调用，钩子里若有重活应自行 async（App 侧实现即如此）。

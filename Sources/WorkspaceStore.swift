@@ -68,6 +68,7 @@ final class WorkspaceStore {
         return ["ok": true, "content": content, "mtime": mtimeMillis(abs)]
     }
 
+    @discardableResult
     func writeDoc(relPath: String, content: String?) throws -> [String: Any] {
         guard let content = content else { throw PathGuard.bad("内容必须是字符串") }
         lock.lock()
@@ -84,6 +85,7 @@ final class WorkspaceStore {
         return ["ok": true, "mtime": mtimeMillis(abs), "bytes": data.count]
     }
 
+    @discardableResult
     func createWork(_ name: String) throws -> [String: Any] {
         try PathGuard.validateSegment(name)
         lock.lock()
