@@ -25,7 +25,7 @@ enum ShellHTMLRewriter {
         return html.replacingOccurrences(of: anchor, with: anchor + "\n" + insertion)
     }
 
-    static func rewrite(_ html: String) throws -> String {
+    static func rewrite(_ html: String, css: ((String) -> String?)? = nil) throws -> String {
         // 第一步：结构注入（插进去的仍是 /__shell__/ 字面量，与原 12 外链同走下面的正则）
         let withViewport = html.contains(viewportNew)
             ? html
@@ -52,6 +52,31 @@ enum ShellHTMLRewriter {
         guard hits == 0 || hits == AssetManifest.names.count else {
             throw RewriteError.hitCountMismatch(hits, AssetManifest.names.count)
         }
-        return mutable as String
+
+        // 第三步：样式表内联。真机实测：WKWebView 对自定义 scheme（dsh-asset://）下的
+        // <link rel=stylesheet> 不应用，但同一 scheme 的 <script> 正常执行；三个外链 CSS 全不生效
+        // 时三栏 flex 退化为纵向堆叠。把白名单样式表就地换成 <style> 彻底绕开该非对称行为；
+        // 提供不出内容的样式表保留外链，JS 一律不动。幂等：输入已是 <style data-asset> 时无外链可换。
+        return inlineStylesheets(mutable as String, css: css)
+    }
+
+    /// 把 `<link rel="stylesheet" href="dsh-asset://local/<name>.css" ...>` 就地替换为
+    /// `<style data-asset="<name>">…</style>`（css 闭包返回 nil 则保留原 link）。
+    private static func inlineStylesheets(_ html: String, css: ((String) -> String?)?) -> String {
+        guard let css else { return html }
+        let linkRegex = try? NSRegularExpression(
+            pattern: #"<link\s+rel="stylesheet"\s+href="dsh-asset://local/([A-Za-z0-9._-]+\.css)"\s*/?>"#
+        )
+        guard let linkRegex else { return html }
+        let source = html as NSString
+        let matches = linkRegex.matches(in: html, range: NSRange(location: 0, length: source.length))
+        var out = html
+        for m in matches.reversed() {
+            let name = source.substring(with: m.range(at: 1))
+            guard AssetManifest.isAsset(name), let body = css(name) else { continue }
+            guard let nsRange = Range(m.range, in: out) else { continue }
+            out.replaceSubrange(nsRange, with: #"<style data-asset="\#(name)">\#(body)</style>"#)
+        }
+        return out
     }
 }

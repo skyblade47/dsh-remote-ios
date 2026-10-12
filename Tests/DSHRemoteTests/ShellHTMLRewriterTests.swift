@@ -99,4 +99,45 @@ __JS__
         let html = #"<script src="/__shell__/writing.js"></script>"#
         XCTAssertThrowsError(try ShellHTMLRewriter.rewrite(html))
     }
+
+    // 默认 css: 内联。提供内容的白名单样式表被换成 <style>（自定义 scheme 下外链
+    // stylesheet 不被 WebKit 应用，而 <script> 正常；内联绕开该非对称行为），级联顺序不变。
+    func testInlinesCSSByDefaultWhileScriptsStayOnScheme() throws {
+        let out = try ShellHTMLRewriter.rewrite(fullHTML, css: { name in
+            name == "writing.css" ? "W{color:red}" : nil
+        })
+        // writing.css 提供了内容 ⇒ 内联，且不再保留其外链
+        XCTAssertTrue(out.contains(#"<style data-asset="writing.css">W{color:red}</style>"#))
+        XCTAssertFalse(out.contains("dsh-asset://local/writing.css"))
+        // 未提供内容的样式表 ⇒ 保留外链（不因内联器丢样式）
+        XCTAssertTrue(out.contains("dsh-asset://local/dsw-tokens.css"))
+        XCTAssertTrue(out.contains("dsh-asset://local/ipad.css"))
+        // 级联顺序：tokens → writing(内联) → ipad(外链)
+        let tokens = try XCTUnwrap(out.range(of: "dsh-asset://local/dsw-tokens.css"))
+        let writing = try XCTUnwrap(out.range(of: #"<style data-asset="writing.css">"#))
+        let ipad = try XCTUnwrap(out.range(of: "dsh-asset://local/ipad.css"))
+        XCTAssertLessThan(tokens.upperBound, writing.lowerBound)
+        XCTAssertLessThan(writing.upperBound, ipad.lowerBound)
+        // JS 一律仍走自定义 scheme（只有样式表内联）
+        XCTAssertTrue(out.contains("dsh-asset://local/writing.js"))
+        XCTAssertFalse(out.contains(#"<style data-asset="writing.js">"#))
+    }
+
+    func testCSSInlineIsIdempotent() throws {
+        let once = try ShellHTMLRewriter.rewrite(fullHTML, css: { name in
+            name == "writing.css" ? "W{color:red}" : nil
+        })
+        let twice = try ShellHTMLRewriter.rewrite(once, css: { name in
+            name == "writing.css" ? "W{color:red}" : nil
+        })
+        XCTAssertEqual(once, twice)
+        XCTAssertEqual(twice.components(separatedBy: #"<style data-asset="writing.css">"#).count - 1, 1)
+    }
+
+    // css: nil ⇒ 旧行为（全部保留外链），供无 Bundle 的测试/调用方使用。
+    func testNilCSSProviderKeepsExternalStylesheetLinks() throws {
+        let out = try ShellHTMLRewriter.rewrite(fullHTML, css: nil)
+        XCTAssertTrue(out.contains("dsh-asset://local/writing.css"))
+        XCTAssertFalse(out.contains(#"<style data-asset=""#))
+    }
 }

@@ -78,7 +78,13 @@ struct ShellWebView: UIViewRepresentable {
             return
         }
         do {
-            let rewritten = try ShellHTMLRewriter.rewrite(raw)
+            // 样式表在改写阶段内联进 <style>：WKWebView 不应用自定义 scheme 下的外链 CSS
+            // （但同 scheme 的 JS 正常），内联从根上保证三栏等样式不依赖子资源加载。
+            let rewritten = try ShellHTMLRewriter.rewrite(raw, css: { name in
+                guard let u = Bundle.main.url(forResource: name, withExtension: nil),
+                      let s = try? String(contentsOf: u, encoding: .utf8) else { return nil }
+                return s
+            })
             webView.loadHTMLString(rewritten, baseURL: ShellOrigin.baseURL(gatewayRaw: gatewayRaw))
         } catch {
             NSLog("[dsh-ios] 本地壳改写失败：\(error.localizedDescription)")

@@ -1,6 +1,7 @@
 # 构建产物（XcodeGen 生成 + Xcode 输出）
 *.xcodeproj/
 build/
+build-artifacts/
 DerivedData/
 *.ipa
 *.app
