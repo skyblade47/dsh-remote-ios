@@ -6424,7 +6424,7 @@ iPad 连 Tailscale 并确认写作页正常加载、登录态有效后：
 2. 拖分割条的起手式不会误触发收键盘；
 3. 抽查热区：左栏 `.w-doc`/`.w-card`/`.w-more`（视觉仍 24px，但 44×44 透明扩展区可点）、header `.tab`/`.gear`、`.s-btn`、弹层 input/select，手指点按无明显误触；
 4. 双击页面按钮不触发页面缩放（manipulation 生效），双指捏合缩放仍可用；点击无灰色高亮块；
-5. 五入口复核：写作页 `#w-pick-root`/`#w-ws-switch`/`#w-create-root-here`、设置弹层 `#s-ws-switch`/`#s-ws-create-here` 不可见；而「新建工作区」`#s-ws-create`、沙盒根新建 `#w-ws-create-here`、「新建作品」均在且可用。
+5. 入口复核（Task 14 后口径，详见 14.1 第 5 条）：写作页 `#w-create-root-here` 与设置弹层 `#s-ws-create-here` 两个「新建到指定位置」不可见；`#w-pick-root`（文案已改「选择已有工作区…」）、`#w-ws-switch`、`#s-ws-switch` 三个「选择/切换」**可见且弹出沙盒工作区浮层**；「新建工作区」`#s-ws-create`、沙盒根新建 `#w-ws-create-here`、「新建作品」均在且可用。
 
 - [ ] **13.12 真机验收 G：登录态持久与回环门（M1 回归，快验）**
 
@@ -6458,6 +6458,48 @@ git commit -m "chore(s1): 移除探针临时 httpBody 观察日志（五探针�
 - [ ] **13.15 交付汇报（不自动合并、不自动打 tag）**
 
 向用户汇报：CI run 链接与结果、IPA 产物位置、A-G 各项真机结论、S1 收尾选择、本期对照 Goal 的完成度（离线写作/重开在/保存即推/回网补推/冲突手选）。后续 `feature/m0-m1-shell` 是否合并 main、是否打发布 tag（会触发 CI 产出同名工件）**一律等用户明确指令**；不 force push、不改 git config、不在 CI 配置任何 Apple ID 凭据。
+
+---
+
+## Task 14：沙盒内多工作区与壳层工作区选择浮层（2026-10-12）
+
+> 背景：真机复核中用户确认「桌宠与写作栏排版正常，但工作区相关按钮无反应」。核查结论：原生目录选择器能力（pickRoot/pickDir）此前按既定决策返回 NotSupported，壳层尚无替代物，故入口被裁后功能确实缺失。用户拍板：**实现沙盒内多工作区**（容器下子目录，不依赖系统目录选择器），并**现在就修**，走 TDD + 现有 CI。
+
+### 14.1 设计裁决（外壳层面解决，不改共享核心）
+
+1. **布局**：容器固定 `Documents/workspace`，每个一级子目录一个工作区；`BridgeDispatcher` 加 `multiWorkspace: Bool`（默认 false 保持旧测试语义）与可变 `currentRoot: URL?`。单根模式行为不变。
+2. **三桥法**（白名单 46→49）：`createRoot(name, parentDir?)`（parentDir 在沙盒内仅作自由描述，根一律落容器；mkdir + `.dsh-probe` 真写自检，失败回滚）、`listRoots()`（懒建容器、跳过点开头/非目录，返回 `container` + `roots[{name,root,current}]`）、`switchRoot(name)`（白名单校验、失存拒绝且不换根）。
+3. **持久化**：config.json 新键 `currentWorkspace`（子目录名）；启动恢复时若目录已失存则清键留空态。`WorkspaceStore.rebind(root:)` 支持运行时换根；所有 root 入参（读写/草稿/proof/番茄钟/outbox 关联）统一经 `currentRootPath()`。
+4. **壳层覆盖（关键裁决）**：原生 pickRoot/pickDir/导入四法**继续返回 NotSupported**（单测钉死）；iOS 语义全部落在 `ipad.js`——利用 BridgeJS 的 wcStorage Proxy set trap（赋函数即进 `methodOverrides`，优先级高于白名单转发）覆盖：
+   - `pickRoot()`：自建 `.wci-*` 浮层枚举 `listRoots()`，点选走 `switchRoot`，浮层底部可直接 `createRoot`；返回严格对齐 writing.js 消费的 `{ok,root}` / `{ok:false,canceled:true}` / `{ok:false,error}`；
+   - `pickDir()`：iPad 唯一合法父目录是容器，恒回 `{ok:true,dir:listRoots().container}`，使「新建到指定位置」链路（createRootHere→pickDir→createRoot）自然成立。
+   - writing.js / shell.html / writing.css **零改动**。
+5. **入口策略放宽**：13.11 第 5 条原拟隐藏的 5 个入口中，放出 `#w-pick-root`/`#w-ws-switch`/`#s-ws-switch` 三个「选择/切换」（现由浮层背书），仅继续隐藏 `#w-create-root-here`/`#s-ws-create-here` 两个「新建到指定位置」（与普通「新建工作区」等价的重复入口）；`#w-pick-root` 文案改「选择已有工作区…」。
+6. **补齐 WKUIDelegate**：writing.js 三处 `window.confirm`（切工作区前落盘 L822、回收站彻底删除 L1453、重启 L2606）在不实现 confirm 面板时被 WebKit 默认按「取消」处理，会静默挡掉带脏文档的切换。ShellWebView 补 `runJavaScriptConfirmPanel`/`runJavaScriptAlertPanel`（无 prompt 使用面，不补），取 keyWindow 最上层 VC 呈现；极端时序取不到 VC 时 confirm 回 false、alert 直接 completion（与 WebKit 默认结论一致，回调不悬挂）。
+
+### 14.2 TDD 与 CI 结论
+
+- Red：BridgeJSTests 白名单计数 46→49；DispatcherTests 新增多根枚举/切换隔离（文档、草稿、番茄钟按根隔离）、未知根拒绝且不换根、dispatcher 重建后当前根持久化、重名/非法名（含路径分隔段）拒绝且不换根、单根模式拒绝多根 API；pickRoot/pickDir/导入四法在多根模式下仍钉死 NotSupported。
+- Green：BridgeDispatcher / AppDataStore（currentWorkspaceName 读写，saveConfig 以 `var next = prev` 保留未知键）/ WorkspaceStore.rebind / BridgeJS 白名单。
+- CI（三次推进）：
+  - run 38216490594（54a71da）：**红**——测试文件 293 行断言括号错位（`mcall(...))["ok"]`）编译失败，本地 Windows 无编译器未拦到；修复 commit d52e5f3；
+  - run 38216829328（d52e5f3）：**红**——编译过，唯 `testSwitchRootMovesAllIoToNewRoot` L266 失败：用例切到乙根后漏写一次番茄钟却断言文件在乙根（实现按当前根写入，语义正确）；补测试步骤 commit 16ef390；
+  - run 38217301128（16ef390）：**绿**——模拟器逻辑测试 **192 tests, 0 failures**，Release 编译、未签名 IPA（约 0.44 MB）打包上传成功。
+- 提交：`54a71da` feat(workspace) 主体、`d52e5f3`/`16ef390` 两笔测试修复；均在 `feature/m0-m1-shell`，未合并、未打 tag。
+
+### 14.3 待真机验收（并入 13.7 / 13.11 现场）
+
+1. 首启（清空 App 数据后）自动弹出工作区浮层：空列表提示 + 底部新建；新建后直接进入该工作区并刷出文档树；杀进程重开自动恢复同一工作区；
+2. 栏内「切换工作区」与设置页切换都弹同一浮层；有未保存修改时先弹**原生 confirm**，确认落盘后切换，取消则留原地；
+3. 甲工作区写文档/草稿/番茄钟，切乙看不到，切甲完整还在；
+4. 浮层取消按钮与点遮罩均为静默收束（不报错、不换根）；重名/非法名在浮层内显示错误且可重试；
+5. 两个「新建到指定位置」入口确不可见，普通「新建工作区」与各「选择/切换」入口在且可用。
+
+### 14.4 遗留（后续增量，不阻塞）
+
+- `relaunch` 桥仍只回 okMap，iOS 无法自控重启：按钮会停在「正在重启…」。原生 confirm 已补，下一步需在壳层把重启动作转为「提示用户手动关开 App」并恢复按钮（ios-relaunch）。
+- 导入两键（`#w-import-works` 等）仍无能力：下一轮用 ipad.css 隐藏（原生保持 NotSupported 测试不变，ios-import）。
+- 本期 CI 暴露的新 warning（WebKit Sendable 建议加 @preconcurrency、AppDataStore `prev` 可改 let）为提示级，不影响功能，收尾时统一清理。
 
 ---
 
