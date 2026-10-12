@@ -19,6 +19,15 @@
   display: none !important;
 }
 
+/* ①b 能力裁剪：导入依赖系统文件选择器，原生侧 pickImportFiles/pickImportDir/importInto
+   恒回 NotSupported（iPad v1 不做导入，见 BridgeDispatcher.unsupported）⇒ 藏掉两个
+   「导入」入口（#w-import-works 卡片墙 / #w-import-tree 文档树）；导入弹层 #w-import
+   仅由这两键打开（writing.js importOpen），入口一藏即整体不可达。 */
+#w-import-works,
+#w-import-tree {
+  display: none !important;
+}
+
 /* Electron 回环门自检串（#diag = "hostname=… · 同源=…"，shell.html 内联脚本写入）。
    那是 PC 调试 127.0.0.1 origin 的残留，在 iPad 上会把网关主机名常显在标签栏右侧，
    既无产品语义也不是三栏元素 ⇒ 壳层隐藏（不删 shell.html 的同步逻辑）。 */

@@ -295,6 +295,33 @@
     if (pick) pick.textContent = '选择已有工作区…'
   }
 
+  // ───────────────────── 4. 「重启客户端」假死修复 ─────────────────────
+  //
+  // iOS 应用不能自行退出重开：原生 relaunch 只回 ok（BridgeDispatcher 的 okMap 分支），
+  // 不会真的重启。writing.js 的流程是 confirm → 按钮置灰改字「正在重启…」→ api.relaunch()
+  // —— 它等的是「进程退出」这个永不到来的结果，按钮就此卡死（用户只能杀进程）。
+  // 壳层对策：在 document 捕获阶段拦截该键点击 —— 捕获沿 DOM 树下行，先于目标上
+  // writing.js 已注册的监听触发，stopPropagation 让它根本到不了目标 —— 改为弹浮层
+  // 请用户手动关开 App；按钮全程不被置灰，confirm 也不会出现。
+  function showRelaunchHint() {
+    var ui = openOverlay('重启客户端', null)
+    ui.body.appendChild(el('p', 'wci-sub',
+      'iPad 上应用不能自行重启。刚保存的设置已经落盘：请手动关闭本 App' +
+      '（上滑进多任务界面后把它划掉），再重新打开即生效。'))
+    var ok = el('button', 'wci-primary', '知道了')
+    ok.style.width = '100%'
+    ok.addEventListener('click', ui.close)
+    ui.body.appendChild(ok)
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target
+    if (!(t instanceof Element)) return
+    if (!t.closest('#s-restart')) return
+    e.preventDefault()
+    e.stopPropagation()
+    showRelaunchHint()
+  }, true)
+
   // BridgeJS 在 document-start 注入，wcStorage 已存在；轮询仅为防御未来注入顺序变化。
   if (!installSandboxWorkspace()) {
     var pickTries = 0
