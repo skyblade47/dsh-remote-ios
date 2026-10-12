@@ -140,4 +140,67 @@ __JS__
         XCTAssertTrue(out.contains("dsh-asset://local/writing.css"))
         XCTAssertFalse(out.contains(#"<style data-asset=""#))
     }
+
+    // MARK: - 脚本内联（2026-10-12 真机探针实锤后的根因修复）
+
+    // 真机探针实锤：https origin 下自定义 scheme 子资源整批被拦（CSS 外链不应用、
+    // 静态与动态插入的 script 均 onerror，ipad.js tag in DOM=YES 但 executed=NO）
+    // ⇒ JS 与 CSS 同法内联，壳页面零子资源依赖。
+    func testInlinesJSWhenProviderGiven() throws {
+        let out = try ShellHTMLRewriter.rewrite(fullHTML, js: { name in
+            name == "writing.js" ? "var W=1" : nil
+        })
+        // writing.js 提供了内容 ⇒ 内联，且不再保留其外链
+        XCTAssertTrue(out.contains(#"<script data-asset="writing.js">var W=1</script>"#))
+        XCTAssertFalse(out.contains("dsh-asset://local/writing.js"))
+        // 未提供内容的脚本 ⇒ 保留外链（不因内联器丢功能）
+        XCTAssertTrue(out.contains("dsh-asset://local/send-net.js"))
+        XCTAssertTrue(out.contains("dsh-asset://local/ipad.js"))
+        // 执行顺序：sync-core(外链) → writing(内联) → send-net(外链)
+        let syncCore = try XCTUnwrap(out.range(of: "dsh-asset://local/sync-core.js"))
+        let writing = try XCTUnwrap(out.range(of: #"<script data-asset="writing.js">"#))
+        let sendNet = try XCTUnwrap(out.range(of: "dsh-asset://local/send-net.js"))
+        XCTAssertLessThan(syncCore.upperBound, writing.lowerBound)
+        XCTAssertLessThan(writing.upperBound, sendNet.lowerBound)
+        // 样式表不受脚本内联影响
+        XCTAssertTrue(out.contains("dsh-asset://local/writing.css"))
+        XCTAssertFalse(out.contains(#"<script data-asset="writing.css">"#))
+    }
+
+    // HTML 解析只认 </script 闭合：内联内容里的该串转义为 <\/script（JS 语义不变，
+    // 大小写不敏感）。当前 12 个资产均无此串（已全量扫描），此为防御未来资产变更。
+    func testScriptInlineEscapesClosingTag() throws {
+        let out = try ShellHTMLRewriter.rewrite(fullHTML, js: { name in
+            name == "writing.js" ? "var a=1</script>var b=2</SCRIPT>var c=3" : nil
+        })
+        XCTAssertTrue(out.contains(#"var a=1<\/script>var b=2<\/SCRIPT>var c=3"#))
+        XCTAssertFalse(out.contains("</script>var b"))
+    }
+
+    func testJSInlineIsIdempotent() throws {
+        let js: (String) -> String? = { name in name == "writing.js" ? "var W=1" : nil }
+        let once = try ShellHTMLRewriter.rewrite(fullHTML, js: js)
+        let twice = try ShellHTMLRewriter.rewrite(once, js: js)
+        XCTAssertEqual(once, twice)
+        XCTAssertEqual(twice.components(separatedBy: #"<script data-asset="writing.js">"#).count - 1, 1)
+    }
+
+    // js: nil ⇒ 旧行为（全部保留外链），供无 Bundle 的测试/调用方使用。
+    func testNilJSProviderKeepsExternalScriptTags() throws {
+        let out = try ShellHTMLRewriter.rewrite(fullHTML, js: nil)
+        XCTAssertTrue(out.contains("dsh-asset://local/writing.js"))
+        XCTAssertFalse(out.contains(#"<script data-asset=""#))
+    }
+
+    // 真机形态：css/js 闭包全给 ⇒ 壳页面不再引用任何自定义 scheme 子资源。
+    func testFullInlineLeavesNoSchemeSubresources() throws {
+        let out = try ShellHTMLRewriter.rewrite(
+            fullHTML,
+            css: { _ in "C{}" },
+            js: { _ in "var x=1" }
+        )
+        XCTAssertFalse(out.contains("dsh-asset://local/"))
+        XCTAssertFalse(out.contains(#"<script src="#))
+        XCTAssertFalse(out.contains(#"<link rel="stylesheet""#))
+    }
 }

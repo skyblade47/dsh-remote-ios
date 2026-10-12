@@ -79,13 +79,15 @@ struct ShellWebView: UIViewRepresentable {
             return
         }
         do {
-            // 样式表在改写阶段内联进 <style>：WKWebView 不应用自定义 scheme 下的外链 CSS
-            // （但同 scheme 的 JS 正常），内联从根上保证三栏等样式不依赖子资源加载。
-            let rewritten = try ShellHTMLRewriter.rewrite(raw, css: { name in
+            // 样式表与脚本都在改写阶段内联（<style>/<script data-asset>）：真机探针实锤
+            // https origin 下自定义 scheme 子资源被 WebKit 整批拦截（CSS 不应用、script
+            // 不执行，动态插入同 onerror），内联使壳页面零子资源依赖，从根上绕开拦截。
+            func asset(_ name: String) -> String? {
                 guard let u = Bundle.main.url(forResource: name, withExtension: nil),
                       let s = try? String(contentsOf: u, encoding: .utf8) else { return nil }
                 return s
-            })
+            }
+            let rewritten = try ShellHTMLRewriter.rewrite(raw, css: asset, js: asset)
             webView.loadHTMLString(rewritten, baseURL: ShellOrigin.baseURL(gatewayRaw: gatewayRaw))
         } catch {
             NSLog("[dsh-ios] 本地壳改写失败：\(error.localizedDescription)")

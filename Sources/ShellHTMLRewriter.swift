@@ -108,7 +108,9 @@ enum ShellHTMLRewriter {
         return html.replacingOccurrences(of: anchor, with: anchor + "\n" + insertion)
     }
 
-    static func rewrite(_ html: String, css: ((String) -> String?)? = nil) throws -> String {
+    static func rewrite(_ html: String,
+                        css: ((String) -> String?)? = nil,
+                        js: ((String) -> String?)? = nil) throws -> String {
         // 第一步：结构注入（插进去的仍是 /__shell__/ 字面量，与原 12 外链同走下面的正则）
         let withViewport = html.contains(viewportNew)
             ? html
@@ -138,11 +140,15 @@ enum ShellHTMLRewriter {
             throw RewriteError.hitCountMismatch(hits, AssetManifest.names.count)
         }
 
-        // 第三步：样式表内联。真机实测：WKWebView 对自定义 scheme（dsh-asset://）下的
-        // <link rel=stylesheet> 不应用，但同一 scheme 的 <script> 正常执行；三个外链 CSS 全不生效
-        // 时三栏 flex 退化为纵向堆叠。把白名单样式表就地换成 <style> 彻底绕开该非对称行为；
-        // 提供不出内容的样式表保留外链，JS 一律不动。幂等：输入已是 <style data-asset> 时无外链可换。
-        return inlineStylesheets(mutable as String, css: css)
+        // 第三步：样式表与脚本内联。真机探针实锤（2026-10-12，探针 v1/v2）：https origin
+        // 页面里自定义 scheme（dsh-asset://）的子资源被 WebKit 整批拦截——CSS 外链不应用、
+        // 静态 <script src> 与动态插入的 script 均 onerror（tag in DOM=YES 但 executed=NO）。
+        // 早前「同 scheme script 正常执行」的注释结论证伪。把白名单样式表换成 <style>、
+        // 白名单脚本换成 <script data-asset>，壳页面零子资源依赖，从根上绕开拦截；
+        // 提供不出内容的资产保留外链（不影响无 Bundle 的测试/调用方）。
+        // 幂等：输入已是 <style data-asset>/<script data-asset> 时无外链可换。
+        let cssInlined = inlineStylesheets(mutable as String, css: css)
+        return inlineScripts(cssInlined, js: js)
     }
 
     /// 把 `<link rel="stylesheet" href="dsh-asset://local/<name>.css" ...>` 就地替换为
@@ -161,6 +167,31 @@ enum ShellHTMLRewriter {
             guard AssetManifest.isAsset(name), let body = css(name) else { continue }
             guard let nsRange = Range(m.range, in: out) else { continue }
             out.replaceSubrange(nsRange, with: #"<style data-asset="\#(name)">\#(body)</style>"#)
+        }
+        return out
+    }
+
+    /// 把 `<script src="dsh-asset://local/<name>.js"></script>` 就地替换为
+    /// `<script data-asset="<name>">…</script>`（js 闭包返回 nil 则保留原外链）。
+    /// 内容里的 `</script` 一律转义为 `<\/script`（HTML 解析只认它闭合脚本；
+    /// 字符串/正则/注释语境下 `\/` 与 `/` 等价，JS 语义不变，大小写不敏感）。
+    private static func inlineScripts(_ html: String, js: ((String) -> String?)?) -> String {
+        guard let js else { return html }
+        let scriptRegex = try? NSRegularExpression(
+            pattern: #"<script\s+src="dsh-asset://local/([A-Za-z0-9._-]+\.js)"\s*></script>"#
+        )
+        guard let scriptRegex else { return html }
+        let source = html as NSString
+        let matches = scriptRegex.matches(in: html, range: NSRange(location: 0, length: source.length))
+        var out = html
+        for m in matches.reversed() {
+            let name = source.substring(with: m.range(at: 1))
+            guard AssetManifest.isAsset(name), let body = js(name) else { continue }
+            guard let nsRange = Range(m.range, in: out) else { continue }
+            let safe = body.replacingOccurrences(
+                of: "</script", with: #"<\/script"#, options: .caseInsensitive
+            )
+            out.replaceSubrange(nsRange, with: #"<script data-asset="\#(name)">\#(safe)</script>"#)
         }
         return out
     }
