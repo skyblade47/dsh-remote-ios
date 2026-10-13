@@ -742,15 +742,13 @@
     if (!els.autosave) return
     if (state.saveState === 'error') { els.autosave.textContent = '✗ 自动保存失败'; return }
     if (state.saveState === 'dirty' || state.saveState === 'saving') {
-      els.autosave.textContent = '… 待自动保存（' + (DEBOUNCE_MS / 1000) + 's 去抖）'
+      els.autosave.textContent = '… 待自动保存'
       return
     }
-    if (state.lastSavedAt) {
-      var sec = Math.max(0, Math.round((Date.now() - state.lastSavedAt) / 1000))
-      els.autosave.textContent = '✓ 自动保存 · ' + sec + ' 秒前'
-      return
-    }
-    els.autosave.textContent = '✓ 自动保存「开」（' + (DEBOUNCE_MS / 1000) + 's 去抖）'
+    // 🔴 2026-10-13：saved 时用静态文本（不显示"N 秒前"）——
+    //   自动保存成功是常态（本地最新），每 500s 刷秒数 ⇒ 文本宽度变 ⇒ 工具栏 wrap 重排 ⇒ 整页跳动。
+    //   状态变化（dirty→saving→saved）只改一次文本，宽度不再持续变。
+    els.autosave.textContent = '✓ 自动保存'
   }
 
   function scheduleAutosave() {
@@ -3831,8 +3829,9 @@
       if (state.current && state.dirty) writeDraftNow()
     }, DRAFT_MS)
 
-    // 「✓ 自动保存 · N 秒前」心跳（N 的递增由它负责；状态变更时 renderSaveState 会立即刷一次）
-    setInterval(renderAutosaveLabel, 500)
+    // 🔴 2026-10-13：去掉 renderAutosaveLabel 的 500ms 心跳。
+    //   原来用它递增「N 秒前」的 N，现在 saved 状态用静态文本「✓ 自动保存」不再需要持续刷。
+    //   状态变化（dirty→saving→saved）由 renderSaveState 立即刷一次就够了。
 
     var goalChip = document.getElementById('w-goal-chip')
     goalChip.addEventListener('click', function () {
