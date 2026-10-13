@@ -125,6 +125,10 @@
         <!-- B5 / CR-4①：AI 校对 —— 把正文 + 固定提示词发给「校对助手」会话，结果出在右栏；
              🔴 只给建议，正文一字不改（点某一条的「应用」才改那一处）。 -->
         <button id="w-proof" title="把正文发给校对助手，只给建议、不改正文；结果出在右栏">✎ 校对</button>
+        <!-- §3 敏感词扫描：纯本地 AC 自动机，零网络；只定位不替换；结果复用右栏「校对」tab 同区 -->
+        <button id="w-sensitive" title="纯本地扫描当前文档的一般互联网敏感词，不联网、只定位不替换">⚠ 敏感词</button>
+        <!-- §4 全站内容搜索：本机工作区 + 云端 正文/；浮层覆盖写作区（PC：Ctrl/Cmd+Shift+F） -->
+        <button id="w-search-open" title="搜全书正文：本机工作区 + 云端（PC：Ctrl/Cmd+Shift+F）">🔍 搜全书</button>
         <!-- ③ 编辑工具实体按钮（2026-10-13）：iPad 触屏没有 Tab/Ctrl 键，WKWebView 里 Ctrl+F
              也被系统吃掉 —— 查找/缩进必须有可点的入口；PC 上它们与快捷键等价共存。 -->
         <button id="w-find-open" title="查找 / 替换（PC：Ctrl/Cmd+F）">查找</button>
@@ -177,6 +181,8 @@
           <button id="w-sync-remote-view" class="w-mini">看远端内容</button>
           <button id="w-sync-reupload">重新上传到服务器</button>
           <button id="w-sync-take-remote">用远端覆盖本地</button>
+          <!-- ⑤ 并发写入 409「另存为」：两边都改过、都不想丢时，把本地这份以带时间戳的新名另存（本地+服务器各一篇新文件），只在 conflict 横幅出现 -->
+          <button id="w-sync-save-as">本地这份另存为…</button>
           <button id="w-sync-keep-local">保留本地</button>
           <button id="w-sync-trash-local" class="w-mini">把本地这份移入回收站</button>
         </div>
@@ -328,22 +334,82 @@
             </div>
             <pre class="w-remote-view-body" id="w-remote-view-body"></pre>
           </div>
+          <!-- §4 全站内容搜索浮层：与 .w-remote-view 同构（absolute/inset/z-index/[hidden] 兜底）。
+               范围 all|local|remote；远端在客户端 listDrafts → 并发6 readDraft → 本地匹配；Esc 关闭并 abort。 -->
+          <div class="w-search-view" id="w-search-view" hidden>
+            <div class="w-search-head">
+              <input id="w-search-input" placeholder="搜全书正文（本机 + 云端）…" autocomplete="off">
+              <label class="w-search-opt"><input type="checkbox" id="w-search-case"> 区分大小写</label>
+              <span class="w-search-scope">
+                <label><input type="radio" name="w-search-where" value="all" checked> 本机+云端</label>
+                <label><input type="radio" name="w-search-where" value="local"> 仅本机</label>
+                <label><input type="radio" name="w-search-where" value="remote"> 仅云端</label>
+              </span>
+              <button id="w-search-close" class="w-mini">关闭 Esc</button>
+            </div>
+            <div class="w-search-progress" id="w-search-progress" hidden></div>
+            <div class="w-search-results" id="w-search-results"></div>
+          </div>
         </div>
 
-        <!-- 右栏：⑥ B5 校对建议（列表 + 状态）。记录板 / 文件预览仍是阶段④ 占位。
+        <!-- 右栏：记录板（笔记 / 待办 / 校对 / 预览 四 tab，设计 docs/board-and-noveldb-design.md §1.2）。
+             ⑥ B5 校对块原样迁入「校对」tab（id 全保留，proofread.js/proofread-net.js 零改动）；
              高亮走 CSS Highlight API（`::highlight(wc-*)`，见 writing.css）⇒ 正文 DOM 与 .md 一字不动。 -->
         <aside class="w-right" id="w-right">
-          <div class="w-proof">
-            <div class="w-proof-head">
-              <span class="w-panel-title">✎ 校对建议</span>
-              <span class="w-note" id="w-proof-count"></span>
+          <div class="w-board" id="w-board-panel">
+            <div class="w-board-tabs" role="tablist">
+              <button class="w-board-tab is-active" data-board-tab="notes" role="tab" type="button">笔记</button>
+              <button class="w-board-tab" data-board-tab="todos" role="tab" type="button">待办</button>
+              <button class="w-board-tab" data-board-tab="proof" role="tab" type="button">校对</button>
+              <button class="w-board-tab" data-board-tab="preview" role="tab" type="button">预览</button>
             </div>
-            <div class="w-proof-status" id="w-proof-status"></div>
-            <div class="w-proof-acts"><button id="w-proof-cancel" class="w-mini" hidden>取消</button></div>
-            <div class="w-proof-list" id="w-proof-list"></div>
-            <div class="w-proof-foot">只给建议，不改正文 —— 点某一条的「应用」才改那一处。</div>
+            <div class="w-board-body">
+              <!-- tab: 笔记（按文档绑定；无文档时禁用） -->
+              <div class="w-board-pane" data-board-pane="notes">
+                <textarea class="w-board-notes" id="w-board-notes" placeholder="随手记灵感 / 想法 / 大纲…"></textarea>
+              </div>
+              <!-- tab: 待办（按文档绑定；无文档时禁用） -->
+              <div class="w-board-pane" data-board-pane="todos" hidden>
+                <div class="w-board-todo-input-row">
+                  <input class="w-board-todo-input" id="w-board-todo-input" placeholder="加一条待办，回车提交">
+                </div>
+                <ul class="w-board-todo-list" id="w-board-todo-list"></ul>
+              </div>
+              <!-- tab: 校对（既有 .w-proof 整体迁入；内部 DOM 不重写） -->
+              <div class="w-board-pane" data-board-pane="proof" hidden>
+                <div class="w-proof">
+                  <div class="w-proof-head">
+                    <span class="w-panel-title">✎ 校对建议</span>
+                    <span class="w-note" id="w-proof-count"></span>
+                  </div>
+                  <div class="w-proof-status" id="w-proof-status"></div>
+                  <div class="w-proof-acts"><button id="w-proof-cancel" class="w-mini" hidden>取消</button></div>
+                  <div class="w-proof-list" id="w-proof-list"></div>
+                  <div class="w-proof-foot">只给建议，不改正文 —— 点某一条的「应用」才改那一处。</div>
+                </div>
+                <!-- §3 敏感词扫描结果（纯本地零网络；与 .w-proof 互斥显示，writing.js 单一切换，proofread-net.js 零改动） -->
+                <div class="w-sensitive" id="w-sensitive-panel" hidden>
+                  <div class="w-proof-head">
+                    <span class="w-panel-title">⚠ 敏感词</span>
+                    <span class="w-note" id="w-sensitive-count"></span>
+                  </div>
+                  <!-- 分类 chips：当场勾选只筛本次结果，不落盘；持久开关在设置页（设计 §3.6） -->
+                  <div class="w-sensitive-chips" id="w-sensitive-chips"></div>
+                  <div class="w-proof-status" id="w-sensitive-status"></div>
+                  <div class="w-proof-list" id="w-sensitive-list"></div>
+                  <div class="w-proof-foot">纯本地扫描 · 不联网 · 只定位不替换 —— 内置词库是通用基础集，不保证覆盖目标平台最新规则。</div>
+                </div>
+              </div>
+              <!-- tab: AI 文档预览（不绑当前文档，直接读客户端区正文） -->
+              <div class="w-board-pane" data-board-pane="preview" hidden>
+                <div class="w-board-preview-acts">
+                  <select class="w-board-preview-picker" id="w-board-preview-picker"></select>
+                  <button class="w-mini" id="w-board-preview-refresh" type="button">刷新</button>
+                </div>
+                <article class="w-board-preview-body" id="w-board-preview-body" aria-live="polite"></article>
+              </div>
+            </div>
           </div>
-          <div class="w-proof-todo">记录板 / 文件预览 · 阶段④</div>
         </aside>
       </div>
 
@@ -710,6 +776,38 @@
             想换会话就在下面填新 id；留空 = 用<b>内置默认</b>；填完<b>下次点「校对」即生效</b>（不用重启）。
           </div>
         </div>
+
+        <!-- §3 敏感词扫描（纯本地，零网络；开关/词表落 config.sensitive，归一化见 main.js normalizeSensitive） -->
+        <div class="s-group">
+          <div class="s-group-title">敏感词</div>
+          <div class="s-row">
+            <span class="s-label">分类开关</span>
+            <span class="s-val">
+              <label class="s-check"><input id="s-sensitive-politics" type="checkbox" /> 涉政</label>
+              <label class="s-check"><input id="s-sensitive-violence" type="checkbox" /> 暴恐</label>
+              <label class="s-check"><input id="s-sensitive-porn" type="checkbox" /> 色情</label>
+              <label class="s-check"><input id="s-sensitive-gamble" type="checkbox" /> 赌博</label>
+              <label class="s-check"><input id="s-sensitive-drugs" type="checkbox" /> 毒品</label>
+              <label class="s-check"><input id="s-sensitive-fraud" type="checkbox" /> 诈骗/传销</label>
+              <label class="s-check"><input id="s-sensitive-ads" type="checkbox" /> 广告法极限词</label>
+              <label class="s-check"><input id="s-sensitive-abuse" type="checkbox" /> 辱骂</label>
+              <label class="s-check"><input id="s-sensitive-custom" type="checkbox" /> 自定义词</label>
+            </span>
+          </div>
+          <div class="s-row">
+            <span class="s-label">自定义词</span>
+            <textarea id="s-sensitive-custom-words" class="s-textarea" rows="4" aria-label="自定义敏感词，一行一个" placeholder="一行一个词；启用上方「自定义词」后参与扫描"></textarea>
+          </div>
+          <div class="s-row">
+            <span class="s-label">忽略词</span>
+            <textarea id="s-sensitive-ignore-words" class="s-textarea" rows="4" aria-label="忽略的敏感词，一行一个" placeholder="一行一个词；命中这些词一律不报（可从扫描结果点「忽略此词」自动加入）"></textarea>
+          </div>
+          <div class="s-hint">
+            扫描<b>纯本地运行</b>，不联网、不上传正文，只<b>定位</b>不自动替换。内置词库是<b>通用基础集</b>，
+            不保证覆盖任何平台的最新审核规则，投稿前以<b>目标平台规则</b>为准。
+            广告法极限词、辱骂两类默认<b>关</b>（小说正文误伤高）。改完点「保存设置」生效。
+          </div>
+        </div>
         <!-- ⑧ T-10：启动与托盘（默认值见 main.js 的 SETTINGS_DEFAULTS.general；自启默认**关**） -->
         <div class="s-group">
           <div class="s-group-title">启动与托盘</div>
@@ -744,10 +842,16 @@
   <!-- B5：proofread.js = 校对的纯逻辑（提示词 / JSON 抽取 / 校验 / 文本定位 / 应用），与 node 单测同一份；
        必须**先于** proofread-net.js 加载（后者起手取 window.WCProofread） -->
   <script src="/__shell__/proofread.js"></script>
+  <!-- §3 敏感词：sensitive-words.js = 词库数据包（window.WCSensitiveWords），sensitive.js = AC 自动机纯逻辑；
+       均纯本地零网络，必须先于 writing.js（UI 接线在 writing.js 内） -->
+  <script src="/__shell__/sensitive-words.js"></script>
+  <script src="/__shell__/sensitive.js"></script>
   <!-- C11：sync-core.js = 多端同步的纯逻辑（版本串 / 三态判定 / 基线），与 node 单测同一份；
        必须**先于** writing.js（writing.js 起手就取 window.WCSync）与 sync-net.js 加载 -->
   <script src="/__shell__/sync-core.js"></script>
   <script src="/__shell__/writing-count-core.js"></script>
+  <!-- §4 全站内容搜索：search-core.js = 查询匹配/片段/归并纯逻辑，window.WCSearch；必须先于 writing.js -->
+  <script src="/__shell__/search-core.js"></script>
   <script src="/__shell__/writing.js"></script>
   <script src="/__shell__/send-net.js"></script>
   <!-- B5：校对链路层（HTTP + 轮询 + 右栏渲染 + 应用）；依赖 send.js（信封）与 writing.js（桥）⇒ 最后加载 -->

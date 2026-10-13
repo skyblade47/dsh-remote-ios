@@ -4,6 +4,7 @@ enum AssetManifest {
     static let names: Set<String> = [
         "dsw-tokens.css", "writing.css", "ipad.css",
         "send.js", "watch.js", "editor-plain.js", "proofread.js",
+        "sensitive-words.js", "sensitive.js", "search-core.js",
         "sync-core.js", "writing-count-core.js", "writing.js", "send-net.js",
         "proofread-net.js", "sync-net.js", "ipad.js"
     ]

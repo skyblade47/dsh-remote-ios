@@ -2,9 +2,12 @@ import XCTest
 @testable import DSHRemote
 
 final class AssetManifestTests: XCTestCase {
-    func testWhitelistContainsFourteenAssets() {
-        XCTAssertEqual(AssetManifest.names.count, 14)
+    func testWhitelistContainsSeventeenAssets() {
+        XCTAssertEqual(AssetManifest.names.count, 17)
         XCTAssertTrue(AssetManifest.isAsset("writing-count-core.js"))
+        XCTAssertTrue(AssetManifest.isAsset("sensitive-words.js"))
+        XCTAssertTrue(AssetManifest.isAsset("sensitive.js"))
+        XCTAssertTrue(AssetManifest.isAsset("search-core.js"))
         XCTAssertTrue(AssetManifest.isAsset("ipad.css"))
         XCTAssertTrue(AssetManifest.isAsset("ipad.js"))
     }

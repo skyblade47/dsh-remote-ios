@@ -17,12 +17,22 @@
 //    前端如实显示"远端未知"，**不会**误导成"远端没有这份"。
 // ============================================================================
 
-;(function () {
+// UMD 壳（写法同 sync-core.js）：浏览器挂 window.WCSyncNet；Node（node --test）只导出
+// 纯函数 toBoardRemoteRel 供单测 —— 网络层函数依赖浏览器环境，不进 Node 导出。
+;(function (root, factory) {
+  var mod = factory(root)
+  if (typeof module === 'object' && module && module.exports) {
+    module.exports = { toBoardRemoteRel: mod.toBoardRemoteRel }
+  } else {
+    root.WCSyncNet = mod
+  }
+})(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this), function (root) {
   'use strict'
 
-  var Sync = window.WCSync
-  var api = window.wcStorage
-  var Send = window.WCSend // 复用「发送给任务中心」那份落盘信封（`clientZoneSave`；不另造一套方言）
+  // root 在浏览器即 window；Node 下这三项为 undefined（纯函数不依赖它们，单测安全）
+  var Sync = root.WCSync
+  var api = root.wcStorage
+  var Send = root.WCSend // 复用「发送给任务中心」那份落盘信封（`clientZoneSave`；不另造一套方言）
 
   // ── 端点（一处可改）────────────────────────────────────────────────────
   // 🔴 2026-09-29 起客户端读写的是与 `写作训练/` **平级**的 `客户端区/`（agent 不自动看见）：
@@ -36,7 +46,7 @@
   var READ_TIMEOUT_MS = 20000
   var SAVE_TIMEOUT_MS = 20000
 
-  function bridge() { return window.__wcSyncBridge || null }
+  function bridge() { return root.__wcSyncBridge || null }
 
   /** 统一提示出口（有桥走桥，没有就 console —— 与 send-net 同口径） */
   function say(text, isError) {
@@ -232,7 +242,102 @@
     }
   }
 
-  window.WCSyncNet = {
+  // ==========================================================================
+  // 记录板（设计 docs/board-and-noveldb-design.md §1.3/§1.4）
+  // 远端落点：客户端区/进度/board/<作品>/<文档>.json（进度子域只收 .json）
+  // ==========================================================================
+
+  var BOARD_ROOT = '进度/board/'
+
+  /**
+   * 本地正文 relPath → 记录板远端 relPath：`作品甲/第一章.md` → `进度/board/作品甲/第一章.json`
+   * 非法（空/绝对路径/含 .. 路径段/非 .md）一律返回 null。纯函数，Node 下可单测。
+   */
+  function toBoardRemoteRel(localRel) {
+    if (typeof localRel !== 'string') return null
+    var s = localRel
+    if (!s) return null
+    if (s.charAt(0) === '/' || s.charAt(0) === '\\') return null // 绝对路径拒绝
+    // 拆路径段：任一段为 .. / . 或为空（双斜杠）都拒绝，防越出 进度/board/
+    var parts = s.split(/[\\/]/)
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] === '..' || parts[i] === '.' || parts[i] === '') return null
+    }
+    if (!/\.md$/i.test(s)) return null // 记录板只绑定正文 .md
+    return BOARD_ROOT + s.slice(0, -3) + '.json'
+  }
+
+  /**
+   * 保存某篇文档的记录板数据（笔记/待办）到远端。走裸信封 `{relPath, content}`
+   * （进度 json 不走 Send 的正文信封）。永不抛。
+   * @returns {Promise<{ok:boolean, conflict?:boolean, version?:string, status?:number, error?:string}>}
+   */
+  async function saveBoard(localRel, json) {
+    var remoteRel = toBoardRemoteRel(localRel)
+    if (!remoteRel) return { ok: false, error: 'BadRequest: 非法 relPath ' + String(localRel) }
+    var content
+    try { content = JSON.stringify(json) } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) }
+    }
+    var body = { relPath: remoteRel, content: content }
+    var ctl = new AbortController()
+    var timer = setTimeout(function () { ctl.abort() }, SAVE_TIMEOUT_MS)
+    try {
+      var res = await fetch(SAVE_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctl.signal,
+        credentials: 'same-origin',
+      })
+      var raw = ''
+      try { raw = await res.text() } catch (e) { /* 无体 */ }
+      var data = null
+      try { data = raw ? JSON.parse(raw) : null } catch (e) { data = null }
+      if (res.status === 200 && data && data.ok === true) {
+        return { ok: true, conflict: false, version: typeof data.version === 'string' ? data.version : '', status: 200 }
+      }
+      if (res.status === 409 || (data && data.code === 'VERSION_CONFLICT')) {
+        return { ok: false, conflict: true, version: typeof (data && data.version) === 'string' ? data.version : '', status: 409, error: (data && data.error) || 'VERSION_CONFLICT' }
+      }
+      return { ok: false, conflict: false, status: res.status, error: (data && (data.error || data.code)) || ('HTTP ' + res.status) }
+    } catch (e) {
+      return { ok: false, conflict: false, status: 0, error: (e && e.message) || String(e) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 读回某篇文档的记录板数据。永不抛。
+   * 404 视为「远端还没记过」⇒ `{ok:true, json:null, notFound:true}`；
+   * 内容 JSON.parse 失败 ⇒ `{ok:false, error}`（不静默吞坏数据）。
+   * @returns {Promise<{ok:boolean, json?:object|null, notFound?:boolean, version?:string, error?:string}>}
+   */
+  async function readBoard(localRel) {
+    var remoteRel = toBoardRemoteRel(localRel)
+    if (!remoteRel) return { ok: false, error: 'BadRequest: 非法 relPath ' + String(localRel) }
+    var url = READ_PATH + '?relPath=' + encodeURIComponent(remoteRel)
+    try {
+      var r = await getJson(url, READ_TIMEOUT_MS)
+      if (r.status === 404) return { ok: true, json: null, notFound: true }
+      var s = shape(r.status, r.json, r.raw, READ_TIMEOUT_MS)
+      if (!s.ok) return { ok: false, status: r.status, error: s.error }
+      var d = s.data || {}
+      if (typeof d.content !== 'string') {
+        return { ok: false, status: r.status, error: '响应缺少 content 字段（契约不符）' }
+      }
+      var parsed
+      try { parsed = JSON.parse(d.content) } catch (e) {
+        return { ok: false, status: r.status, error: '记录板 JSON 解析失败：' + ((e && e.message) || String(e)) }
+      }
+      return { ok: true, json: parsed, version: typeof d.version === 'string' ? d.version : '' }
+    } catch (e) {
+      return { ok: false, status: 0, error: (e && e.message) || String(e) }
+    }
+  }
+
+  return {
     LIST_PATH: LIST_PATH,
     READ_PATH: READ_PATH,
     DELETE_PATH: DELETE_PATH,
@@ -241,6 +346,9 @@
     readDraft: readDraft,
     saveDraft: saveDraft,
     deleteDraft: deleteDraft,
+    toBoardRemoteRel: toBoardRemoteRel,
+    saveBoard: saveBoard,
+    readBoard: readBoard,
     say: say,
   }
-})()
+})

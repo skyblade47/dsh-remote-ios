@@ -77,6 +77,21 @@
     // ⑥ CR-6 分栏：on = 写作页与对话页并排；ratio = 写作页占的宽度比例（0.2–0.8）；
     //   docs / board = 左栏 / 右栏浮层**当前是否展开**（只在分栏时有意义，是瞬时 UI 态、不落盘）
     split: { on: false, ratio: 0.5, docs: false, board: false },
+    // 记录板（设计 docs/board-and-noveldb-design.md §1）：notes/todos 按 relPath 分文档；
+    //   seq = 切文档令牌（防过期响应回填）；dirty = {relPath:true} 待推远端；
+    //   previewCache = 预览清单缓存 {lastRelPath,lastListAt}；各类 timer 挂这里好清理。
+    board: {
+      activeTab: 'notes',
+      notes: {},
+      todos: {},
+      previewCache: {},
+      seq: 0,
+      dirty: {},
+      noteTimer: null,
+      flushTimer: null,
+      warnOnce: false,
+      listLoading: false,
+    },
     defaultRootName: 'dsh工作区',
     suggestedRoot: '',
     draftsDir: '', // 草稿兜底落点（主进程给；横幅里如实告诉用户"内容在哪"）
@@ -196,6 +211,8 @@
     syncTakeRemote: document.getElementById('w-sync-take-remote'),
     syncKeepLocal: document.getElementById('w-sync-keep-local'),
     syncTrashLocal: document.getElementById('w-sync-trash-local'),
+    // ⑤ 并发写入 409：冲突横幅「本地这份另存为…」（只在 conflict 出现）
+    syncSaveAs: document.getElementById('w-sync-save-as'),
     syncState: document.getElementById('w-sync'),
     // ⑪ D-sync-1：横幅「看远端内容」入口 + 只读浮层（看清远端新旧再决定，不碰本地一字）
     syncRemoteView: document.getElementById('w-sync-remote-view'),
@@ -282,6 +299,45 @@
     setAutoStart: document.getElementById('s-autostart'),
     setTray: document.getElementById('s-tray'),
     setTrayNote: document.getElementById('s-tray-note'),
+    // 记录板（§1）：tabs 是 NodeList（事件委托到容器即可），其余按 id 抓
+    boardTabs: document.querySelectorAll('.w-board-tab'),
+    boardPanes: document.querySelectorAll('.w-board-pane'),
+    boardPanel: document.getElementById('w-board-panel'),
+    boardNotes: document.getElementById('w-board-notes'),
+    boardTodoInput: document.getElementById('w-board-todo-input'),
+    boardTodoList: document.getElementById('w-board-todo-list'),
+    boardPreviewPicker: document.getElementById('w-board-preview-picker'),
+    boardPreviewRefresh: document.getElementById('w-board-preview-refresh'),
+    boardPreviewBody: document.getElementById('w-board-preview-body'),
+    // §3 敏感词：工具栏按钮 + 右栏敏感词面板（与 .w-proof 同 pane 互斥）
+    sensitiveBtn: document.getElementById('w-sensitive'),
+    sensitivePanel: document.getElementById('w-sensitive-panel'),
+    sensitiveCount: document.getElementById('w-sensitive-count'),
+    sensitiveChips: document.getElementById('w-sensitive-chips'),
+    sensitiveStatus: document.getElementById('w-sensitive-status'),
+    sensitiveList: document.getElementById('w-sensitive-list'),
+    setSensitive: {
+      politics: document.getElementById('s-sensitive-politics'),
+      violence: document.getElementById('s-sensitive-violence'),
+      porn: document.getElementById('s-sensitive-porn'),
+      gamble: document.getElementById('s-sensitive-gamble'),
+      drugs: document.getElementById('s-sensitive-drugs'),
+      fraud: document.getElementById('s-sensitive-fraud'),
+      ads: document.getElementById('s-sensitive-ads'),
+      abuse: document.getElementById('s-sensitive-abuse'),
+      custom: document.getElementById('s-sensitive-custom'),
+      customWords: document.getElementById('s-sensitive-custom-words'),
+      ignoreWords: document.getElementById('s-sensitive-ignore-words'),
+    },
+    // §4 全站内容搜索：工具栏按钮 + 写作区浮层（.w-remote-view 同构）
+    searchOpenBtn: document.getElementById('w-search-open'),
+    searchView: document.getElementById('w-search-view'),
+    searchInput: document.getElementById('w-search-input'),
+    searchCase: document.getElementById('w-search-case'),
+    searchScope: document.querySelectorAll('input[name="w-search-where"]'),
+    searchClose: document.getElementById('w-search-close'),
+    searchProgress: document.getElementById('w-search-progress'),
+    searchResults: document.getElementById('w-search-results'),
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -2009,6 +2065,7 @@
 
   function refreshTree() {
     if (!state.root) { renderSidebar(); return Promise.resolve() }
+    searchLocalCache = Object.create(null) // §4 刷新/切工作区 ⇒ 本地正文缓存作废（mtime 重新校验）
     return api.listWorkspace().then(function (res) {
       if (res && res.ok) {
         state.works = res.works || []
@@ -2028,10 +2085,14 @@
     })
   }
 
-  function selectDoc(d) {
+  function selectDoc(d, afterOpen) {
     if (!d || !d.relPath) return
-    if (state.current && state.current.relPath === d.relPath) return
-    // 切文档前先 flush 当前稿
+    var openDone = function () {
+      if (typeof afterOpen === 'function') afterOpen()
+    }
+    if (state.current && state.current.relPath === d.relPath) { openDone(); return }
+    // 切文档前先 flush 当前稿（此刻 state.current 还是旧文档 ⇒ board 收尾也在这之前）
+    boardFlushCurrent()
     flush({ reason: 'switch-doc' }).then(function () {
       return api.readDoc(d.relPath)
     }).then(function (res) {
@@ -2057,8 +2118,11 @@
       renderSaveState()
       renderStatusBar()
       notice('已打开 ' + d.relPath)
+      // 记录板（§1.5-4）：本地即填 + 异步拉远端（不阻塞打开）
+      boardLoadFor(d.relPath)
       // ⑪ C11：**打开之后**才做后台比对（不阻塞；理由见 syncAfterOpen 的注释）
       syncAfterOpen(d.relPath, res.content)
+      openDone()
     })
   }
 
@@ -2500,6 +2564,17 @@
     if (els.setRemoteMode) els.setRemoteMode.value = r.mode === 'manual' ? 'manual' : 'auto'
     // ⑥ B5：校对专用会话 id（主进程已把"配置为空 ⇒ 内置默认"解析好 ⇒ 这里显示的是**生效值**）
     if (els.setProofSession) els.setProofSession.value = state.proofreadSessionId || ''
+    // §3 敏感词：9 个分类勾选 + 自定义词/忽略词（数组 ⇄ 每行一个）；值一律以主进程归一化结果为准
+    var sn = (s.sensitive && typeof s.sensitive === 'object') ? s.sensitive : {}
+    var snEn = sn.enabled || {}
+    SENSITIVE_CATEGORY_IDS.forEach(function (id) {
+      var input = els.setSensitive && els.setSensitive[id]
+      if (input) input.checked = snEn[id] === true
+    })
+    if (els.setSensitive) {
+      if (els.setSensitive.customWords) els.setSensitive.customWords.value = (sn.customWords || []).join('\n')
+      if (els.setSensitive.ignoreWords) els.setSensitive.ignoreWords.value = (sn.ignoreWords || []).join('\n')
+    }
     // ⑧ T-10：启动与托盘（默认值与 main.js 的 SETTINGS_DEFAULTS.general 一致：自启关、托盘开）
     //   tray = **托盘图标 + 关闭时收起**合为一个开关（只开其中一个没有意义，见 main.js 注释）
     var gen = (s.general && typeof s.general === 'object') ? s.general : {}
@@ -2953,6 +3028,27 @@
         })
       })
     }
+    // §3 敏感词：分类勾选逐项落盘（只带 enabled 这一字段，主进程与基线浅合并，不丢词表）
+    SENSITIVE_CATEGORY_IDS.forEach(function (id) {
+      var input = els.setSensitive && els.setSensitive[id]
+      if (!input) return
+      input.addEventListener('change', function () {
+        var patch = {}
+        patch[id] = input.checked
+        saveSettings({ sensitive: { enabled: patch } })
+      })
+    })
+    // §3 自定义词 / 忽略词：失焦保存（change），textarea 按换行拆词，主进程归一化（去重/截断/限长）并回填
+    if (els.setSensitive && els.setSensitive.customWords) {
+      els.setSensitive.customWords.addEventListener('change', function () {
+        saveSettings({ sensitive: { customWords: els.setSensitive.customWords.value } })
+      })
+    }
+    if (els.setSensitive && els.setSensitive.ignoreWords) {
+      els.setSensitive.ignoreWords.addEventListener('change', function () {
+        saveSettings({ sensitive: { ignoreWords: els.setSensitive.ignoreWords.value } })
+      })
+    }
   }
 
   /** 当前文档上下文（没打开文档 ⇒ null）—— 发送与校对两个桥共用同一份判据 */
@@ -3068,11 +3164,14 @@
       els.syncTitle.textContent = '《' + relPath + '》本地与远端都改过'
       els.syncNote.textContent = '**不会自动合并**，也不替你选。' +
         '「用远端覆盖本地」会先把本地那份移入回收站（可恢复）；' +
+        '「本地这份另存为…」会把你本地的内容用带时间戳的新名字另存一篇（本地和服务器各多一篇新文件，原来的两边都不动）；' +
         '「保留本地」则不动任何一侧，等你下次保存/发送时再决定。'
     }
     var canReupload = kind === 'remote-deleted' && !d.tomb
     syncBtn(els.syncReupload, canReupload)
     syncBtn(els.syncTakeRemote, kind !== 'remote-deleted')
+    // ⑤ 「另存为」只给两边都改过的真冲突：remote-newer 本地没动、覆盖即可，没有需要另存的内容
+    syncBtn(els.syncSaveAs, kind === 'conflict')
     syncBtn(els.syncKeepLocal, true)
     syncBtn(els.syncTrashLocal, kind === 'remote-deleted')
     // ⑪ D-sync-1（b）：远端**有内容可看**的两种横幅才给「看远端内容」（已删除/缺件没得看）
@@ -3235,6 +3334,8 @@
       renderSidebar()
       renderSaveState()
       renderStatusBar()
+      // 记录板（§1.5-4）：远端覆盖本地后同样重新装载该文档的笔记/待办
+      boardLoadFor(relPath)
     })
   }
 
@@ -3385,6 +3486,135 @@
     syncNotice('已把本地这份移入回收站')
   }
 
+  // ── ⑤ 并发写入 409「另存为」──────────────────────────────────────────────
+  //
+  // 场景：本地与远端**两边都改过**（409/conflict），用户哪份都不想丢。
+  // 做法：把**本地这份**内容用带时间戳的新名字另存一篇 —— 本地多一篇新文件、
+  // 服务器客户端区也多一篇新文件；**原来的两边一律不动**（不覆盖、不删除、不 force）。
+  // 命名与 send-net 的 409 另存为同一口径（WCSend.altDraftName = `<doc>-YYYYMMDD-HHmm.md`），
+  // 撞名（本地侧栏缓存 / 远端索引里已有）则追加 -2/-3 避让。
+  function pad2Num(n) { return (n < 10 ? '0' : '') + n }
+  function syncAltStamp(d) {
+    return String(d.getFullYear()) + pad2Num(d.getMonth() + 1) + pad2Num(d.getDate()) +
+      '-' + pad2Num(d.getHours()) + pad2Num(d.getMinutes())
+  }
+
+  /**
+   * 生成不撞名的另存文件名。`taken` 为已占用 relPath 集合。
+   * 首选 `<doc>-YYYYMMDD-HHmm.md`（WCSend 在场时直接复用，保证与发送链路同口径）；
+   * 撞名 ⇒ `<doc>-...-2.md`、`-3.md`…… 避让；文档名为空 ⇒ null。
+   */
+  function syncAltRelName(work, name, taken) {
+    var base = String(name || '').replace(/\.md$/i, '')
+    if (!base) return null
+    var first
+    try {
+      first = (window.WCSend && typeof window.WCSend.altDraftName === 'function')
+        ? window.WCSend.altDraftName(name, new Date())
+        : base + '-' + syncAltStamp(new Date()) + '.md'
+    } catch (e) {
+      first = base + '-' + syncAltStamp(new Date()) + '.md'
+    }
+    var candidate = first
+    for (var i = 2; i <= 99; i++) {
+      var rel = work ? work + '/' + candidate : candidate
+      if (!taken[rel]) return candidate
+      candidate = first.replace(/\.md$/i, '-' + i + '.md')
+    }
+    return null
+  }
+
+  /**
+   * ⑤ 冲突横幅「本地这份另存为…」：
+   *   ① 冲突稿是当前打开文档 ⇒ 先 flush 落盘（与 syncReupload 同一 D-sync-1 口径，不丢未保存输入）；
+   *   ② 先写本地新文件，再无 baseVersion 推服务器（全新文件，正常不会 409；若 409 ⇒ 不 force，交回用户）；
+   *   ③ 成功后记基线、作废清单、刷新侧栏并打开新文档；原文档两边一律不动。
+   * 🔴 fail-closed：本地写失败就中止；服务器没上去也**不删本地新文件**（打开新文档会走 local-only 自动补传）。
+   */
+  function syncSaveAs() {
+    var p = state.sync.pending
+    if (!p || !p.relPath || !syncReady()) return
+    var rel = p.relPath
+    if (p.kind !== 'conflict') return
+    var parts = rel.split('/')
+    var work = parts.length > 1 ? parts.slice(0, -1).join('/') : ''
+    var name = parts[parts.length - 1]
+
+    // 已占用名：本地侧栏缓存 + 远端索引（两边都避让，宁可贵一点也不覆盖任何一篇）
+    var taken = {}
+    ;(state.works || []).forEach(function (w) {
+      ;(w.docs || []).forEach(function (d) { if (d.relPath) taken[d.relPath] = 1 })
+    })
+    var ix = syncIndex()
+    if (ix.known) Object.keys(ix.byRel || {}).forEach(function (r) { taken[r] = 1 })
+
+    var altName = syncAltRelName(work, name, taken)
+    if (!altName) {
+      notice('另存为已中止：文档名为空或可用新名已用尽（原文档未动）', true)
+      return
+    }
+    var altRel = work ? work + '/' + altName : altName
+
+    var isCurrent = !!(state.current && state.current.relPath === rel)
+    syncNotice('另存为中…')
+    var step = isCurrent ? flush({ force: true, reason: 'sync-save-as' }) : Promise.resolve({ ok: true })
+    Promise.resolve(step).then(function (fl) {
+      if (isCurrent && fl && fl.ok === false) {
+        notice('另存为已中止：本地这份保存失败（' + (fl.error || '未知错误') + '）—— 原文档未动', true)
+        return null
+      }
+      var read = isCurrent
+        ? Promise.resolve({ ok: true, content: Editor.getText() })
+        : api.readDoc(rel)
+      return read.then(function (rd) {
+        if (!rd || !rd.ok) {
+          notice('另存为已中止：读不到本地这份（' + ((rd && rd.error) || '未知错误') + '）', true)
+          return null
+        }
+        // 落盘前再判一次"本地是否已存在"（侧栏是缓存，可能已被别的窗口建出来）
+        return api.readDoc(altRel).then(function (ex) {
+          if (ex && ex.ok) {
+            notice('另存为已中止：《' + altRel + '》本地已存在（原文档未动）—— 请重新点一次另存为', true)
+            return null
+          }
+          return api.writeDoc(altRel, rd.content).then(function (w) {
+            if (!w || !w.ok) {
+              notice('另存为已中止：写入本地失败（' + ((w && w.error) || '未知错误') + '）—— 原文档未动', true)
+              return null
+            }
+            // 全新文件 ⇒ 不带 baseVersion（服务端不存在同路径时直接创建）
+            return window.WCSyncNet.saveDraft(altRel, rd.content, null).then(function (r) {
+              if (r && r.ok) {
+                state.sync.lastPushAt = Date.now()
+                state.sync.list = null
+                state.sync.seq++ // 旧文档那条冲突结论作废（用户已选择另存出口）
+                syncHideBanner()
+                syncNotice('已另存为：' + altRel)
+                notice('本地这份已另存为《' + altName + '》并上传到服务器；原来的两边都没动')
+                return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, altRel, r.version, Date.now()))
+                  .then(function () { return refreshTree() })
+                  .then(function () { return selectDoc({ relPath: altRel }) })
+              }
+              if (r && r.conflict) {
+                // 全新名仍 409 ⇒ 远端在这期间被别人抢先建了同名件；**绝不 force**，本地新文件保留
+                notice('服务器上已存在《' + altName + '》，未覆盖。本地新文件保留 —— 打开它可再次另存/补传', true)
+                syncNotice('另存为：服务器同名冲突（本地新文件已保留）')
+                return refreshTree()
+              }
+              // 离线/超时/其它：本地新文件保留；打开它会走 local-only 自动补传，不丢
+              notice('已在本地另存为《' + altName + '》，但服务器没上去（' + ((r && r.error) || '未知错误') +
+                '）—— 打开新文档后会自动补传', true)
+              syncHideBanner()
+              return refreshTree().then(function () { return selectDoc({ relPath: altRel }) })
+            })
+          })
+        })
+      })
+    }).catch(function (e) {
+      notice('另存为失败：' + ((e && e.message) || String(e)) + '（原文档未动）', true)
+    })
+  }
+
   // ── 「仅云端」条目：把远端有、本地没有的作品/文档并进侧栏（**点它才拉**）────────
   //
   // 🔴 四条口径：
@@ -3466,7 +3696,7 @@
   }
 
   /** 点「仅云端」条目 ⇒ 拉到本地并打开。**已存在则不覆盖**（侧栏是缓存，可能已过期） */
-  function pullAndOpen(relPath) {
+  function pullAndOpen(relPath, afterOpen) {
     if (!relPath || !syncReady()) return
     notice('正在从服务器拉取《' + relPath + '》…')
     window.WCSyncNet.readDraft(relPath).then(function (r) {
@@ -3476,7 +3706,8 @@
       }
       return api.readDoc(relPath).then(function (ex) {
         if (ex && ex.ok) {
-          notice('本地已有同名文档，**未覆盖** —— 请在侧栏里直接打开它，或改名后再拉', true)
+          // 本地其实已有（侧栏缓存过期）：**已存在就不覆盖**，中止拉取
+          notice('本地已有《' + relPath + '》，未覆盖；如需云端版本请用同步操作', true)
           return null
         }
         return api.writeDoc(relPath, r.content).then(function (wr) {
@@ -3486,7 +3717,7 @@
           state.sync.list = null // 本地多了一篇 ⇒ 远端清单缓存作废，重拉
           return refreshTree()
         }).then(function () {
-          return selectDoc({ relPath: relPath })
+          return selectDoc({ relPath: relPath }, afterOpen)
         }).then(function () {
           notice('已从服务器拉取《' + relPath + '》')
         })
@@ -3519,6 +3750,7 @@
     if (els.syncTakeRemote) els.syncTakeRemote.addEventListener('click', syncTakeRemote)
     if (els.syncKeepLocal) els.syncKeepLocal.addEventListener('click', syncKeepLocal)
     if (els.syncTrashLocal) els.syncTrashLocal.addEventListener('click', syncTrashLocal)
+    if (els.syncSaveAs) els.syncSaveAs.addEventListener('click', syncSaveAs)
     if (els.syncRemoteView) els.syncRemoteView.addEventListener('click', syncRemoteView)
     if (els.remoteViewClose) els.remoteViewClose.addEventListener('click', remoteViewHide)
   }
@@ -3631,6 +3863,408 @@
       p.relPath = relPath
       return api.proofSave(p)
     },
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // 记录板（设计 docs/board-and-noveldb-design.md §1）
+  //   笔记 / 待办：按 relPath 绑定文档，本地 config.json + 远端 进度/board/*.json
+  //   预览：不绑文档，直接读客户端区正文。本段放在同步段之后（避开 sync-wiring 静态守卫区间）。
+  // ════════════════════════════════════════════════════════════════════════
+  var BOARD_NOTE_DEBOUNCE_MS = 1000 // 笔记本地落盘去抖（§1.5-5）
+  var BOARD_FLUSH_DEBOUNCE_MS = 1500 // 待办变更后远端推送去抖
+  var BOARD_LIST_TTL_MS = 20000 // 预览清单缓存 20s（§1.5-7）
+  var BOARD_LIST_MAX = 200 // 预览清单最多 200 条
+
+  function boardNet() { return window.WCSyncNet || null }
+
+  /** 切 tab：pane hidden + is-active；瞬时态落盘（§1.4） */
+  function boardSwitchTab(name) {
+    if (['notes', 'todos', 'proof', 'preview'].indexOf(name) < 0) return
+    state.board.activeTab = name
+    Array.prototype.forEach.call(els.boardTabs, function (b) {
+      b.classList.toggle('is-active', b.getAttribute('data-board-tab') === name)
+    })
+    Array.prototype.forEach.call(els.boardPanes, function (p) {
+      p.hidden = p.getAttribute('data-board-pane') !== name
+    })
+    if (api && api.saveConfig) api.saveConfig({ board: { activeTab: name } })
+    // 进预览 tab 才拉清单（TTL 内不重复请求）
+    if (name === 'preview') boardPreviewList(false)
+  }
+
+  /** 无当前文档 ⇒ 笔记/待办禁用（预览不绑文档，始终可用） */
+  function boardRenderDisabled() {
+    var noDoc = !state.current
+    if (els.boardNotes) {
+      els.boardNotes.disabled = noDoc
+      if (noDoc) els.boardNotes.placeholder = '先打开一篇文档'
+    }
+    if (els.boardTodoInput) els.boardTodoInput.disabled = noDoc
+  }
+
+  /** 全量重画（init / 切文档后）：tab + 笔记 + 待办 + 禁用态 */
+  function boardRenderAll() {
+    boardSwitchTab(state.board.activeTab || 'notes')
+    boardFillLocal(state.current ? state.current.relPath : null)
+  }
+
+  /** 本地数据即填（无远端往返；rel=null ⇒ 空白禁用态） */
+  function boardFillLocal(rel) {
+    var note = rel && state.board.notes[rel] ? state.board.notes[rel] : null
+    var todos = rel && Array.isArray(state.board.todos[rel]) ? state.board.todos[rel] : []
+    if (els.boardNotes && document.activeElement !== els.boardNotes) {
+      els.boardNotes.value = note ? note.text : ''
+    }
+    boardRenderTodos(todos)
+    boardRenderDisabled()
+  }
+
+  /** 待办列表渲染（条目少，整列重画最简单；复选框/删除按钮用 data 属性事件委托） */
+  function boardRenderTodos(todos) {
+    var ul = els.boardTodoList
+    if (!ul) return
+    ul.textContent = ''
+    if (!state.current) {
+      var empty = document.createElement('li')
+      empty.className = 'w-board-empty'
+      empty.textContent = '先打开一篇文档'
+      ul.appendChild(empty)
+      return
+    }
+    if (!todos.length) {
+      var li = document.createElement('li')
+      li.className = 'w-board-empty'
+      li.textContent = '还没有待办，在上方输入框回车添加。'
+      ul.appendChild(li)
+      return
+    }
+    todos.forEach(function (t) {
+      var li = document.createElement('li')
+      li.className = 'w-board-todo-item' + (t.done ? ' is-done' : '')
+      li.setAttribute('data-todo-id', t.id)
+
+      var cb = document.createElement('input')
+      cb.type = 'checkbox'
+      cb.checked = t.done === true
+      cb.setAttribute('data-todo-check', t.id)
+
+      var span = document.createElement('span')
+      span.className = 'w-board-todo-text'
+      span.textContent = t.text
+
+      var del = document.createElement('button')
+      del.type = 'button'
+      del.className = 'w-board-todo-del'
+      del.title = '删除'
+      del.textContent = '✕'
+      del.setAttribute('data-todo-del', t.id)
+
+      li.appendChild(cb)
+      li.appendChild(span)
+      li.appendChild(del)
+      ul.appendChild(li)
+    })
+  }
+
+  /** 笔记/待办本地落盘（只 patch 当前文档一条；main.js 按顶级键合并，不碰其它文档） */
+  function boardSaveLocal(rel) {
+    if (!rel || !api || !api.saveConfig) return Promise.resolve(null)
+    var notes = {}
+    if (state.board.notes[rel]) notes[rel] = state.board.notes[rel]
+    var todos = {}
+    todos[rel] = state.board.todos[rel] || []
+    return api.saveConfig({ board: { notes: notes, todos: todos } }).catch(function (e) {
+      console.warn('[board] saveConfig 失败：', e)
+      return null
+    })
+  }
+
+  /** 笔记 input：去抖 1s 落本地 + 标脏 + 去抖推远端 */
+  function boardOnNoteInput() {
+    if (!state.current) return
+    var rel = state.current.relPath
+    var now = Date.now()
+    state.board.notes[rel] = { text: els.boardNotes.value, updatedAt: now }
+    state.board.dirty[rel] = true
+    if (state.board.noteTimer) clearTimeout(state.board.noteTimer)
+    state.board.noteTimer = setTimeout(function () {
+      state.board.noteTimer = null
+      boardSaveLocal(rel)
+      boardScheduleFlush()
+    }, BOARD_NOTE_DEBOUNCE_MS)
+  }
+
+  /** 待办：回车新增（空串忽略；id 时戳 + 随机短串） */
+  function boardOnTodoAdd() {
+    if (!state.current) return
+    var rel = state.current.relPath
+    var text = (els.boardTodoInput.value || '').trim()
+    if (!text) return
+    var now = Date.now()
+    var list = Array.isArray(state.board.todos[rel]) ? state.board.todos[rel] : []
+    list.push({
+      id: 't_' + now + '_' + Math.random().toString(36).slice(2, 7),
+      text: text, done: false, createdAt: now, updatedAt: now,
+    })
+    state.board.todos[rel] = list
+    els.boardTodoInput.value = ''
+    boardRenderTodos(list)
+    boardPersistTodos(rel)
+  }
+
+  /** 复选框切换完成态 */
+  function boardOnTodoToggle(id, checked) {
+    if (!state.current) return
+    var rel = state.current.relPath
+    var list = state.board.todos[rel]
+    if (!list) return
+    var item = null
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) { item = list[i]; break }
+    if (!item) return
+    item.done = checked === true
+    item.updatedAt = Date.now()
+    boardRenderTodos(list)
+    boardPersistTodos(rel)
+  }
+
+  /** 删除一条 */
+  function boardOnTodoDelete(id) {
+    if (!state.current) return
+    var rel = state.current.relPath
+    var list = state.board.todos[rel]
+    if (!list) return
+    state.board.todos[rel] = list.filter(function (t) { return t.id !== id })
+    boardRenderTodos(state.board.todos[rel])
+    boardPersistTodos(rel)
+  }
+
+  /** 待办即时落盘（不去抖）+ 标脏 + 远端去抖推 */
+  function boardPersistTodos(rel) {
+    state.board.dirty[rel] = true
+    boardSaveLocal(rel)
+    boardScheduleFlush()
+  }
+
+  /** 远端推送去抖（1.5s；笔记/待办的连续改动只发最后一份） */
+  function boardScheduleFlush() {
+    if (state.board.flushTimer) clearTimeout(state.board.flushTimer)
+    state.board.flushTimer = setTimeout(function () {
+      state.board.flushTimer = null
+      if (state.current) boardFlushRemote(state.current.relPath)
+    }, BOARD_FLUSH_DEBOUNCE_MS)
+  }
+
+  /**
+   * 推一篇文档的记录板到远端（§1.3 payload）。409 ⇒ 状态栏轻提示、保留本地、本轮不自动合并。
+   * @param {boolean} [immediate] 内部参数；调用方一般不直接用
+   */
+  function boardFlushRemote(rel) {
+    var net = boardNet()
+    if (!rel || !net || typeof net.saveBoard !== 'function') return Promise.resolve(null)
+    var payload = {
+      version: 1,
+      relPath: rel,
+      notes: state.board.notes[rel] || null,
+      todos: Array.isArray(state.board.todos[rel]) ? state.board.todos[rel] : [],
+    }
+    return net.saveBoard(rel, payload).then(function (r) {
+      if (r && r.ok) {
+        state.board.dirty[rel] = false
+        return r
+      }
+      if (r && r.conflict) {
+        // 设计 §1.8：复用 baseVersion 闸；本轮不自动合并 ⇒ 只轻提示一次，本地原样保留
+        syncNotice('记录板远端有冲突（本轮不自动合并）')
+        return r
+      }
+      // 网络/其它失败：下次变更会再排队，不打断用户
+      return r
+    })
+  }
+
+  /** 切文档/关窗前给当前文档做一次收尾：清去抖、本地落盘、尽力推远端（不 await） */
+  function boardFlushCurrent() {
+    var rel = state.current ? state.current.relPath : null
+    if (!rel) return
+    if (state.board.noteTimer) {
+      clearTimeout(state.board.noteTimer)
+      state.board.noteTimer = null
+      // 输入框里可能还有未落盘的文字 ⇒ 先收进 state
+      if (els.boardNotes && state.board.notes[rel] && els.boardNotes.value !== state.board.notes[rel].text) {
+        state.board.notes[rel] = { text: els.boardNotes.value, updatedAt: Date.now() }
+        state.board.dirty[rel] = true
+      }
+    }
+    if (state.board.dirty[rel]) {
+      boardSaveLocal(rel)
+      boardFlushRemote(rel)
+    }
+  }
+
+  /**
+   * 打开文档后：本地即填 + 异步拉远端。seq 令牌防切文档后旧响应回填；
+   * 远端 updatedAt 更新 ⇒ 覆盖本地并回存 config（本地有未推脏数据时不覆盖）。
+   */
+  function boardLoadFor(rel) {
+    var net = boardNet()
+    boardFillLocal(rel)
+    if (!rel || !net || typeof net.readBoard !== 'function') return
+    var seq = ++state.board.seq
+    net.readBoard(rel).then(function (r) {
+      if (seq !== state.board.seq || !state.current || state.current.relPath !== rel) return // 已切走
+      if (!r || !r.ok) {
+        if (!state.board.warnOnce) {
+          state.board.warnOnce = true
+          console.warn('[board] 远端记录板读取失败：', r && r.error)
+        }
+        return
+      }
+      if (r.notFound || !r.json) return // 远端还没记过 ⇒ 保留本地
+      var j = r.json
+      var remoteNote = j.notes && typeof j.notes.text === 'string' ? j.notes : null
+      var remoteTodos = Array.isArray(j.todos) ? j.todos : null
+      var localNote = state.board.notes[rel]
+      var localTodos = state.board.todos[rel]
+
+      var noteChanged = false
+      if (remoteNote && (!localNote || remoteNote.updatedAt > localNote.updatedAt) && !state.board.dirty[rel]) {
+        state.board.notes[rel] = { text: remoteNote.text, updatedAt: Number(remoteNote.updatedAt) || Date.now() }
+        noteChanged = true
+      }
+      var todoChanged = false
+      if (remoteTodos && remoteTodos.length) {
+        var remoteMax = remoteTodos.reduce(function (m, t) { return Math.max(m, Number(t.updatedAt) || 0) }, 0)
+        var localMax = Array.isArray(localTodos)
+          ? localTodos.reduce(function (m, t) { return Math.max(m, Number(t.updatedAt) || 0) }, 0)
+          : 0
+        if ((!localTodos || !localTodos.length || remoteMax > localMax) && !state.board.dirty[rel]) {
+          state.board.todos[rel] = remoteTodos.filter(function (t) {
+            return t && typeof t.id === 'string' && typeof t.text === 'string'
+          }).map(function (t) {
+            return { id: t.id, text: t.text, done: t.done === true, createdAt: Number(t.createdAt) || Date.now(), updatedAt: Number(t.updatedAt) || Date.now() }
+          })
+          todoChanged = true
+        }
+      }
+      if (noteChanged || todoChanged) {
+        boardSaveLocal(rel)
+        boardFillLocal(rel)
+      }
+    }).catch(function (e) {
+      console.warn('[board] 远端记录板读取异常：', e)
+    })
+  }
+
+  /** 预览：列远端正文清单（20s TTL，mtime 倒序最多 200），筛得回本地 rel 的项 */
+  function boardPreviewList(force) {
+    var net = boardNet()
+    var picker = els.boardPreviewPicker
+    var body = els.boardPreviewBody
+    if (!picker || !body) return
+    if (!net || !window.WCSync) {
+      body.textContent = '云端不可达，无法列出 AI 文档'
+      return
+    }
+    var cache = state.board.previewCache
+    var now = Date.now()
+    if (!force && state.board.listLoading) return
+    if (!force && cache.lastListAt && now - cache.lastListAt < BOARD_LIST_TTL_MS && picker.options.length) return
+
+    state.board.listLoading = true
+    body.textContent = '列表加载中…'
+    net.listDrafts().then(function (r) {
+      state.board.listLoading = false
+      if (!r || !r.ok) {
+        body.textContent = '云端不可达，无法列出 AI 文档'
+        return
+      }
+      var entries = (r.data && (r.data.entries || r.data.items)) || []
+      var rows = []
+      entries.forEach(function (e) {
+        if (!e || typeof e.relPath !== 'string') return
+        var localRel = window.WCSync.toLocalRel(e.relPath) // 只有 正文/ 下的能换算回来
+        if (!localRel) return
+        rows.push({ relPath: e.relPath, localRel: localRel, mtime: e.mtime || 0 })
+      })
+      rows.sort(function (a, b) {
+        // mtime 可能是 ISO 字符串也可能是数字时间戳，两种都兜住
+        var ma = Date.parse(a.mtime) || Number(a.mtime) || 0
+        var mb = Date.parse(b.mtime) || Number(b.mtime) || 0
+        return mb - ma
+      })
+      rows = rows.slice(0, BOARD_LIST_MAX)
+
+      picker.textContent = ''
+      var ph = document.createElement('option')
+      ph.value = ''
+      ph.textContent = rows.length ? '选择一篇 AI 文档…' : '（暂无可预览的文档）'
+      picker.appendChild(ph)
+      rows.forEach(function (row) {
+        var opt = document.createElement('option')
+        opt.value = row.relPath
+        opt.textContent = row.localRel
+        picker.appendChild(opt)
+      })
+      state.board.previewCache = { lastRelPath: cache.lastRelPath || '', lastListAt: Date.now() }
+      if (cache.lastRelPath) {
+        // 回填上次选中（若仍在清单里）并加载
+        Array.prototype.forEach.call(picker.options, function (o) { if (o.value === cache.lastRelPath) picker.value = cache.lastRelPath })
+        if (picker.value === cache.lastRelPath) boardPreviewRead(cache.lastRelPath)
+        else body.textContent = rows.length ? '请选择一篇文档预览。' : ''
+      } else {
+        body.textContent = rows.length ? '请选择一篇文档预览。' : ''
+      }
+    }).catch(function (e) {
+      state.board.listLoading = false
+      body.textContent = '云端不可达，无法列出 AI 文档'
+      console.warn('[board] 预览清单异常：', e)
+    })
+  }
+
+  /** 预览：读一篇远端正文（入参是远端 relPath，直接给 readDraft） */
+  function boardPreviewRead(remoteRel) {
+    var net = boardNet()
+    var body = els.boardPreviewBody
+    if (!body) return
+    if (!remoteRel) { body.textContent = ''; return }
+    state.board.previewCache.lastRelPath = remoteRel
+    if (!net) { body.textContent = '云端不可达'; return }
+    body.textContent = '读取中…'
+    net.readDraft(window.WCSync.toLocalRel(remoteRel)).then(function (r) {
+      if (!r || r.ok === false) {
+        body.textContent = '读取失败：' + ((r && r.error) || '未知错误')
+        return
+      }
+      body.textContent = r.content || '' // 纯文本，pre-wrap；不做 md 渲染（§1.5-7）
+    }).catch(function (e) {
+      body.textContent = '读取失败：' + String((e && e.message) || e)
+    })
+  }
+
+  /** 记录板全部 DOM 事件（事件委托集中在 panel 容器） */
+  function wireBoard() {
+    if (!els.boardPanel) return
+    els.boardPanel.addEventListener('click', function (e) {
+      var tab = e.target.closest ? e.target.closest('.w-board-tab') : null
+      if (tab) { boardSwitchTab(tab.getAttribute('data-board-tab')); return }
+      var delId = e.target.getAttribute && e.target.getAttribute('data-todo-del')
+      if (delId) { boardOnTodoDelete(delId); return }
+    })
+    els.boardPanel.addEventListener('change', function (e) {
+      var checkId = e.target.getAttribute && e.target.getAttribute('data-todo-check')
+      if (checkId) { boardOnTodoToggle(checkId, e.target.checked); return }
+      if (e.target === els.boardPreviewPicker) boardPreviewRead(e.target.value)
+    })
+    if (els.boardNotes) els.boardNotes.addEventListener('input', boardOnNoteInput)
+    if (els.boardTodoInput) {
+      els.boardTodoInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.keyCode === 13) {
+          e.preventDefault()
+          boardOnTodoAdd()
+        }
+      })
+    }
+    if (els.boardPreviewRefresh) els.boardPreviewRefresh.addEventListener('click', function () { boardPreviewList(true) })
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -3783,12 +4417,19 @@
         flush({ force: true, reason: 'manual' })
         return
       }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && String(e.key).toLowerCase() === 'f') {
+        e.preventDefault()
+        searchOpen() // §4 搜全书（本机工作区 + 云端 正文/）
+        return
+      }
       if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'f') {
         e.preventDefault()
         findOpen() // ③ 查找/替换（写作页主导键；浏览器默认查找对长文写作不够用）
         return
       }
       if (e.key === 'Escape') {
+        // §4 搜全书浮层优先收（它盖在写作区上；同时 abort 在途云端请求）
+        if (searchIsOpen()) { searchClose(); return }
         // ③ 查找条优先收（它浮在写作区上，最近的"弹层"）
         if (findIsOpen()) { findClose(); return }
         // ⑤ 设置弹层在最上层 ⇒ 先关它
@@ -3800,8 +4441,8 @@
 
     // 失焦 / 关窗 / 切页 前强制 flush
     window.addEventListener('blur', function () { flush({ reason: 'blur' }) })
-    window.addEventListener('pagehide', function () { flushSync('pagehide') })
-    window.addEventListener('beforeunload', function () { flushSync('beforeunload') })
+    window.addEventListener('pagehide', function () { boardFlushCurrent(); flushSync('pagehide') })
+    window.addEventListener('beforeunload', function () { boardFlushCurrent(); flushSync('beforeunload') })
 
     // 切到 [DSH] 页前 flush（切换本身由 shell.html 的 tab 逻辑负责，这里只补一个"离开前保存"）
     Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
@@ -4011,6 +4652,536 @@
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // §3 敏感词扫描（设计 docs/board-and-noveldb-design.md §3）
+  //   纯本地零网络：词库 window.WCSensitiveWords + AC 逻辑 window.WCSensitive（均渲染层资产）。
+  //   结果与「✎ 校对」共用右栏「校对」tab，但 DOM 互斥（.w-proof / #w-sensitive-panel）：
+  //   proofread-net.js 只认自己那几个 id，本模块只认 w-sensitive-*，两边都不用改对方。
+  // ════════════════════════════════════════════════════════════════════════
+  var SENSITIVE_CATEGORY_IDS = ['politics', 'violence', 'porn', 'gamble', 'drugs', 'fraud', 'ads', 'abuse', 'custom']
+  // severity → 中文标签（色标 class 直接复用校对的 .w-proof-sev.is-*，CSS 零新增）
+  var SENSITIVE_SEV_LABEL = { must: '必改', should: '建议', nice: '可选' }
+
+  var sensitiveState = {
+    hits: [],          // scanText 原始结果（已长词优先/忽略词剔除），按 start 升序
+    activeCats: null,  // null = 全部分类；否则 Set（chips 当场筛选，不落盘）
+    text: '',          // 本次扫描的正文快照（忽略词后增量重扫用同一份 ⇒ 与列表一致）
+  }
+
+  function sensitiveCore() { return window.WCSensitive || null }
+  function sensitiveWordsData() { return window.WCSensitiveWords || null }
+
+  /** 右栏「校对」tab 内的视图切换：proof（AI 校对）/ sensitive（敏感词）；切走只 hidden 不销毁 */
+  function sensitiveShowView(name) {
+    var pane = document.querySelector('.w-board-pane[data-board-pane="proof"]')
+    var proofBox = pane ? pane.querySelector('.w-proof') : document.querySelector('.w-proof')
+    if (proofBox) proofBox.hidden = (name === 'sensitive')
+    if (els.sensitivePanel) els.sensitivePanel.hidden = (name !== 'sensitive')
+  }
+
+  /** 当前生效的敏感词配置（state.settings 已在 getState / save-config 回填时更新） */
+  function sensitiveConfig() {
+    var s = (state.settings && state.settings.sensitive) || {}
+    return {
+      enabled: s.enabled || {},
+      customWords: Array.isArray(s.customWords) ? s.customWords : [],
+      ignoreWords: Array.isArray(s.ignoreWords) ? s.ignoreWords : [],
+    }
+  }
+
+  /** 分类标签：优先词库数据包（label 与 UI 文案单一来源），兜底 id */
+  function sensitiveCategoryLabel(id) {
+    var data = sensitiveWordsData()
+    var cats = data && data.categories
+    if (Array.isArray(cats)) {
+      for (var i = 0; i < cats.length; i++) if (cats[i].id === id) return cats[i].label
+    }
+    return id === 'custom' ? '自定义词' : id
+  }
+
+  /** 跑一次本地扫描并渲染（#w-sensitive 点击 / 点「忽略此词」写回配置后调用） */
+  function sensitiveRun() {
+    var core = sensitiveCore()
+    if (!core) {
+      sensitiveShowView('sensitive')
+      boardSwitchTab('proof')
+      if (els.sensitiveStatus) els.sensitiveStatus.textContent = '敏感词扫描不可用：sensitive.js 没加载（壳层白名单少了它？）'
+      if (els.sensitiveList) els.sensitiveList.textContent = ''
+      if (els.sensitiveCount) els.sensitiveCount.textContent = ''
+      if (els.sensitiveChips) els.sensitiveChips.textContent = ''
+      return
+    }
+    var cfg = sensitiveConfig()
+    var text = Editor.getText() || ''
+    var hits = core.scanText(text, {
+      categories: sensitiveWordsData() ? sensitiveWordsData().categories : [],
+      enabled: cfg.enabled,
+      customWords: cfg.customWords,
+      ignoreWords: cfg.ignoreWords,
+    })
+    sensitiveState.hits = hits
+    sensitiveState.text = text
+    sensitiveState.activeCats = null // 每次重跑 ⇒ chips 回到「全部」
+    sensitiveShowView('sensitive')
+    boardSwitchTab('proof')
+    sensitiveRenderChips()
+    sensitiveRenderList()
+  }
+
+  /** 头部计数 + 分类 chips（chip 只筛本次结果；计数按**未筛选**口径，与标题一致） */
+  function sensitiveRenderChips() {
+    if (!els.sensitiveChips || !els.sensitiveCount) return
+    var total = sensitiveState.hits.length
+    els.sensitiveCount.textContent = total ? ('敏感词 ' + total + ' 处') : ''
+    els.sensitiveChips.textContent = ''
+    if (!total) {
+      if (els.sensitiveStatus) {
+        els.sensitiveStatus.textContent = '✓ 未发现敏感词（基于当前词库与开关）'
+      }
+      return
+    }
+    if (els.sensitiveStatus) els.sensitiveStatus.textContent = ''
+    var counts = {}
+    sensitiveState.hits.forEach(function (h) { counts[h.category] = (counts[h.category] || 0) + 1 })
+    var ids = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a] })
+    // 「全部」chip
+    els.sensitiveChips.appendChild(sensitiveBuildChip('__all__', '全部 ' + total, sensitiveState.activeCats === null))
+    ids.forEach(function (id) {
+      els.sensitiveChips.appendChild(
+        sensitiveBuildChip(id, sensitiveCategoryLabel(id) + ' ' + counts[id],
+          !!(sensitiveState.activeCats && sensitiveState.activeCats[id])),
+      )
+    })
+  }
+
+  function sensitiveBuildChip(id, label, active) {
+    var b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'w-sensitive-chip' + (active ? ' is-active' : '')
+    b.textContent = label
+    b.setAttribute('data-cat', id)
+    b.addEventListener('click', function () {
+      if (id === '__all__') sensitiveState.activeCats = null
+      else {
+        sensitiveState.activeCats = {}
+        sensitiveState.activeCats[id] = true
+      }
+      sensitiveRenderChips()
+      sensitiveRenderList()
+    })
+    return b
+  }
+
+  /** 结果列表：分类色标 + 命中词 + 句片段 + 〔定位〕〔忽略此词〕（无「应用修改」） */
+  function sensitiveRenderList() {
+    if (!els.sensitiveList) return
+    els.sensitiveList.textContent = ''
+    var core = sensitiveCore()
+    var text = sensitiveState.text
+    var hits = sensitiveState.hits.filter(function (h) {
+      return !sensitiveState.activeCats || sensitiveState.activeCats[h.category]
+    })
+    hits.forEach(function (h) {
+      var row = document.createElement('div')
+      row.className = 'w-proof-item'
+
+      var head = document.createElement('div')
+      head.className = 'w-proof-item-head'
+      var sev = document.createElement('span')
+      sev.className = 'w-proof-sev is-' + h.severity
+      sev.textContent = sensitiveCategoryLabel(h.category) + '（' + (SENSITIVE_SEV_LABEL[h.severity] || h.severity) + '）'
+      head.appendChild(sev)
+      var word = document.createElement('span')
+      word.className = 'w-sensitive-word'
+      word.textContent = h.word
+      head.appendChild(word)
+      row.appendChild(head)
+
+      var frag = document.createElement('div')
+      frag.className = 'w-proof-reason'
+      // snippetAround 已按是否截到文首/文末自带省略号，不重复包
+      frag.textContent = core.snippetAround(text, h.start, h.end)
+      row.appendChild(frag)
+
+      var acts = document.createElement('div')
+      acts.className = 'w-proof-acts'
+      var go = document.createElement('button')
+      go.className = 'w-mini'
+      go.type = 'button'
+      go.textContent = '定位'
+      go.title = '选中正文里这个词并滚到视野内（不改正文）'
+      go.addEventListener('click', function (e) {
+        e.stopPropagation()
+        Editor.focus()
+        Editor.selectOffsets(h.start, h.end)
+        Editor.scrollSelectionIntoView()
+      })
+      var skip = document.createElement('button')
+      skip.className = 'w-mini'
+      skip.type = 'button'
+      skip.textContent = '忽略此词'
+      skip.title = '加入忽略词表（落盘），以后扫描不再报这个词'
+      skip.addEventListener('click', function (e) {
+        e.stopPropagation()
+        sensitiveIgnoreWord(h.word)
+      })
+      acts.appendChild(go)
+      acts.appendChild(skip)
+      row.appendChild(acts)
+
+      els.sensitiveList.appendChild(row)
+    })
+  }
+
+  /** 点「忽略此词」：写回 config.sensitive.ignoreWords（主进程去重归一）⇒ 成功后用同一份正文增量重扫 */
+  function sensitiveIgnoreWord(word) {
+    var cfg = sensitiveConfig()
+    if (cfg.ignoreWords.indexOf(word) >= 0) { sensitiveRun(); return }
+    saveSettings({ sensitive: { ignoreWords: cfg.ignoreWords.concat([word]) } }).then(function (res) {
+      if (res && res.ok) sensitiveRun()
+    })
+  }
+
+  function wireSensitive() {
+    if (els.sensitiveBtn) {
+      els.sensitiveBtn.addEventListener('click', function () { sensitiveRun() })
+    }
+    // 用户点「✎ 校对」⇒ proofread-net 跑校对；这里把右栏视图切回 .w-proof（若停在敏感词视图）。
+    // capture 阶段先切视图，proofread-net 的监听照常运行，两边互不知道对方。
+    var proofBtn = document.getElementById('w-proof')
+    if (proofBtn) {
+      proofBtn.addEventListener('click', function () { sensitiveShowView('proof') }, true)
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // §4 全站内容搜索（设计 docs/board-and-noveldb-design.md §4）
+  //   本机：listWorkspace → readDoc 遍历（mtime 内存缓存）；
+  //   云端：WCSyncNet.listDrafts → 并发 6 readDraft（version 内存缓存，signal 可取消）；
+  //   匹配全在渲染层跑 window.WCSearch 纯函数；同 relPath 本地优先；全局 500 命中硬上限。
+  // ════════════════════════════════════════════════════════════════════════
+  var SEARCH_DEBOUNCE_MS = 300
+  var SEARCH_REMOTE_CONCURRENCY = 6
+  var SEARCH_MIN_QUERY = 2 // ≤1 字符不发起搜索（§4.7）
+
+  // 内存缓存：var 声明（refreshTree 里会清空 local 缓存，需在同一函数作用域可见）
+  var searchLocalCache = Object.create(null)  // {relPath:{mtime, content}}
+  var searchRemoteCache = Object.create(null) // {relPath:{version, content}}
+
+  var searchState = {
+    seq: 0,            // 每轮搜索自增；旧轮结果一律丢弃
+    abort: null,       // 当前轮的 AbortController（云端 fetch 用）
+    debounce: 0,       // setTimeout 句柄
+    items: [],         // mergeResults 后的结果（点击定位取 hits[0]）
+    scope: 'all',
+  }
+
+  function searchCore() { return window.WCSearch || null }
+
+  function searchIsOpen() { return !!(els.searchView && !els.searchView.hidden) }
+
+  function searchScopeVal() {
+    var v = 'all'
+    Array.prototype.forEach.call(els.searchScope, function (r) { if (r.checked) v = r.value })
+    return v
+  }
+
+  function searchOptions() {
+    return { caseSensitive: !!(els.searchCase && els.searchCase.checked) }
+  }
+
+  function searchOpen() {
+    if (!els.searchView) return
+    els.searchView.hidden = false
+    if (els.searchInput) {
+      els.searchInput.focus()
+      els.searchInput.select()
+    }
+  }
+
+  function searchClose() {
+    if (!els.searchView) return
+    clearTimeout(searchState.debounce)
+    searchState.seq += 1 // 在途轮作废（本地遍历靠 seq 丢弃；云端 fetch 走 abort）
+    if (searchState.abort) { try { searchState.abort.abort() } catch (e) { /* noop */ } }
+    searchState.abort = null
+    els.searchView.hidden = true
+  }
+
+  function searchSetProgress(text, visible) {
+    if (!els.searchProgress) return
+    els.searchProgress.hidden = !visible
+    if (text != null) els.searchProgress.textContent = text
+  }
+
+  /** 收集本机工作区全部文档（{relPath, mtime}，平铺作品） */
+  function searchListLocalDocs() {
+    var docs = []
+    ;(state.works || []).forEach(function (w) {
+      ;(w.docs || []).forEach(function (d) {
+        if (d && d.relPath) docs.push({ relPath: d.relPath, mtime: d.mtime })
+      })
+    })
+    return docs
+  }
+
+  /** 读一篇本地正文（mtime 内存缓存，mtime 未变不重读） */
+  function searchReadLocalCached(relPath, mtime) {
+    var c = searchLocalCache[relPath]
+    if (c && String(c.mtime) === String(mtime)) return Promise.resolve(c.content)
+    return api.readDoc(relPath).then(function (r) {
+      if (r && r.ok) {
+        searchLocalCache[relPath] = { mtime: r.mtime != null ? r.mtime : mtime, content: r.content }
+        return r.content
+      }
+      return null
+    }, function () { return null })
+  }
+
+  /**
+   * 扫本机工作区。
+   * @returns {Promise<{results:Array, unknown:boolean}>}
+   */
+  function searchRunLocal(query, opts, seq, budgetRef) {
+    var core = searchCore()
+    var docs = searchListLocalDocs()
+    var results = []
+    var chain = Promise.resolve()
+    docs.forEach(function (d) {
+      chain = chain.then(function () {
+        if (seq !== searchState.seq) return // 已被新查询/关闭取代
+        return searchReadLocalCached(d.relPath, d.mtime).then(function (content) {
+          if (content == null || seq !== searchState.seq) return
+          if (budgetRef.left <= 0) return
+          var r = core.matchDoc(d.relPath, content, query, {
+            caseSensitive: opts.caseSensitive,
+            budget: budgetRef.left,
+          })
+          if (r && !r.error && r.count) {
+            results.push(r)
+            budgetRef.left -= r.count
+          }
+        })
+      })
+    })
+    return chain.then(function () { return { results: results, unknown: false } })
+  }
+
+  /** 并发上限 concurrency 的任务队列；onProgress(done,total) 每完成一个任务回调一次 */
+  function searchRunQueue(tasks, concurrency, onProgress) {
+    var next = 0
+    var done = 0
+    var total = tasks.length
+    var workers = []
+    function run() {
+      if (next >= tasks.length) return Promise.resolve()
+      var idx = next++
+      return tasks[idx]().then(function () {
+        done += 1
+        if (onProgress) onProgress(done, total)
+        return run()
+      })
+    }
+    for (var i = 0; i < Math.max(1, concurrency); i++) workers.push(run())
+    return Promise.all(workers)
+  }
+
+  /** 读一篇云端正文（version 内存缓存；404/失败返回 null，不中断整搜） */
+  function searchReadRemoteCached(relPath, version, signal) {
+    var c = searchRemoteCache[relPath]
+    if (c && c.version === version && version !== '') return Promise.resolve(c.content)
+    return window.WCSyncNet.readDraft(relPath, { signal: signal }).then(function (r) {
+      if (r && r.ok) {
+        searchRemoteCache[relPath] = { version: r.version || '', content: r.content }
+        return r.content
+      }
+      return null
+    }, function () { return null })
+  }
+
+  /**
+   * 扫云端 正文/。
+   * @returns {Promise<{results:Array, unknown:boolean, failed:number, total:number}>}
+   *   unknown=true 表示清单不可达（调用方降级为仅本机 + 提示）。
+   */
+  function searchRunRemote(query, opts, seq, budgetRef, abort) {
+    var core = searchCore()
+    var failed = 0
+    return window.WCSyncNet.listDrafts({ signal: abort.signal }).then(function (lr) {
+      if (seq !== searchState.seq) return { results: [], unknown: true, failed: 0, total: 0 }
+      if (!lr || !lr.ok) return { results: [], unknown: true, failed: 0, total: 0 }
+      var idx = SYNC.indexList(lr.data)
+      if (!idx.known) return { results: [], unknown: true, failed: 0, total: 0 }
+      var rels = Object.keys(idx.byRel)
+      var results = []
+      var signal = abort.signal
+
+      function onProgress(done, total) {
+        if (seq !== searchState.seq) return
+        searchSetProgress('正在索引云端 ' + done + '/' + total +
+          (failed ? '（' + failed + ' 篇读取失败）' : '') + ' …', true)
+      }
+
+      var tasks = rels.map(function (rel) {
+        return function () {
+          if (seq !== searchState.seq || signal.aborted || budgetRef.left <= 0) return
+          var meta = idx.byRel[rel]
+          return searchReadRemoteCached(rel, meta.version, signal).then(function (content) {
+            if (content == null) { failed += 1; return }
+            if (seq !== searchState.seq || budgetRef.left <= 0) return
+            var r = core.matchDoc(rel, content, query, {
+              caseSensitive: opts.caseSensitive,
+              budget: budgetRef.left,
+            })
+            if (r && !r.error && r.count) {
+              results.push(r)
+              budgetRef.left -= r.count
+            }
+          }, function () { failed += 1 })
+        }
+      })
+
+      return searchRunQueue(tasks, SEARCH_REMOTE_CONCURRENCY, onProgress).then(function () {
+        return { results: results, unknown: false, failed: failed, total: rels.length }
+      })
+    }, function () { return { results: [], unknown: true, failed: 0, total: 0 } })
+  }
+
+  /** 一轮搜索的总入口（debounce 后调用） */
+  function searchExecute() {
+    var core = searchCore()
+    if (!core) {
+      searchSetProgress('搜索不可用：search-core.js 没加载（壳层白名单少了它？）', true)
+      if (els.searchResults) els.searchResults.textContent = ''
+      return
+    }
+    var query = (els.searchInput && els.searchInput.value || '').trim()
+    if (query.length < SEARCH_MIN_QUERY) {
+      searchSetProgress('', false)
+      if (els.searchResults) els.searchResults.textContent = ''
+      searchState.items = []
+      return
+    }
+    var opts = searchOptions()
+    // 非法正则（一期 UI 不暴露 regex，但 matchDoc 仍可能给 error）⇒ 友好提示
+    var probe = core.buildRegex(query, opts)
+    if (probe.error) { searchSetProgress(probe.error, true); return }
+
+    var seq = ++searchState.seq
+    if (searchState.abort) { try { searchState.abort.abort() } catch (e) { /* noop */ } }
+    var abort = new AbortController()
+    searchState.abort = abort
+    var scope = searchScopeVal()
+    searchState.scope = scope
+
+    var budgetRef = { left: core.GLOBAL_HIT_CAP }
+    var localP = (scope === 'remote') ? Promise.resolve({ results: [], unknown: false })
+      : searchRunLocal(query, opts, seq, budgetRef)
+    var remoteP = (scope === 'local')
+      ? Promise.resolve({ results: [], unknown: false, failed: 0, total: 0 })
+      : searchRunRemote(query, opts, seq, budgetRef, abort)
+
+    searchSetProgress(scope === 'remote' ? '正在索引云端…' : '正在搜索本机…', true)
+
+    Promise.all([localP, remoteP]).then(function (rs) {
+      if (seq !== searchState.seq) return // 旧轮结果丢弃
+      var loc = rs[0]
+      var rem = rs[1] || { results: [], unknown: false, failed: 0, total: 0 }
+      var merged = core.mergeResults(loc.results, rem.results)
+      searchState.items = merged.items
+      searchRender(merged, rem, scope)
+    })
+  }
+
+  function searchSchedule() {
+    clearTimeout(searchState.debounce)
+    searchState.debounce = setTimeout(searchExecute, SEARCH_DEBOUNCE_MS)
+  }
+
+  /** 渲染进度行 + 结果列表 */
+  function searchRender(merged, remote, scope) {
+    var notes = []
+    if (scope !== 'local' && remote.unknown) notes.push('云端列表不可达，已只搜本机')
+    if (remote.failed > 0) notes.push(remote.failed + ' 篇云端读取失败')
+    if (merged.capped) notes.push('结果过多，仅显示前 ' + searchCore().GLOBAL_HIT_CAP + ' 处，请细化关键词')
+
+    var docCount = merged.items.length
+    var head = docCount
+      ? ('命中 ' + merged.totalHits + ' 处 / ' + docCount + ' 篇' +
+         (scope === 'all' ? '（本机 ' + merged.items.filter(function (x) { return x.source === 'local' }).length +
+           ' 篇，云端 ' + merged.items.filter(function (x) { return x.source === 'remote' }).length + ' 篇）' : ''))
+      : '没有命中'
+    searchSetProgress(head + (notes.length ? '　—　' + notes.join('；') : ''), true)
+
+    if (!els.searchResults) return
+    els.searchResults.textContent = ''
+    merged.items.forEach(function (it) {
+      els.searchResults.appendChild(searchBuildDoc(it))
+    })
+  }
+
+  function searchEl(tag, cls, text) {
+    var n = document.createElement(tag)
+    if (cls) n.className = cls
+    if (text != null) n.textContent = text
+    return n
+  }
+
+  /** 一篇文档的结果卡：标题行（relPath + 命中数 + 来源）+ 前 3 片段（mark 高亮） */
+  function searchBuildDoc(it) {
+    var card = searchEl('div', 'w-search-doc')
+
+    var head = searchEl('div', 'w-search-doc-head')
+    var title = searchEl('span', 'w-search-doc-path', it.relPath)
+    head.appendChild(title)
+    head.appendChild(searchEl('span', 'w-search-doc-count', String(it.count)))
+    head.appendChild(searchEl('span', 'w-search-doc-src is-' + it.source,
+      it.source === 'local' ? '本机' : '云端'))
+    card.appendChild(head)
+
+    it.fragments.forEach(function (f) {
+      var frag = searchEl('div', 'w-search-frag')
+      frag.appendChild(searchEl('span', 'w-search-frag-ctx', f.before))
+      frag.appendChild(searchEl('mark', 'w-search-mark', f.hit))
+      frag.appendChild(searchEl('span', 'w-search-frag-ctx', f.after))
+      card.appendChild(frag)
+    })
+
+    // 点卡片：本机有 → selectDoc 后定位首处；仅云端 → pullAndOpen（拉到本地再打开）后定位。
+    // scope=remote 时同路径本地件不会参与 merge ⇒ 来源标可能是 remote 但树里已有，按树再判一次
+    // （pullAndOpen 对"本地已存在"是 fail-closed 中止，不会替我们打开）。
+    card.addEventListener('click', function () {
+      var h = it.hits && it.hits[0]
+      var locate = h ? function () {
+        searchClose()
+        Editor.focus()
+        Editor.selectOffsets(h.start, h.end)
+        Editor.scrollSelectionIntoView()
+      } : function () { searchClose() }
+      var existsLocal = searchListLocalDocs().some(function (d) { return d.relPath === it.relPath })
+      if (it.source === 'local' || existsLocal) selectDoc({ relPath: it.relPath }, locate)
+      else pullAndOpen(it.relPath, locate)
+    })
+
+    return card
+  }
+
+  function wireSearch() {
+    if (els.searchOpenBtn) els.searchOpenBtn.addEventListener('click', searchOpen)
+    if (els.searchClose) els.searchClose.addEventListener('click', searchClose)
+    if (els.searchInput) {
+      els.searchInput.addEventListener('input', searchSchedule)
+      // 回车立即搜（不等 debounce）
+      els.searchInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); clearTimeout(searchState.debounce); searchExecute() }
+      })
+    }
+    if (els.searchCase) els.searchCase.addEventListener('change', searchSchedule)
+    Array.prototype.forEach.call(els.searchScope, function (r) {
+      r.addEventListener('change', searchSchedule)
+    })
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // 初始化
   // ════════════════════════════════════════════════════════════════════════
   function init() {
@@ -4024,6 +5195,9 @@
     // ⑪ C11：同步的按钮接线与基线装载（**与写作主流程解耦**：模块缺失只会让状态栏说一句实话）
     wireSync()
     initSync()
+    wireBoard() // 记录板（§1）：tab / 笔记 / 待办 / 预览事件
+    wireSensitive() // §3 敏感词：工具栏按钮 + 右栏敏感词面板（纯本地）
+    wireSearch() // §4 搜全书：浮层开关 / 输入 debounce / 范围切换（本机+云端遍历）
 
     api.getState().then(function (st) {
       if (st && st.ok) {
@@ -4053,6 +5227,14 @@
         if (st.proofread && typeof st.proofread.sessionId === 'string') {
           state.proofreadSessionId = st.proofread.sessionId
         }
+        // 记录板（§1）：主进程已归一化 ⇒ 直接采信；渲染当前 tab 与空态（不自动展开右栏）
+        if (st.board) {
+          state.board.activeTab = st.board.activeTab || 'notes'
+          state.board.notes = st.board.notes || {}
+          state.board.todos = st.board.todos || {}
+          state.board.previewCache = st.board.previewCache || {}
+        }
+        boardRenderAll()
         if (st.root && st.rootExists === false) {
           notice('配置的工作区目录已不存在：' + st.root, true)
         }

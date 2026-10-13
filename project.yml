@@ -28,8 +28,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.skyblade47.dshremote
-        MARKETING_VERSION: "0.1.0"        # 与 dsh-remote / writing-client 保持同一版本节奏，不擅升
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.2.0"        # 与 dsh-remote / writing-client 保持同一版本节奏
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "2"       # 2 = iPad only（本仓只面向 iPad）
         CODE_SIGNING_ALLOWED: "NO"        # CI 里产出**未签名**包，签名留给本机 Sideloadly
