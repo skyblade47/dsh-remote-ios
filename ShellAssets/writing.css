@@ -90,6 +90,10 @@
   color: var(--dsw-alias-label-secondary);
   background: var(--dsw-alias-bg-module-platform);
   white-space: nowrap;
+  /* 🔴 2026-10-13：setInterval(renderAutosaveLabel, 500) 每 0.5s 改文本（"… 待自动保存" → "✓ N 秒前"），
+     宽度变化在 flex-wrap:wrap 的工具栏里触发换行重排 ⇒ 整页上下跳动。
+     三个新按钮（查找/缩进/取消缩进）让工具栏更挤 ⇒ 放大了跳动 ⇒ 固定宽度兜住。 */
+  min-width: 168px;
 }
 
 /* 番茄钟 */
