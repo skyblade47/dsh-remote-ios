@@ -282,6 +282,68 @@ header .gear,
   word-break: break-all;
 }
 
+/* ⑧ 云端会话提示条 + 登录浮层表单（ipad.js 动态创建；不改任何栏位结构，仅视口顶部悬浮）。
+   非模态、不挡编辑；仅在「已配网关且确认本 host 无会话」时由 ipad.js 取消 hidden。 */
+.wci-authbar {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000; /* 低于浮层 .wci-overlay 的 9999，登录框弹出时不叠在其上 */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 10px 8px 16px;
+  background: #2b2320;
+  color: #f0d9c8;
+  border: 1px solid rgba(255, 170, 90, 0.4);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  font-size: 14px;
+  line-height: 1.4;
+}
+/* 类选择器 display:flex 会压过 UA 的 [hidden]{display:none}，需显式钉回 */
+.wci-authbar[hidden] {
+  display: none;
+}
+.wci-authbar-msg {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wci-authbar-btn {
+  flex: none;
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 15px;
+  color: #fff;
+  background: #4c6ef5;
+  border: none;
+  border-radius: 10px;
+}
+.wci-authbar-btn:active {
+  background: #3b5bdb;
+}
+
+/* 登录浮层表单：两个 ≥44pt 输入 + 通宽主按钮（与 .wci-create 输入同一视觉口径）。 */
+.wci-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wci-form input {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px;
+  font-size: 16px;
+  color: #e8eaf0;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  box-sizing: border-box;
+}
+
 /* ⑥ 消除 iOS 点击灰色高亮（:active 在触控设备上也无意义，统一透明）。 */
 * {
   -webkit-tap-highlight-color: transparent;

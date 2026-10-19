@@ -8,8 +8,12 @@
  *   3. 沙盒多工作区：覆盖 pickRoot/pickDir —— iOS 无系统选目录能力，改为枚举
  *      Documents/workspace 容器内的子工作区（listRoots/switchRoot/createRoot），
  *      用壳层自带浮层完成「选择 / 新建」，writing.js 与 PC 契约一行不改。
+ *   4. 云端会话：本 host 会话探针 + 登录提示条/浮层（cookie 按 host 隔离，Funnel 域没有
+ *      dsh_session 时网关对 clientZoneList 回 302 登录页，写作端静默不显示云端作品），
+ *      并在 WCSyncNet.listDrafts 外包一层闸门，登录成功后挂起的清单请求自然兑现、云端卡出现。
  * 明确不做：online 回网补推（writing.js 核心已绑 online 钩子，不重复）、
- *           分栏 pointer 交互（核心已实现，CSS touch-action 即够）、横幅/主题/手机形态。
+ *           分栏 pointer 交互（核心已实现，CSS touch-action 即够）、横幅/主题/手机形态、
+ *           左右栏收起（栏位一字不动）。
  */
 (function () {
   'use strict'
@@ -322,6 +326,224 @@
     showRelaunchHint()
   }, true)
 
+  // ───────────────────── 4b. 云端会话探针 / 登录（云端作品显示修复） ─────────────────────
+  //
+  // cookie 按 host 隔离（spec §6.26）：登录若发生在 tailnet/直连 host，cookie 不会带给
+  // Funnel 域 dsh-cloud.…；网关 auth-middleware 对不以 /api/ 开头的 clientZoneList 在无
+  // cookie 时回 302→/auth/login（不是 401 JSON），sync-net 的 fetch 默认 follow 拿到登录页
+  // HTML，JSON.parse 失败 ⇒ {ok:false} ⇒ indexList known:false ⇒ 云端作品卡不渲染，且无
+  // 任何提示。安卓早有探针+本 host 登录，iPad 此处补齐（蓝本：android-shell.js）。
+  // 做法：① redirect:'manual' 探针，opaqueredirect/302/401/403 判本 host 无会话；
+  //      ② 无会话显非模态提示条（可点出登录浮层，POST /api/auth/login 让 Set-Cookie 种在本 origin）；
+  //      ③ 包一层 WCSyncNet.listDrafts 闸门：探针判定无会话期间，挂起 writing.js 的清单请求，
+  //         登录成功后放行 —— 挂起的那次调用拿到 200，writing.js 据此重画侧栏，云端卡出现。
+  //      探针失败（离线/超时）一律 fail-open 放行原调用，绝不挡本地写作。
+  var hostSessionState = null // null=未判定；true=本 host 有会话；false=无会话
+  var sessionWaiters = []
+  var probeInFlight = false
+  var PROBE_TIMEOUT_MS = 9000
+
+  function listPath() {
+    return (window.WCSyncNet && window.WCSyncNet.LIST_PATH) || '/writing-studio/api/clientZoneList'
+  }
+
+  // fail-open：放行所有挂起者（传 false 表示「未确认会话」，由调用方自行决定是否直接打网络）。
+  function releaseSessionWaiters() {
+    var ws = sessionWaiters
+    sessionWaiters = []
+    ws.forEach(function (w) { w() })
+  }
+
+  function probeHostSession() {
+    if (!gatewayConfigured()) return Promise.resolve(hostSessionState)
+    probeInFlight = true
+    var ctl = new AbortController()
+    var timer = setTimeout(function () { ctl.abort() }, PROBE_TIMEOUT_MS)
+    return fetch(listPath(), {
+      method: 'GET',
+      credentials: 'same-origin',
+      redirect: 'manual',
+      signal: ctl.signal,
+    }).then(function (res) {
+      clearTimeout(timer)
+      probeInFlight = false
+      if (res.type === 'opaqueredirect' || res.status === 0 || res.status === 302 ||
+          res.status === 401 || res.status === 403) {
+        hostSessionState = false
+      } else if (res.ok) {
+        hostSessionState = true
+      } // 其余状态（5xx 等）保持 null，按未知处理，不误报「需要登录」
+      renderAuthBar()
+      if (hostSessionState === true) releaseSessionWaiters()
+      return hostSessionState
+    }).catch(function () {
+      clearTimeout(timer)
+      probeInFlight = false
+      // 离线/超时/中止：不臆断无会话，fail-open（离线时网关配置下浏览器本身也连不上）
+      releaseSessionWaiters()
+      renderAuthBar()
+      return hostSessionState
+    })
+  }
+
+  // 清单闸门：① 已**确认无会话** ⇒ 挂起至登录成功；② 会话未决（启动探针在途）⇒ 暂挂，
+  // 探针一回 200 立即放行（不多绕一圈），回 302 则继续等登录；③ 探针失败/离线 ⇒ fail-open。
+  // 返回 true = 已接管（此次调用延后）；false = 照常走原实现。
+  function gateListDrafts(resume) {
+    if (hostSessionState === false || (hostSessionState === null && probeInFlight)) {
+      sessionWaiters.push(resume)
+      return true
+    }
+    return false
+  }
+
+  function installListDraftsGate() {
+    var net = window.WCSyncNet
+    if (!net || typeof net.listDrafts !== 'function' || net.__wciListGate) return false
+    var orig = net.listDrafts.bind(net)
+    net.listDrafts = function () {
+      var args = arguments
+      var self = this
+      return new Promise(function (resolve) {
+        var resumed = false
+        var resume = function () {
+          if (resumed) return
+          resumed = true
+          resolve(orig.apply(self, args))
+        }
+        if (gateListDrafts(resume)) return // 无会话：等登录成功/离线后放行
+        resume()
+      })
+    }
+    net.__wciListGate = true
+    return true
+  }
+
+  // ── 非模态提示条（固定在视口顶部，不属于任何栏位；登录成功即隐藏）──────────────
+  var authBar = null
+  function ensureAuthBar() {
+    if (authBar) return authBar
+    authBar = el('div', 'wci-authbar')
+    var msg = el('span', 'wci-authbar-msg', '云端作品未显示：当前网关地址尚未登录')
+    var btn = el('button', 'wci-authbar-btn', '登录以显示云端作品')
+    btn.type = 'button'
+    btn.addEventListener('click', openLoginOverlay)
+    authBar.appendChild(msg)
+    authBar.appendChild(btn)
+    document.body.appendChild(authBar)
+    return authBar
+  }
+
+  function renderAuthBar() {
+    // 仅「已配网关且确认本 host 无会话」时显示；离线/未知不打扰本地写作。
+    if (hostSessionState === false && gatewayConfigured()) {
+      ensureAuthBar()
+      authBar.hidden = false
+    } else if (authBar) {
+      authBar.hidden = true
+    }
+  }
+
+  // ── 登录浮层（复用 wci-* 浮层；POST 成功后 Set-Cookie 自然种在当前 origin）──────
+  function openLoginOverlay() {
+    if (document.querySelector('.wci-login')) return
+    var ui = openOverlay('登录云端', null)
+    ui.box.classList.add('wci-login')
+    ui.body.appendChild(el('p', 'wci-sub',
+      '在本应用内登录一次（' + location.host + '），cookie 只保存在本机 WebKit 存储中；' +
+      '登录后写作面板会自动列出云端作品。'))
+
+    var form = el('div', 'wci-form')
+    var nameInput = el('input')
+    nameInput.type = 'text'
+    nameInput.setAttribute('autocapitalize', 'none')
+    nameInput.setAttribute('autocorrect', 'off')
+    nameInput.placeholder = '账号'
+    var passInput = el('input')
+    passInput.type = 'password'
+    passInput.placeholder = '密码'
+    form.appendChild(nameInput)
+    form.appendChild(passInput)
+    var submitBtn = el('button', 'wci-primary', '登录')
+    submitBtn.style.width = '100%'
+    form.appendChild(submitBtn)
+    ui.body.appendChild(form)
+
+    function errBox() {
+      var n = el('div', 'wci-err')
+      n.style.display = 'none'
+      ui.body.appendChild(n)
+      return n
+    }
+    var err = errBox()
+    function fail(msg) {
+      err.textContent = msg
+      err.style.display = 'block'
+      submitBtn.disabled = false
+    }
+
+    function submit() {
+      var name = nameInput.value.trim()
+      var pass = passInput.value
+      if (!name || !pass) { fail('请输入账号和密码'); return }
+      err.style.display = 'none'
+      submitBtn.disabled = true
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ name: name, password: pass }),
+      }).then(function (res) {
+        return res.text().then(function (raw) {
+          var json = null
+          try { json = raw ? JSON.parse(raw) : null } catch (e) { json = null }
+          return { status: res.status, json: json }
+        })
+      }).then(function (r) {
+        var ok = r.status >= 200 && r.status < 300 && (!r.json || r.json.ok !== false)
+        if (!ok) {
+          var e = r.json && r.json.error
+          fail((typeof e === 'string' && e) || (e && e.message) ||
+               (r.json && r.json.message) || ('登录失败（HTTP ' + r.status + '）'))
+          return
+        }
+        passInput.value = ''
+        ui.close()
+        hostSessionState = true
+        renderAuthBar()
+        releaseSessionWaiters() // 挂起的清单请求放行 → 200 → 写作端重画侧栏显云端卡
+        // 回到联网态：writing.js 的 online 钩子会 refreshToday/drainWritingQueue（补推待发）。
+        try { window.dispatchEvent(new Event('online')) } catch (e2) { /* 忽略 */ }
+      }).catch(function () {
+        fail('网络异常，请稍后再试')
+      })
+    }
+    submitBtn.addEventListener('click', submit)
+    passInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); submit() }
+    })
+    nameInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); passInput.focus() }
+    })
+    setTimeout(function () { nameInput.focus() }, 60)
+  }
+
+  var cloudSessionInstalled = false
+  function installCloudSession() {
+    if (cloudSessionInstalled) return true
+    if (!gatewayConfigured()) { cloudSessionInstalled = true; return true } // 未配网关：不做云端会话逻辑
+    if (!installListDraftsGate()) return false // WCSyncNet 尚未就绪，调用方轮询
+    cloudSessionInstalled = true
+    // 闸门必须在 writing.js init 的 getState 回调调 listDrafts 之前装好（脚本按序同步执行，
+    // ipad.js 紧跟 sync-net.js，故这里同步安装即先于它）；探针随后异步跑。
+    probeHostSession()
+    window.addEventListener('online', function () {
+      // 回网后重新判定（离线时 hostSessionState 可能停在 null/false）
+      if (!probeInFlight) probeHostSession()
+    })
+    return true
+  }
+
   // BridgeJS 在 document-start 注入，wcStorage 已存在；轮询仅为防御未来注入顺序变化。
   if (!installSandboxWorkspace()) {
     var pickTries = 0
@@ -342,6 +564,16 @@
       } else if (tries > 50) {
         clearInterval(timer)
       }
+    }, 100)
+  }
+
+  // 云端会话闸门：rewriter 把本脚本紧跟 sync-net.js 注入，WCSyncNet 应已存在；
+  // 轮询仅为防御注入顺序变化（必须赶在 writing.js init 异步拉清单之前装好）。
+  if (!installCloudSession()) {
+    var cloudTries = 0
+    var cloudTimer = setInterval(function () {
+      cloudTries += 1
+      if (installCloudSession() || cloudTries > 50) clearInterval(cloudTimer)
     }, 100)
   }
 
