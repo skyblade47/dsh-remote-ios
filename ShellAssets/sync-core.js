@@ -105,6 +105,63 @@
   }
 
   /**
+   * 硬删标记固定件（**相对 `客户端区/`** = `回收/_硬删标记.jsonl`）。
+   * 服务端 walk 已显式跳过它；客户端解析清单时再兜底一次：既不进 archived 也不进 tomb。
+   * 与服务端 `client-zone-core.js` 的 `CZ_PURGE_MARKER_REL` 逐字一致。
+   */
+  var PURGE_MARKER_REL = RECYCLE_PREFIX + '_硬删标记.jsonl'
+
+  /**
+   * 去 14 位时间戳（镜像服务端 `stripRecycleStamp`）：
+   * 时间戳 = 扩展名前、最后一个 `-` 之后**恰 14 位数字**；剥离后得原文件名。
+   * @param {unknown} fileName
+   * @returns {{base:string, stamp:string}|null} 无合法戳 ⇒ `null`
+   */
+  function stripRecycleStamp(fileName) {
+    var s = String(fileName === undefined || fileName === null ? '' : fileName)
+    var i = s.lastIndexOf('.')
+    var stem = i >= 0 ? s.slice(0, i) : s
+    var ext = i >= 0 ? s.slice(i) : ''
+    var h = stem.lastIndexOf('-')
+    if (h < 0) return null
+    var stamp = stem.slice(h + 1)
+    if (!/^[0-9]{14}$/.test(stamp)) return null
+    return { base: stem.slice(0, h) + ext, stamp: stamp }
+  }
+
+  /**
+   * 回收件全路径（`回收/正文/<原路径>[-14位戳].md`）→ 正文原 rel。
+   * 🔴 **与服务端 `client-zone-core.js::recycleOriginRel` 逐字镜像**：
+   * · 有合法 14 位戳 ⇒ 剥戳还原；
+   * · 无戳 / 戳非法（如 13 位）⇒ **原样映射**——它就是某份正文的归档件
+   *   （首删无戳件最常见；名为 `怪-2026093015301.md` 的正文被删后也应产生删除信号）；
+   * · 不在 `回收/正文/` 下（含空）⇒ `null`。
+   * @param {unknown} recycleRel
+   * @returns {string|null}
+   */
+  function recycleOriginRel(recycleRel) {
+    var raw = recycleToLocalRel(recycleRel)
+    if (!raw) return null
+    var slash = raw.lastIndexOf('/')
+    var fn = slash >= 0 ? raw.slice(slash + 1) : raw
+    var st = stripRecycleStamp(fn)
+    if (!st) return raw
+    return (slash >= 0 ? raw.slice(0, slash + 1) : '') + st.base
+  }
+
+  /**
+   * 同原路径的多件回收副本排序：文件名戳最新优先（有戳优先于无戳），再退 mtime 降序。
+   * 与服务端 `matchRecycleEntries` 同口径。
+   */
+  function recycleRecNewer(a, b) {
+    if (a.stamp && b.stamp) return a.stamp < b.stamp ? 1 : (a.stamp > b.stamp ? -1 : 0)
+    if (a.stamp) return -1
+    if (b.stamp) return 1
+    var am = String(a.mtime || ''), bm = String(b.mtime || '')
+    return am < bm ? 1 : (am > bm ? -1 : 0)
+  }
+
+  /**
    * 把 `clientZoneList` 的响应整理成**按本地 relPath 索引**的查表。
    * 🔴 **区分「已知」与「未知」**：响应不合法 / `ok:false` / 网络失败 ⇒ `known:false`。
    *    调用方**必须**先看 `known`，不要把 `known:false` 当成"远端什么都没有"。
@@ -113,13 +170,15 @@
    *   · 新（`clientZoneList`）：`{ok:true, entries:[{relPath,path,version,bytes,mtime}]}`，
    *     entries 覆盖整个客户端区 —— `正文/…` 是在世件、`回收/正文/…` 是**删除信号**（方案 A）；
    *   · 旧（`draft-list`）：`{ok:true, items:[…], tombstones:[…]}`。
-   * 🔴 `tomb` 的两个来源都会解析：回收目录件（新）与旧契约 `tombstones`（只读兼容）。
+   * 🔴 `tomb` 的两个来源都会解析：回收目录件（新，按去戳原 rel 归并）与旧契约 `tombstones`（只读兼容）。
+   * 🔴 `archived`：回收件按去 14 位戳原 rel **归组**（多副本一组，spec §4.1），供 restore/§5.1 用。
+   * 🔴 `purged`：响应顶层硬删表 `purged:[{relPath,at}]` 按正文原 rel 索引（spec §3.4）。
    *
    * @param {unknown} resp
-   * @returns {{known:boolean, byRel:object, tomb:object, generatedAt:string|null}}
+   * @returns {{known:boolean, byRel:object, archived:object, purged:object, tomb:object, generatedAt:string|null}}
    */
   function indexList(resp) {
-    var empty = { known: false, byRel: {}, tomb: {}, generatedAt: null }
+    var empty = { known: false, byRel: {}, archived: {}, purged: {}, tomb: {}, generatedAt: null }
     if (!resp || typeof resp !== 'object') return empty
     if (resp.ok !== true) return empty
     var items = Array.isArray(resp.entries) ? resp.entries : (Array.isArray(resp.items) ? resp.items : null)
@@ -127,9 +186,13 @@
     var tombs = Array.isArray(resp.tombstones) ? resp.tombstones : []
     var byRel = {}
     var tomb = {}
+    var archived = {}
     for (var i = 0; i < items.length; i++) {
       var it = items[i]
       var rel = it && it.relPath
+      if (typeof rel !== 'string') continue
+      // 硬删标记固定件：服务端 walk 已剔，客户端再兜底（既不归档也不当墓碑）
+      if (rel === PURGE_MARKER_REL) continue
       var lr = toLocalRel(rel)
       if (lr) {
         byRel[lr] = {
@@ -139,14 +202,35 @@
         }
         continue
       }
-      var rr = recycleToLocalRel(rel)
-      if (rr) {
-        tomb[rr] = {
-          deletedAt: it.mtime || null,
-          deletedBy: '',
-          lastVersion: typeof it.version === 'string' ? it.version : '',
+      // 回收件：按去戳原 rel 同时进 archived（归组）与 tomb（打开文档的删除信号）
+      var origin = recycleOriginRel(rel)
+      if (origin) {
+        var slash2 = rel.lastIndexOf('/')
+        var fn2 = slash2 >= 0 ? rel.slice(slash2 + 1) : rel
+        var st2 = stripRecycleStamp(fn2)
+        var rec = { relPath: rel, stamp: st2 ? st2.stamp : '', mtime: it.mtime || null,
+          version: typeof it.version === 'string' ? it.version : '' }
+        var g = archived[origin]
+        if (!g) {
+          archived[origin] = { latest: rel, version: rec.version, at: rec.mtime, count: 1, _top: rec }
+        } else {
+          g.count += 1
+          if (recycleRecNewer(rec, g._top) < 0) {
+            g.latest = rel
+            g.version = rec.version
+            g.at = rec.mtime
+            g._top = rec
+          }
         }
       }
+    }
+    // archived 定稿（剥内部 _top）并同步 tomb：tomb 按原 rel 取每组最新一件
+    var akeys = Object.keys(archived)
+    for (var ai = 0; ai < akeys.length; ai++) {
+      var ak = akeys[ai]
+      var ag = archived[ak]
+      tomb[ak] = { deletedAt: ag.at, deletedBy: '', lastVersion: ag.version }
+      delete ag._top
     }
     for (var j = 0; j < tombs.length; j++) {
       var tb = tombs[j]
@@ -158,9 +242,21 @@
         lastVersion: (tb && tb.lastVersion) || '',
       }
     }
+    // 顶层硬删表：宽容解析（坏条目跳过）
+    var purged = {}
+    var plist = Array.isArray(resp.purged) ? resp.purged : []
+    for (var p = 0; p < plist.length; p++) {
+      var pe = plist[p]
+      if (!pe || typeof pe !== 'object') continue
+      if (typeof pe.relPath !== 'string' || !pe.relPath) continue
+      if (!pe.at) continue
+      purged[pe.relPath] = { at: pe.at }
+    }
     return {
       known: true,
       byRel: byRel,
+      archived: archived,
+      purged: purged,
       tomb: tomb,
       generatedAt: typeof resp.generatedAt === 'string' ? resp.generatedAt : null,
     }
@@ -177,6 +273,7 @@
    * @param {string}  input.remoteVersion  远端版本（`remoteExists` 为真时才有意义）
    * @param {number}  input.remoteBytes
    * @param {object}  input.tombstone      `{deletedAt,deletedBy,lastVersion}` 或 `null`
+   * @param {boolean} input.purged         远端硬删表中有这份吗（spec §3.4；本地有正文 ⇒ 中性提示）
    * @param {string}  input.baselineVersion 上次成功同步时**远端**的版本（没有 ⇒ `''`）
    * @returns {{action:string, localVersion:string, remoteVersion:string, fromBaseline:boolean}}
    *
@@ -189,6 +286,7 @@
    *   `local-newer`     远端相对 baseline **没改**、本地改了 ⇒ 静默用本地（改动尚未推送，属正常）
    *   `conflict`        两边都动过（或无 baseline 可比）⇒ 走**三选**（覆盖/另存为/取消）
    *   `remote-deleted`  远端回收目录有这份（或旧契约墓碑）⇒ **提示**「远端已删除」+【保留本地】/【移入本地回收站】
+   *   `remote-purged`   远端硬删表有这份（回收也已清空）⇒ 中性提示，**不重传、不自动删**
    *   `too-large`       远端正文超 2 MiB ⇒ 不拉，提示（本地仍有自己的那份）
    */
   function decide(input) {
@@ -206,9 +304,21 @@
     }
 
     // ② 墓碑（远端已软删）—— **只提示，不自动删本地**
-    if (o.tombstone && typeof o.tombstone === 'object') {
+    //    例外：远端正文已回到原位（restore 后），回收里残留的更早时间戳副本
+    //    仍会被 indexList 归组出 tomb，但删除信号已失效（spec §6/§7）——
+    //    此时让出路，落到 ③ 起的正文存在判定 / 版本比对。
+    if (o.tombstone && typeof o.tombstone === 'object' && o.remoteExists !== true) {
       if (!localExists) { out.action = 'in-sync'; return out }   // 两边都没有 ⇒ 无需动作
       out.action = 'remote-deleted'
+      out.fromBaseline = !!base && localVersion === base
+      return out
+    }
+
+    // ②b 硬删表（远端回收也已清空，只余有界标记，spec §5.1/§7）：
+    //     本地正文没了 ⇒ 两边一致无需动作；本地正文还在 ⇒ 中性提示，**不重传、不自动删**
+    if (o.purged === true) {
+      if (!localExists) { out.action = 'in-sync'; return out }
+      out.action = 'remote-purged'
       out.fromBaseline = !!base && localVersion === base
       return out
     }
@@ -244,8 +354,10 @@
   //   ① **本地相对基线没动过 ⇒ 直接 skip，一个网络请求都不发**（自动保存很频繁，这一刀最省）
   //   ② 远端未知（离线/拉不到）⇒ 不推，也**不改任何状态**
   //   ③ 超过 2 MiB ⇒ 不推（与写端点同口径）
-  //   ④ 远端没有这份：**回收目录有件 ⇒ 那头真删了，不复活**；回收无件 ⇒ 自动补传
-  //      （无基线首次 create；有基线说明件被挪过/存储迁过，照样补，服务端缺件直接 create）
+  //   ④ 远端没有这份（spec §5.1，基线 × archived × purged 全组合）：
+  //      · purged 有 ⇒ **已硬删，不补传、不提供重传**（本地正文还在 ⇒ 中性横幅，不自动删）；
+  //      · archived 有（含旧入参 remotelyDeleted）⇒ 已软删进回收，**不补传不复活**；
+  //      · 两者都无 ⇒ 自动补传（无基线首次 create；有基线说明件被挪过/存储迁过，照样补，create）。
   //   ⑤ 其余 ⇒ 远端已被别人改过（或无基线可比）⇒ **永不自动覆盖**，交回用户决策
   //
   // @param {object} input
@@ -255,14 +367,18 @@
   // @param {boolean} input.remoteKnown     远端清单拿到了吗（离线 ⇒ false）
   // @param {boolean} input.remoteExists
   // @param {string}  input.remoteVersion
-  // @param {boolean} input.remotelyDeleted 远端回收目录里有这份吗（删除信号，方案 A）
-  // @returns {{action:'push'|'skip'|'unknown'|'too-large'|'remote-deleted'|'remote-newer'|'conflict',
+  // @param {boolean} input.archived        远端回收目录里有这份的归档件吗（spec §4.1 archived）
+  // @param {boolean} input.purged          远端硬删表里有这份吗（spec §3.4 purged）
+  // @param {boolean} [input.remotelyDeleted] 旧入参，等价于 archived（平滑过渡）
+  // @returns {{action:'push'|'skip'|'unknown'|'too-large'|'remote-deleted'|'remote-purged'|'remote-newer'|'conflict',
   //            reason:string, create?:boolean, baseVersion?:string}}
   function decidePush(input) {
     var o = input || {}
     var localVersion = typeof o.localVersion === 'string' ? o.localVersion : ''
     var base = typeof o.baselineVersion === 'string' ? o.baselineVersion : ''
     var remoteVersion = typeof o.remoteVersion === 'string' ? o.remoteVersion : ''
+    var archived = o.archived === true || o.remotelyDeleted === true
+    var purged = o.purged === true
 
     // ① 最省的一刀：本地相对基线没动过 ⇒ 不推（**自动保存的绝大多数触发都停在这里**）
     if (base && localVersion && localVersion === base) return { action: 'skip', reason: 'unchanged' }
@@ -270,9 +386,10 @@
     if (o.remoteKnown !== true) return { action: 'unknown', reason: 'remote-unknown' }
     // ③ 大小闸
     if (Number(o.localBytes) > SIZE_LIMIT) return { action: 'too-large', reason: 'over-limit' }
-    // ④ 远端没有这份：回收有件 ⇒ 真删除不复活；回收无件 ⇒ 自动补传（缺件 + 无 baseVersion ⇒ 服务端 create）
+    // ④ 远端没有这份（spec §5.1）：硬删优先于软删；两删信号都无 ⇒ 自动补传
     if (o.remoteExists !== true) {
-      if (o.remotelyDeleted === true) return { action: 'remote-deleted', reason: 'recycled' }
+      if (purged) return { action: 'remote-purged', reason: 'purged' }
+      if (archived) return { action: 'remote-deleted', reason: 'recycled' }
       return { action: 'push', reason: base ? 'reupload' : 'first-push', create: true, baseVersion: '' }
     }
     // ⑤ 远端没被别人改过 ⇒ 带上 baseVersion 推（服务端会再校一次，不符就 409）
@@ -293,6 +410,7 @@
     unknown: '未同步（远端未知，改动留在本地）',
     'too-large': '正文超过 2 MiB —— 未推送（只在本地保存）',
     'remote-deleted': '远端已删除这份 —— 未推送（回收目录里有它，不复活）',
+    'remote-purged': '这份在远端已被彻底删除 —— 未推送（不重传，本地副本由你决定去留）',
     'remote-newer': '远端有更新 —— 未推送，等你决定',
     conflict: '本地与远端无从比较 —— 未推送，等你决定',
   }
@@ -361,6 +479,7 @@
     'local-newer': '本地有未推送的改动',
     conflict: '本地与远端都改过 —— 需要你选',
     'remote-deleted': '远端已删除这份',
+    'remote-purged': '这份在远端已被彻底删除（本地副本由你决定去留）',
     'too-large': '远端正文超过 2 MiB —— 未拉取',
   }
 
@@ -372,10 +491,13 @@
   return {
     DRAFT_ROOT: DRAFT_ROOT,
     SIZE_LIMIT: SIZE_LIMIT,
+    PURGE_MARKER_REL: PURGE_MARKER_REL,
     versionOf: versionOf,
     toLocalRel: toLocalRel,
     toRemoteRel: toRemoteRel,
     recycleToLocalRel: recycleToLocalRel,
+    stripRecycleStamp: stripRecycleStamp,
+    recycleOriginRel: recycleOriginRel,
     indexList: indexList,
     decide: decide,
     decidePush: decidePush,

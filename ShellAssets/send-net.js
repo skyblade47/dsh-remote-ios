@@ -55,14 +55,33 @@
   var busy = false
   // ⑩ C5：通道与冲突处理
   var channelChose = null                    // 用户在**本窗内**手选过的通道；'inline' = 显式要求内联发送（每次开窗复位）
-  var versionCache = Object.create(null)     // relPath → 上次成功落盘的 version（冲突三选的前置；
-                                             //   重启后为空 ⇒ 对已存在的稿件会先弹一次三选：安全但不烦人）
+  var versionCache = Object.create(null)     // relPath → 上次成功落盘的 version（本窗内存态，兜底用；
+                                             //   ⑮ 权威版本源是持久 baseline，经 __wcSyncBridge 读，
+                                             //   重启后仍查得到 ⇒ 已存在稿件不再白白先弹一次三选）
   var resolveRef = null                      // 关窗时把 askResolve 判为"取消"的钩子
   var pending = null        // { ctx, text, selected, scope }
   var inflight = null       // 在途投递的 AbortController（超时/用户取消都走它）
   var logChain = Promise.resolve()
 
   function bridge() { return window.__wcSendBridge || null }
+
+  // ⑮ 双通道版本对齐：持久 baseline（writing.js 同步通道）是权威版本源；
+  //   读时窄桥优先、内存 versionCache 仅兜底；任一 clientZoneSave 成功后两处都回填，
+  //   否则两通道互不知对方落盘 ⇒ 另一通道拿过期 baseVersion 撞 409 ⇒ 横幅/三选反复弹。
+  function bridgeVersionOf(relPath) {
+    var v = ''
+    if (window.__wcSyncBridge && window.__wcSyncBridge.versionOf) {
+      try { v = window.__wcSyncBridge.versionOf(relPath) || '' } catch (e) { v = '' }
+    }
+    return v || versionCache[relPath] || ''
+  }
+
+  function bridgeNoteSaved(relPath, version) {
+    var sb = window.__wcSyncBridge
+    if (sb && sb.noteSavedVersion) {
+      try { sb.noteSavedVersion(relPath, version) } catch (e) { /* fail-soft：回填失败不影响发送 */ }
+    }
+  }
 
   function say(text, isError) {
     var b = bridge()
@@ -165,15 +184,17 @@
   }
 
   /**
-   * 投递消息到服务端 relay。成功 ⇒ {ok:true}；失败 ⇒ {ok:false, code, message}。
+   * 投递消息到服务端 relay。成功 ⇒ {ok:true, requestId}；失败 ⇒ {ok:false, code, message}。
    * 成功判据是响应体 ok === true（不再看内核 RPC 的 result 字段）。
    * `signal` 来自调用方（超时 / 用户取消）⇒ 中止时 fetch 抛 AbortError，由调用方兜。
+   * 🔴 relay 回程（方案 C）：`requestId` 由 doSend 预生成传入，客户端轮询与服务端台账用同一个 id；
+   *    服务端若回带 requestId 以服务端为准（理论上同值）。
    */
-  async function deliver(text, signal) {
-    var r = await fetch(RELAY_PATH, jsonOpts('POST', { text: text, requestId: uuid(), timeZone: ianaZone() }, signal))
+  async function deliver(text, signal, requestId) {
+    var r = await fetch(RELAY_PATH, jsonOpts('POST', { text: text, requestId: requestId, timeZone: ianaZone() }, signal))
       .then(function (res) { return readBody(res).then(function (rb) { return { status: res.status, ok: res.ok, rb: rb } }) })
     var body = (r.rb && r.rb.json) || {}
-    if (r.ok && body.ok === true) return { ok: true }
+    if (r.ok && body.ok === true) return { ok: true, requestId: body.requestId || requestId }
     var code = body.code || ('HTTP_' + r.status)
     return { ok: false, code: code, message: relayMessage(code) || ('投递失败（HTTP ' + r.status + '）：' + (responseText(r).slice(0, 300) || '')) }
   }
@@ -489,6 +510,11 @@
     try { json = raw ? JSON.parse(raw) : null } catch (e) { json = null }
     var out = Send.readDraftSaveResult(res.status, json)
     out.relPath = relPath
+    // ⑮ 任一路保存成功（普通 / force 覆盖 / 另存新 rel）都同步两通道的版本认知
+    if (out.ok && out.version) {
+      versionCache[out.relPath] = out.version
+      bridgeNoteSaved(out.relPath, out.version)
+    }
     if (!out.ok && !out.conflict) {
       out.error = 'HTTP ' + res.status + '：' +
         ((json && (json.error || json.code)) || String(raw).slice(0, 200) || '（空响应）')
@@ -503,7 +529,7 @@
   async function saveDraft(ctx, pending, ctl) {
     var rel = Send.draftRelPath({ work: ctx.workName, docName: ctx.docName })
     var text = pending.text || ''
-    var cached = versionCache[rel]
+    var cached = bridgeVersionOf(rel)
     var r = await postDraftSave(rel, text, cached ? { baseVersion: cached } : null, ctl.signal)
     if (!r.ok && r.conflict) {
       // 409：远端已有同名稿件，而我们手上没有（或不是）它当前的 version
@@ -704,6 +730,8 @@
     //    前置校验 + `buildMessage` 自身的抛错在 try 里兜住，用户看到的提示一样。）
     var msg = ''   // 形态由 channel 决定、稍后才赋值；先给空串 ⇒ catch 里的剪贴板回退拿到的永远是字符串
     setBusy(true)
+    // relay 回程（方案 C）：requestId 在发送前就造好——投递/台账/轮询全用它（deliver 不再自己 uuid）
+    var reqId = uuid()
     var b = bridge()
     var ctl = new AbortController()
     var timedOut = false
@@ -727,7 +755,7 @@
       if (channelChose !== 'inline') {
         els.progress.textContent = '保存到客户端区…'
         save = await saveDraft(ctx, pending, ctl)
-        if (save && save.ok) versionCache[save.relPath] = save.version
+        // ⑮ versionCache 与持久 baseline 的回填已统一收在 postDraftSave 成功分支（含覆盖/另存两路）
       }
       if (save && save.canceled) {
         // 冲突三选里点了「取消」⇒ 当作正常中止（不是失败，不弹"改用内联"）
@@ -762,7 +790,7 @@
 
       // ④ 投递（带超时/可取消信号）
       els.progress.textContent = '投递中…（最长 ' + (SEND_TIMEOUT_MS / 1000) + ' 秒）'
-      var d = await deliver(msg, ctl.signal)
+      var d = await deliver(msg, ctl.signal, reqId)
       var when = stamp()
       if (d.ok) {
         els.progress.textContent = ''
@@ -770,6 +798,9 @@
         appendLog(logLine(when, ctx.docName, intent, scopeLabel, '已送达任务中心'))
         els.box.hidden = true
         pending = null
+        // relay 回程（方案 C）：仅当用户开着「发送后等待创作教练建议」（默认开）才启动轮询；
+        // 关着 / 桥没有 coachResult（旧 writing.js）⇒ 行为与本阶段之前完全一致。
+        if (d.requestId && b && b.waitResult && b.waitResult() && b.coachResult) b.coachResult(d.requestId)
       } else {
         // 三个配置类错误（MISSING/ARCHIVED/UNREACHABLE）⇒ 只弹提示、记账，**不复制剪贴板**；
         // 其余（含 HTTP_* / 网络失败）⇒ 完整消息复制到剪贴板 + 提示手动粘贴。

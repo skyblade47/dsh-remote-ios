@@ -9,53 +9,16 @@
 <link rel="stylesheet" href="/__shell__/writing.css" />
 <style>
   /* 壳层 chrome（本页自己的 UI，与 iframe 内无关）。
-     颜色/字号全部走 --dsw-*（dsw-tokens.css）；圆角/间距无 token ⇒ 照内核组件实测值写死，见各条注释。 */
+     颜色/字号全部走 --dsw-*（dsw-tokens.css）；圆角/间距无 token ⇒ 照内核组件实测值写死。 */
   html, body { margin: 0; height: 100%; }
   body {
-    display: flex; flex-direction: column;
     font: var(--dsw-font-s-14);
     color: var(--dsw-alias-label-primary);
     background: var(--dsw-alias-bg-base);
   }
-  /* 顶部标签栏：dsh dockkit Tab Strip 观感
-     出处：dsh-web-frontend/dist/assets/index-DPX2bQLo.css（发布包，minified）
-           本地美化副本 _tabStrip_17p4l_156 / _tab_17p4l_156 / _tabActive_17p4l_243 */
-  header {
-    flex: 0 0 auto; height: 40px; display: flex; align-items: center; gap: 4px;
-    padding: 0 10px;
-    background: var(--dsw-alias-bg-layer-1);
-    border-bottom: .5px solid var(--dsw-alias-border-l1);
-  }
-  .tab {
-    display: flex; align-items: center;
-    /* _tab_: h28 / pad 0 10 / r12 / 13px / lh 1 —— 实测字面值 */
-    height: 28px; padding: 0 10px; border: 0; border-radius: 12px;
-    font-family: var(--dsw-font-family);
-    font-size: var(--dsh-content-font-size-secondary, 13px);
-    line-height: 1;
-    color: var(--dsw-alias-label-secondary);
-    background: transparent; cursor: pointer;
-    white-space: nowrap; user-select: none;
-  }
-  /* _tab_:hover —— 出处同上 */
-  .tab:hover { background: var(--dsw-alias-interactive-bg-hover); }
-  /* _tabActive_ —— 出处同上 */
-  .tab.active { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-markdown-tag); }
-  /* 「⚙ 设置」入口：与 .tab 同档观感（h28 / r12 / 13px），但**常驻**（不参与"选中"）。
-     它只在壳层 chrome 里，故与 .tab 并列写在 inline <style>（见文件头注释）。 */
-  .gear {
-    display: flex; align-items: center; gap: 4px; margin-left: 4px;
-    height: 28px; padding: 0 10px; border: 0; border-radius: 12px;
-    font-family: var(--dsw-font-family);
-    font-size: var(--dsh-content-font-size-secondary, 13px);
-    line-height: 1;
-    color: var(--dsw-alias-label-secondary);
-    background: transparent; cursor: pointer;
-    white-space: nowrap; user-select: none;
-  }
-  .gear:hover { background: var(--dsw-alias-interactive-bg-hover); }
-  .diag { margin-left: auto; font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); }
-  main { flex: 1 1 auto; position: relative; min-height: 0; }
+  /* 横向骨架：52px 活动栏 + 右侧主区（main 相对定位承载两个 absolute .page） */
+  .w-shell { display: flex; flex-direction: row; height: 100%; min-height: 0; }
+  main#w-main { flex: 1 1 auto; position: relative; min-width: 0; min-height: 0; }
   .page { position: absolute; inset: 0; }
   .page[hidden] { display: none; }
   #dsh-frame { display: block; width: 100%; height: 100%; border: 0; }
@@ -82,15 +45,26 @@
 </style>
 </head>
 <body>
-  <header>
-    <button class="tab active" data-page="dsh">[DSH]</button>
-    <button class="tab" data-page="writing">[写作]</button>
-    <!-- ⑤ 「设置」入口：**壳层级**（标签栏上一颗齿轮）⇒ 从 [DSH] / [写作] 任一页都能开；
-         弹层是 `position: fixed` 的模态，**不占三栏空间**（见下面的 #s-modal）。 -->
-    <button class="gear" id="shell-settings" aria-haspopup="dialog"
-            title="设置：工作区 / 编辑器 / 排版 / 番茄钟 / 外观 / 草稿 / 远程">⚙ 设置</button>
-    <span class="diag" id="diag"></span>
-  </header>
+  <div class="w-shell">
+    <!-- 左侧活动栏（两页共用，故在 page 切换层之外）：模块切换 + 沉底设置。
+         选中态 = 左侧 3px 蓝条 + 蓝色图标（.w-rail-item.is-active，样式在 writing.css 末尾）。 -->
+    <nav class="w-rail" aria-label="模块切换">
+      <button type="button" class="w-rail-item is-active" data-page="dsh" title="DSH 控制台" aria-current="page">
+        <span class="w-rail-glyph" aria-hidden="true">▦</span>
+        <span class="w-rail-dot" id="w-rail-dsh-dot" title="任务中心连接状态"></span>
+      </button>
+      <button type="button" class="w-rail-item" data-page="writing" title="写作" aria-current="false">
+        <span class="w-rail-glyph" aria-hidden="true">✍</span>
+      </button>
+      <span class="w-rail-spacer"></span>
+      <!-- 设置入口沉底：id / aria-haspopup / wireSettings 的 setBtn click 绑定原样保留 -->
+      <button type="button" class="w-rail-item" id="shell-settings" aria-haspopup="dialog"
+              title="设置（工作区 / 编辑器与排版 / 番茄钟 / 发送 / 外观 / 草稿 / 敏感词 / 远程 / 启动与高级）">
+        <span class="w-rail-glyph" aria-hidden="true">⚙</span>
+      </button>
+      <!-- 回环门自检仍写本节点 textContent（内联脚本），故节点必须保留；hidden 承载、不占布局 -->
+      <span id="diag" class="w-rail-diag" hidden></span>
+    </nav>
 
   <main id="w-main">
     <!-- [DSH]：iframe 指向同源 `/app#/`（**控制台 SPA 入口**；内核原生前端在 `/index.html`，
@@ -104,49 +78,82 @@
 
     <!-- [写作]：阶段② v1 —— 左栏文档树 / 中栏 编辑块+预览块 / 右栏占位（阶段④）/ 顶部工具栏 / 底部状态栏 -->
     <section class="page" id="page-writing" hidden>
+      <!-- 文档身份行（只属于写作页；DSH iframe 页有内核自带头部）。
+           左：当前文档名（粗体单行省略）+ 工作区/相对路径副文案；右：连接绿灯（镜像 #w-sync 状态）+ 搜全书。 -->
+      <div class="w-identity">
+        <div class="w-identity-doc">
+          <div class="w-identity-name" id="w-identity-name">未命名</div>
+          <div class="w-identity-path" id="w-identity-path">未选择文档</div>
+        </div>
+        <div class="w-identity-side">
+          <span class="w-identity-dot" id="w-identity-dot" title="任务中心连接状态（镜像底部同步状态）"></span>
+          <button id="w-search-open" type="button" title="搜全书正文：本机工作区 + 云端（PC：Ctrl/Cmd+Shift+F）">🔍 搜全书</button>
+        </div>
+      </div>
       <!-- 顶部工具栏 -->
       <div class="w-toolbar">
-        <!-- ⑥ CR-6 分栏：开关 + 两个「浮层入口」（后两个只在分栏时出现 —— 单页模式下左栏/右栏本来就在）
-             为什么用按钮而不是悬浮图标：工具栏是这一页唯一的常驻操作区，放这里不需要新的布局位置。 -->
-        <button id="w-split" title="对话页与写作页并排显示；中间的分割条可拖动改比例，双击复位 50/50">⇤⇥ 分栏</button>
-        <button id="w-docs" title="作品 / 文档（分栏时收进浮层）" hidden>作品/文档</button>
-        <button id="w-board" title="记录板（分栏时收进浮层）" hidden>记录板</button>
-        <!-- ⚠️ 这里**不要**再加 `.w-sep`：它是 `flex:1 1 auto` 的弹性间隔，工具栏里本来只有
-             「发送段 / 番茄钟」之间那一个；多插一个会把弹性空间平分 ⇒ 单页模式的铺排就变了。 -->
-        <button id="w-save" title="Ctrl/Cmd+S">保存</button>
-        <!-- ⑤ 发送给任务中心（阶段⑤）：把正文整篇内联进消息，向任务中心投一条点名「创作教练」的请求。
-             「发送选中段」无选区时置灰（由 send-net.js 维护）。 -->
-        <button id="w-send-full" title="把当前文档全文内联进消息，发送给任务中心">发送全文</button>
-        <button id="w-send-sel" title="把当前文档选中段内联进消息，发送给任务中心" disabled>发送选中段</button>
-        <!-- C12 「提交给 agent」：客户端区（`客户端区/正文/…`）与 agent 工作区（`写作训练/草稿/…`）
-             已分离 —— 点它才把当前稿**复制**进 `写作训练/草稿/`，agent 才看得见（源保留）。
-             冲突（409）复用既有的 C5 三选（覆盖 / 另存为 / 取消），见 send-net.js 的 submitCurrent()。 -->
-        <button id="w-submit" title="把当前文档提交给 agent：从「客户端区」复制到「写作训练/草稿」，agent 就能看到">提交给 agent</button>
-        <!-- B5 / CR-4①：AI 校对 —— 把正文 + 固定提示词发给「校对助手」会话，结果出在右栏；
-             🔴 只给建议，正文一字不改（点某一条的「应用」才改那一处）。 -->
-        <button id="w-proof" title="把正文发给校对助手，只给建议、不改正文；结果出在右栏">✎ 校对</button>
-        <!-- §3 敏感词扫描：纯本地 AC 自动机，零网络；只定位不替换；结果复用右栏「校对」tab 同区 -->
-        <button id="w-sensitive" title="纯本地扫描当前文档的一般互联网敏感词，不联网、只定位不替换">⚠ 敏感词</button>
-        <!-- §4 全站内容搜索：本机工作区 + 云端 正文/；浮层覆盖写作区（PC：Ctrl/Cmd+Shift+F） -->
-        <button id="w-search-open" title="搜全书正文：本机工作区 + 云端（PC：Ctrl/Cmd+Shift+F）">🔍 搜全书</button>
-        <!-- ③ 编辑工具实体按钮（2026-10-13）：iPad 触屏没有 Tab/Ctrl 键，WKWebView 里 Ctrl+F
-             也被系统吃掉 —— 查找/缩进必须有可点的入口；PC 上它们与快捷键等价共存。 -->
-        <button id="w-find-open" title="查找 / 替换（PC：Ctrl/Cmd+F）">查找</button>
-        <button id="w-indent" title="行首缩进两个全角空格（PC：Tab）">缩进</button>
-        <button id="w-dedent" title="取消行首缩进（PC：Shift+Tab）">取消缩进</button>
-        <span class="w-note" id="w-autosave">✓ 自动保存「开」</span>
+        <!-- ① 视图组：分栏三钮（hidden 显隐逻辑不动）+ 正文/预览分段 -->
+        <div class="w-tgroup w-tgroup-view">
+          <button id="w-split" class="w-btn-ghost" title="对话页与写作页并排显示；中间的分割条可拖动改比例，双击复位 50/50">⇤⇥ 分栏</button>
+          <button id="w-docs" class="w-btn-ghost" title="作品 / 文档（分栏时收进浮层）" hidden>作品/文档</button>
+          <button id="w-board" class="w-btn-ghost" title="记录板（分栏时收进浮层）" hidden>记录板</button>
+          <button id="w-collapse-left" class="w-btn-ghost" title="收起/展开左侧作品栏" aria-pressed="false">◂</button>
+          <button id="w-collapse-right" class="w-btn-ghost" title="收起/展开右侧记录板" aria-pressed="false">▸</button>
+          <div class="w-seg" role="group" aria-label="视图切换">
+            <button type="button" class="w-seg-item is-active" data-view-seg="write" aria-pressed="true">正文</button>
+            <button type="button" class="w-seg-item" data-view-seg="preview" aria-pressed="false">预览</button>
+          </div>
+        </div>
+        <span class="w-vsep" aria-hidden="true"></span>
+        <!-- ② 发送组：发送全文=唯一蓝色主按钮（▾ 选意图，复用 send.intents，不新增通道）；
+             「选中段」次级；「提交给 agent」幽灵。三个 id 与 send-net.js 的绑定一字不动。 -->
+        <div class="w-tgroup w-tgroup-send">
+          <div class="w-split-btn" id="w-send-full" title="把当前文档全文内联进消息，发送给任务中心">
+            <button type="button" class="w-btn-primary w-split-label">发送全文</button>
+            <button type="button" id="w-send-caret" class="w-btn-primary w-split-caret"
+              aria-haspopup="menu" aria-expanded="false" title="选择诉求（意图）后发送">▾</button>
+          </div>
+          <button id="w-send-sel" class="w-btn-secondary" title="把当前文档选中段内联进消息，发送给任务中心" disabled>选中段</button>
+          <button id="w-submit" class="w-btn-ghost" title="把当前文档提交给 agent：从「客户端区」复制到「写作训练/草稿」，agent 就能看到">提交</button>
+        </div>
+        <span class="w-vsep" aria-hidden="true"></span>
+        <!-- ③ AI 辅助组：校对 / 敏感词 / 教练（手动入口：只切到教练面板，不发送） -->
+        <div class="w-tgroup w-tgroup-ai">
+          <button id="w-proof" class="w-btn-secondary" title="把正文发给校对助手，只给建议、不改正文；结果出在右栏">✎ 校对</button>
+          <button id="w-sensitive" class="w-btn-secondary" title="纯本地扫描当前文档的一般互联网敏感词，不联网、只定位不替换">⚠ 敏感词</button>
+          <button id="w-coach-open" class="w-btn-secondary" title="创作教练：查看回程建议；发送全文后自动在此等待">🎯 教练</button>
+        </div>
+        <span class="w-vsep" aria-hidden="true"></span>
+        <!-- ④ 编辑组：低频幽灵钮（窄屏首版靠 flex-wrap 兜底，见 spec §8） -->
+        <div class="w-tgroup w-tgroup-edit">
+          <button id="w-find-open" class="w-btn-ghost" title="查找 / 替换（PC：Ctrl/Cmd+F）">查找</button>
+          <button id="w-indent" class="w-btn-ghost" title="行首缩进两个全角空格（PC：Tab）">缩进</button>
+          <button id="w-dedent" class="w-btn-ghost" title="取消行首缩进（PC：Shift+Tab）">取消缩进</button>
+        </div>
+        <!-- 右常驻：保存降为幽灵状态钮 + autosave 状态签；弹性间隔把它们与番茄胶囊推到右端 -->
         <span class="w-sep"></span>
+        <div class="w-toolbar-right">
+          <button id="w-save" class="w-btn-ghost" title="Ctrl/Cmd+S">保存</button>
+          <span class="w-note" id="w-autosave">✓ 自动保存「开」</span>
+        </div>
+        <!-- 番茄胶囊：🍅 + 倒计时（可点开小菜单）+ 开始/暂停 + 模式；时长在设置「番茄钟」类改 -->
         <div class="w-pomo">
-          <span>🍅</span>
-          <span id="w-pomo-mode">专注</span>
-          <span id="w-pomo-time">25:00</span>
-          <button id="w-pomo-toggle">开始</button>
-          <button id="w-pomo-reset">重置</button>
-          <span class="w-note">专注</span><input id="w-focus-min" type="number" min="1" max="180" value="25" />
-          <span class="w-note">休息</span><input id="w-break-min" type="number" min="1" max="60" value="5" />
+          <span aria-hidden="true">🍅</span>
+          <button type="button" id="w-pomo-time" class="w-pomo-time" title="点这里可重置或去设置改时长">25:00</button>
+          <button id="w-pomo-toggle" class="w-btn-secondary w-btn-sm">开始</button>
+          <span id="w-pomo-mode" class="w-note">专注</span>
+          <button type="button" id="w-pomo-caret" class="w-pomo-caret" aria-haspopup="menu" aria-expanded="false" title="番茄钟选项">⋯</button>
+          <div class="w-pop" id="w-pomo-pop" role="menu" hidden>
+            <button type="button" id="w-pomo-reset" role="menuitem">重置本轮</button>
+            <button type="button" id="w-pomo-settings" role="menuitem">时长设置…</button>
+          </div>
           <span class="w-note" id="w-pomo-note"></span>
         </div>
       </div>
+
+      <!-- 发送全文 ▾ 意图菜单：条目来自设置 send.intents（经 __wcSendBridge.intents()），
+           末尾「其他…」由 JS 恒补；选中后复用 openSend 开窗并预选 #w-send-intent。不新增发送通道。 -->
+      <div class="w-intent-menu" id="w-intent-menu" role="menu" hidden></div>
 
       <!-- 「上次有内容没保存成功」横幅（本轮）—— 🔴 **非阻塞**：就是一个 in-flow 的块，
            不是模态（关窗瞬间弹模态会卡住退出；启动时也不挡任何操作），可「知道了」关掉。
@@ -179,7 +186,6 @@
         <div class="w-banner-actions">
           <!-- ⑪ D-sync-1（b）：先「看远端内容」再决定盖不盖（只读浮层，不碰本地一字） -->
           <button id="w-sync-remote-view" class="w-mini">看远端内容</button>
-          <button id="w-sync-reupload">重新上传到服务器</button>
           <button id="w-sync-take-remote">用远端覆盖本地</button>
           <!-- ⑤ 并发写入 409「另存为」：两边都改过、都不想丢时，把本地这份以带时间戳的新名另存（本地+服务器各一篇新文件），只在 conflict 横幅出现 -->
           <button id="w-sync-save-as">本地这份另存为…</button>
@@ -358,14 +364,19 @@
         <aside class="w-right" id="w-right">
           <div class="w-board" id="w-board-panel">
             <div class="w-board-tabs" role="tablist">
-              <button class="w-board-tab is-active" data-board-tab="notes" role="tab" type="button">笔记</button>
-              <button class="w-board-tab" data-board-tab="todos" role="tab" type="button">待办</button>
-              <button class="w-board-tab" data-board-tab="proof" role="tab" type="button">校对</button>
-              <button class="w-board-tab" data-board-tab="preview" role="tab" type="button">预览</button>
+              <button class="w-board-tab is-active" data-board-tab="notes" role="tab" aria-selected="true" type="button">笔记</button>
+              <button class="w-board-tab" data-board-tab="todos" role="tab" aria-selected="false" type="button">待办</button>
+              <button class="w-board-tab" data-board-tab="proof" role="tab" aria-selected="false" type="button">校对<span class="w-board-badge" id="w-proof-badge" hidden></span></button>
+              <button class="w-board-tab" data-board-tab="preview" role="tab" aria-selected="false" type="button">预览</button>
             </div>
             <div class="w-board-body">
               <!-- tab: 笔记（按文档绑定；无文档时禁用） -->
               <div class="w-board-pane" data-board-pane="notes">
+                <div class="w-note-phrases">
+                  <button type="button" class="w-note-phrase" data-note-phrase="inspire">＋ 灵感</button>
+                  <button type="button" class="w-note-phrase" data-note-phrase="list">□ 清单</button>
+                  <button type="button" class="w-note-phrase" data-note-phrase="outline"># 大纲</button>
+                </div>
                 <textarea class="w-board-notes" id="w-board-notes" placeholder="随手记灵感 / 想法 / 大纲…"></textarea>
               </div>
               <!-- tab: 待办（按文档绑定；无文档时禁用） -->
@@ -377,13 +388,17 @@
               </div>
               <!-- tab: 校对（既有 .w-proof 整体迁入；内部 DOM 不重写） -->
               <div class="w-board-pane" data-board-pane="proof" hidden>
+                <!-- 三态子分段：只调 writing.js 的 coachShowView（sensitiveShowView 保留为兼容薄封装） -->
+                <div class="w-subseg" role="group" aria-label="校对面板视图切换">
+                  <button data-proof-view="coach">🎯 教练</button><button data-proof-view="proof" class="is-active">✎ 校对</button><button data-proof-view="sensitive">⚠ 敏感词</button>
+                </div>
                 <div class="w-proof">
                   <div class="w-proof-head">
                     <span class="w-panel-title">✎ 校对建议</span>
                     <span class="w-note" id="w-proof-count"></span>
+                    <button id="w-proof-cancel" class="w-mini w-head-cancel" hidden>取消等待</button>
                   </div>
                   <div class="w-proof-status" id="w-proof-status"></div>
-                  <div class="w-proof-acts"><button id="w-proof-cancel" class="w-mini" hidden>取消等待</button></div>
                   <div class="w-proof-list" id="w-proof-list"></div>
                   <div class="w-proof-foot">只给建议，不改正文 —— 点某一条的「应用」才改那一处。</div>
                 </div>
@@ -398,6 +413,17 @@
                   <div class="w-proof-status" id="w-sensitive-status"></div>
                   <div class="w-proof-list" id="w-sensitive-list"></div>
                   <div class="w-proof-foot">纯本地扫描 · 不联网 · 只定位不替换 —— 内置词库是通用基础集，不保证覆盖目标平台最新规则。</div>
+                </div>
+                <!-- relay 创作教练回程（方案 C）：与 .w-proof / .w-sensitive 同 pane 三态互斥；只给建议，应用才改正文 -->
+                <div class="w-coach" id="w-coach-panel" hidden>
+                  <div class="w-proof-head">
+                    <span class="w-panel-title">🎯 创作教练</span>
+                    <span class="w-note" id="w-coach-count"></span>
+                    <button id="w-coach-cancel" class="w-mini w-head-cancel" hidden>取消等待</button>
+                  </div>
+                  <div class="w-proof-status" id="w-coach-status"></div>
+                  <div class="w-proof-list" id="w-coach-list"></div>
+                  <div class="w-proof-foot">创作教练只给建议，不改正文 —— 点某一条的「应用」才改那一处。</div>
                 </div>
               </div>
               <!-- tab: AI 文档预览（不绑当前文档，直接读客户端区正文） -->
@@ -520,6 +546,7 @@
          位置由 CSS 变量 `--w-split-pct` 决定（由 writing.js 的 renderSplit 写在 #w-main 上）。 -->
     <div class="w-split-handle" id="w-split-handle" title="拖动调整宽度 · 双击复位 50/50"></div>
   </main>
+  </div><!-- /.w-shell -->
 
   <!-- ⑤ 「设置」弹层（**壳层级**：挂在 body 下、`position: fixed` ⇒ **不占三栏空间**；
        从 [DSH] / [写作] 任一页都能打开）。形态照 §19：Modal 观感（r24 + elevation-prominent）
@@ -530,305 +557,310 @@
           原「预览区」那一组已随单栏改造**下线并隐藏**（见下方注释）。 -->
   <div class="s-modal" id="s-modal" hidden>
     <div class="s-card" role="dialog" aria-modal="true" aria-label="设置">
-      <div class="s-head">
-        <span class="s-title">设置</span>
-        <button id="s-close" class="s-btn">关闭</button>
-      </div>
-      <div class="s-body">
-        <!-- ① 工作区：只读显示 + 「切换…」「新建…」「新建到指定位置…」= 复用既有 IPC 与既有流程 -->
-        <div class="s-group">
-          <div class="s-group-title">工作区</div>
-          <div class="s-row">
-            <span class="s-label">当前路径</span>
-            <span class="s-val" id="s-root">（未选择工作区）</span>
+      <button id="s-close" class="s-x" aria-label="关闭设置">✕</button>
+      <div class="s-columns">
+        <!-- 左导航：9 类单选（蓝底白字高亮）；点击只切面板 hidden，不重新初始化控件 -->
+        <nav class="s-sidenav" aria-label="设置分类">
+          <button type="button" class="s-cat is-active" data-set-cat="workspace">🗀 工作区</button>
+          <button type="button" class="s-cat" data-set-cat="editor">✍ 编辑器与排版</button>
+          <button type="button" class="s-cat" data-set-cat="pomodoro">🍅 番茄钟</button>
+          <button type="button" class="s-cat" data-set-cat="send">📤 发送</button>
+          <button type="button" class="s-cat" data-set-cat="appearance">🎨 外观</button>
+          <button type="button" class="s-cat" data-set-cat="drafts">🗂 草稿</button>
+          <button type="button" class="s-cat" data-set-cat="sensitive">🛡 敏感词</button>
+          <button type="button" class="s-cat" data-set-cat="remote">☁ 远程</button>
+          <button type="button" class="s-cat" data-set-cat="advanced">⚙ 启动与高级</button>
+        </nav>
+        <div class="s-main">
+          <div class="s-cat-head">
+            <span class="s-cat-title" id="s-cat-title">工作区</span>
+            <span class="s-cat-sub" id="s-cat-sub"></span>
           </div>
-          <div class="s-row">
-            <span class="s-label">操作</span>
-            <button id="s-ws-switch" class="s-btn">切换…</button>
-            <button id="s-ws-create" class="s-btn">新建…</button>
-            <button id="s-ws-create-here" class="s-btn">新建到指定位置…</button>
-          </div>
-          <div class="s-row">
-            <span class="s-label">新工作区名</span>
-            <input id="s-ws-name" type="text" class="s-wide" aria-label="新工作区名" />
-          </div>
-          <div class="s-hint">
-            走<b>既有流程</b>：有未保存修改时先弹一次确认并写盘，<b>写盘失败即中止切换</b>；
-            <b>旧工作区的 md 一律不动</b>（只是不再指向它）。对应既有 IPC：
-            <code>wc:pick-root</code> / <code>wc:create-root</code> / <code>wc:pick-dir</code>。
-          </div>
-        </div>
 
-        <!-- ② 编辑器（非排版类） -->
-        <div class="s-group">
-          <div class="s-group-title">编辑器</div>
-          <div class="s-row">
-            <span class="s-label">自动保存去抖</span>
-            <input id="s-debounce" type="number" min="200" max="10000" step="50" aria-label="自动保存去抖（毫秒）" />
-            <span class="s-val">ms（停手这么久后自动落盘）· <b>立即生效</b>，200–10000</span>
-          </div>
-        </div>
-
-        <!-- ③ 排版（中文码字）—— B4 起只有**一组**：
-             写作区 = **纯文本 contentEditable** ⇒ 字号 / 字体族 / 行高 / 字间距 / 行宽 / 配色。
-             （原「预览区」那一组随单栏改造下线并隐藏 —— 中栏不再有"渲染结果"那一栏。） -->
-        <div class="s-group">
-          <div class="s-group-title">排版 · 一键预设</div>
-          <div class="s-row">
-            <span class="s-label">预设</span>
-            <button id="s-typo-default" class="s-btn">默认（= 现状）</button>
-            <button id="s-typo-comfort" class="s-btn">舒适（中文长文）</button>
-            <button id="s-typo-compact" class="s-btn">紧凑（快速核对）</button>
-          </div>
-          <div class="s-hint" id="s-typo-preset-note"></div>
-        </div>
-
-        <div class="s-group">
-          <div class="s-group-title">排版 · 写作区（唯一一栏）
-            <span class="s-val">纯文本 · 字号/字体族/行高/字间距/行宽/配色</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">字号</span>
-            <input id="s-fontsize" type="number" min="0" max="32" aria-label="编辑器字号（像素）" />
-            <span class="s-val">px · <b>立即生效</b>（0 = 跟随 [DSH] 字号轴；10–32，推荐 14–24）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">字体族</span>
-            <select id="s-typo-editor-ff" aria-label="写作区字体族">
-              <option value="kai">楷体（默认 · 中文小说手写感）</option>
-              <option value="serif">衬线（宋体系 · 书感偏"印刷"）</option>
-              <option value="sans">无衬线（雅黑/苹方 · 屏幕最清晰）</option>
-              <option value="mono">等宽（原默认 · 对齐感强，纯写作偏硬）</option>
-              <option value="dsh">跟随 [DSH] 正文字体</option>
-            </select>
-            <span class="s-val">中文优先的字体栈（详见本组脚注）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">行高</span>
-            <input id="s-typo-lineheight" type="number" min="0" max="2.4" step="0.05" aria-label="写作区行高（倍数）" />
-            <button id="s-typo-lh-recommend" class="s-btn">用推荐 1.9</button>
-            <span class="s-val">倍 · 0 = 跟随原 token；1.4–2.4，<b>中文舒服区 1.8–2.0（推荐）</b></span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">字间距</span>
-            <input id="s-typo-letterspacing" type="number" min="0" max="0.1" step="0.01" aria-label="写作区字间距（em）" />
-            <span class="s-val">em · 0 = 不加（默认）；0–0.1，<b>中文建议微松 0.02–0.05</b>（太挤会糊）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">行宽</span>
-            <input id="s-typo-measure" type="number" min="0" max="48" step="1" aria-label="写作区行宽（em）" />
-            <span class="s-val">em（≈ 每行汉字数）· 0 = <b>跟随窗口（不限宽，默认）</b>；20–48（约 25–40 字/行最舒服）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">配色</span>
-            <select id="s-typo-color" aria-label="写作区配色">
-              <option value="default">跟随主题（--dsw-*，默认）</option>
-              <option value="sepia">护眼 · 米白底</option>
-              <option value="green">护眼 · 淡绿底</option>
-            </select>
-            <span class="s-val">写作区 底 / 字 / 光标 / 选区</span>
-          </div>
-          <div class="s-hint">
-            行宽单位用 <b>em</b>（中文全角字 ≈ 1em）而<b>不是</b> <code>ch</code>：<code>ch</code> 是"0"的宽度、
-            等宽字体下只有约 0.6em，直接算会<b>低估每行汉字数</b>（实测见报告）。设了行宽会自动<b>居中</b>。
-            字体栈：楷体 <code>"KaiTi","楷体","Kaiti SC",…,serif</code> · 衬线 <code>"Songti SC","SimSun",…,serif</code> ·
-            无衬线 <code>"Microsoft YaHei","PingFang SC",…,sans-serif</code>。
-          </div>
-        </div>
-
-        <!-- 「排版 · 预览区」整组已**删除**（B4，2026-09-27）：写作区改成单栏纯文本后，中栏不再有
-             "渲染结果"那一栏 ⇒ 这一组设置没有任何作用对象。按本仓既定取向（"每一项都真正生效"），
-             **不留能点但不生效的设置** ⇒ HTML / els 引用 / 变更接线 / 预设里的 preview 一半全部移除。
-             ⚠️ main.js 里 `settings.preview` 的默认值与 clamp **保留不动**（改主进程属于无谓兼容面改动）。 -->
-
-
-        <!-- ③ 番茄钟：与工具栏那两个输入框**是同一份配置**（不造第二份） -->
-        <div class="s-group">
-          <div class="s-group-title">番茄钟<span class="s-val">与工具栏的「专注 / 休息」输入框是同一份配置</span></div>
-          <div class="s-row">
-            <span class="s-label">专注 / 休息</span>
-            <input id="s-focus" type="number" min="1" max="180" aria-label="专注时长（分钟）" />
-            <span class="s-val">/</span>
-            <input id="s-break" type="number" min="1" max="60" aria-label="休息时长（分钟）" />
-            <span class="s-val">分钟 · <b>立即生效</b>（改后倒计时回到专注起点）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">自动开始下一轮</span>
-            <input id="s-autonext" type="checkbox" aria-label="是否自动开始下一轮" />
-            <span class="s-val">关闭后一轮结束即暂停（停在下一轮起点，点「开始」继续）· <b>立即生效</b></span>
-          </div>
-        </div>
-
-        <!-- ④ 外观 -->
-        <div class="s-group">
-          <div class="s-group-title">外观</div>
-          <div class="s-row">
-            <span class="s-label">主题</span>
-            <div class="s-themes">
-              <label class="s-radio"><input type="radio" name="s-theme" value="auto" />跟随 [DSH]</label>
-              <label class="s-radio"><input type="radio" name="s-theme" value="light" />强制亮</label>
-              <label class="s-radio"><input type="radio" name="s-theme" value="dark" />强制暗</label>
+          <!-- ① 工作区 -->
+          <section class="s-panel" data-set-panel="workspace">
+            <div class="s-row">
+              <span class="s-label">当前路径</span>
+              <span class="s-val" id="s-root">（未选择工作区）</span>
             </div>
-          </div>
-          <div class="s-hint">
-            <b>跟随</b> = 镜像 [DSH] iframe 的主题（<code>body[data-ds-dark-theme]</code>，原行为）；
-            <b>强制</b>会<b>覆盖</b>跟随；切回「跟随」立即<b>恢复</b>镜像。立即生效。
-          </div>
-        </div>
+            <div class="s-row">
+              <span class="s-label">操作</span>
+              <button id="s-ws-switch" class="s-btn">切换…</button>
+              <button id="s-ws-create" class="s-btn">新建…</button>
+              <button id="s-ws-create-here" class="s-btn">新建到指定位置…</button>
+            </div>
+            <div class="s-row">
+              <span class="s-label">新工作区名</span>
+              <input id="s-ws-name" type="text" class="s-wide" aria-label="新工作区名" />
+            </div>
+            <div class="s-hint">
+              走<b>既有流程</b>：有未保存修改时先弹一次确认并写盘，<b>写盘失败即中止切换</b>；
+              <b>旧工作区的 md 一律不动</b>（只是不再指向它）。对应既有 IPC：
+              <code>wc:pick-root</code> / <code>wc:create-root</code> / <code>wc:pick-dir</code>。
+            </div>
+          </section>
 
-        <!-- ⑨ 发送：诉求（意图）预设 —— **用户 2026-09-28 要求可自定义**（他在手填「成果」） -->
-        <div class="s-group">
-          <div class="s-group-title">发送</div>
-          <div class="s-row-col">
-            <span class="s-label">诉求预设</span>
-            <textarea id="s-send-intents" rows="4" aria-label="诉求预设（每行一个）"
-              placeholder="每行一个诉求，例如：&#10;成果&#10;结构诊断"></textarea>
-          </div>
-          <div class="s-hint">
-            发送弹窗里那个下拉的选项就来自这里（<b>每行一个</b>，最多 20 条、单条 ≤ 40 字），末尾恒有「其他…」。
-            <br>在发送弹窗里手填后点「<b>＋ 存为常用</b>」也会加进来。<b>留空</b>则下拉只剩「其他…」。
-            <br>⚠️ 这填的是消息里那行「<b>诉求：…</b>」（发给任务中心的提示词），与「排版」组无关。
-          </div>
-        </div>
+          <!-- ② 编辑器与排版（原「编辑器」+「一键预设」+「写作区」三组合一；三个预设钮 id 保留） -->
+          <section class="s-panel" data-set-panel="editor" hidden>
+            <div class="s-row">
+              <span class="s-label">自动保存去抖</span>
+              <input id="s-debounce" type="number" min="200" max="10000" step="50" aria-label="自动保存去抖（毫秒）" />
+              <span class="s-val">ms（停手这么久后自动落盘）· <b>立即生效</b>，200–10000</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">一键预设</span>
+              <button id="s-typo-default" class="s-btn">默认（= 现状）</button>
+              <button id="s-typo-comfort" class="s-btn">舒适（中文长文）</button>
+              <button id="s-typo-compact" class="s-btn">紧凑（快速核对）</button>
+            </div>
+            <div class="s-hint" id="s-typo-preset-note"></div>
+            <div class="s-subtitle">写作区（纯文本 · 字号/字体族/行高/字间距/行宽/配色）</div>
+            <div class="s-row">
+              <span class="s-label">字号</span>
+              <input id="s-fontsize" type="number" min="0" max="32" aria-label="编辑器字号（像素）" />
+              <span class="s-val">px · <b>立即生效</b>（0 = 跟随 [DSH] 字号轴；10–32，推荐 14–24）</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">字体族</span>
+              <select id="s-typo-editor-ff" aria-label="写作区字体族">
+                <option value="kai">楷体（默认 · 中文小说手写感）</option>
+                <option value="serif">衬线（宋体系 · 书感偏"印刷"）</option>
+                <option value="sans">无衬线（雅黑/苹方 · 屏幕最清晰）</option>
+                <option value="mono">等宽（原默认 · 对齐感强，纯写作偏硬）</option>
+                <option value="dsh">跟随 [DSH] 正文字体</option>
+              </select>
+              <span class="s-val">中文优先的字体栈（详见本类脚注）</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">行高</span>
+              <input id="s-typo-lineheight" type="number" min="0" max="2.4" step="0.05" aria-label="写作区行高（倍数）" />
+              <button id="s-typo-lh-recommend" class="s-btn">用推荐 1.9</button>
+              <span class="s-val">倍 · 0 = 跟随原 token；1.4–2.4，<b>中文舒服区 1.8–2.0（推荐）</b></span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">字间距</span>
+              <input id="s-typo-letterspacing" type="number" min="0" max="0.1" step="0.01" aria-label="写作区字间距（em）" />
+              <span class="s-val">em · 0 = 不加（默认）；0–0.1，<b>中文建议微松 0.02–0.05</b>（太挤会糊）</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">行宽</span>
+              <input id="s-typo-measure" type="number" min="0" max="48" step="1" aria-label="写作区行宽（em）" />
+              <span class="s-val">em（≈ 每行汉字数）· 0 = <b>跟随窗口（不限宽，默认）</b>；20–48（约 25–40 字/行最舒服）</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">配色</span>
+              <select id="s-typo-color" aria-label="写作区配色">
+                <option value="default">跟随主题（--dsw-*，默认）</option>
+                <option value="sepia">护眼 · 米白底</option>
+                <option value="green">护眼 · 淡绿底</option>
+              </select>
+              <span class="s-val">写作区 底 / 字 / 光标 / 选区</span>
+            </div>
+            <div class="s-hint">
+              行宽单位用 <b>em</b>（中文全角字 ≈ 1em）而<b>不是</b> <code>ch</code>：<code>ch</code> 是"0"的宽度、
+              等宽字体下只有约 0.6em，直接算会<b>低估每行汉字数</b>。设了行宽会自动<b>居中</b>。
+              字体栈：楷体 <code>"KaiTi","楷体","Kaiti SC",…,serif</code> · 衬线 <code>"Songti SC","SimSun",…,serif</code> ·
+              无衬线 <code>"Microsoft YaHei","PingFang SC",…,sans-serif</code>。
+            </div>
+          </section>
 
-        <!-- ⑤ 草稿 -->
-        <div class="s-group">
-          <div class="s-group-title">草稿</div>
-          <div class="s-row">
-            <span class="s-label">保留上限</span>
-            <input id="s-draft-files" type="number" min="1" max="10000" aria-label="草稿份数上限" />
-            <span class="s-val">份（超出按最旧删除）· 1–10000，<b>下一个草稿写入时生效</b></span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">单份上限</span>
-            <input id="s-draft-bytes" type="number" min="0.001" max="256" step="0.5" aria-label="单份草稿大小上限（MB）" />
-            <span class="s-val">MB（超过则拒写草稿）· 0.001–256，<b>下一个草稿写入时生效</b></span>
-          </div>
-          <!-- 总容量上限：两个维度（份数 / 总字节）任一超标都「按最旧删」⇒ 只削峰，不是更激进的清理 -->
-          <div class="s-row">
-            <span class="s-label">总容量上限</span>
-            <input id="s-draft-total" type="number" min="1" max="4096" step="8" aria-label="草稿目录总容量上限（MB）" />
-            <span class="s-val">MB（超出按最旧删）· 1–4096，<b>下一个草稿写入时生效</b></span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">当前占用</span>
-            <span class="s-val" id="s-drafts-usage">（未知）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">启动时提示</span>
-            <input id="s-notify" type="checkbox" aria-label="启动时是否自动提示" />
-            <span class="s-val">启动时自动提示（可恢复草稿 / 上次保存失败）· <b>下次启动生效</b>（草稿与失败记录照旧落盘）</span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">草稿目录</span>
-            <span class="s-val" id="s-drafts-dir">（未知）</span>
-          </div>
-        </div>
+          <!-- ③ 番茄钟（工具栏时长输入已收纳于此；配置键 state.pomodoro.* 不变） -->
+          <section class="s-panel" data-set-panel="pomodoro" hidden>
+            <div class="s-row">
+              <span class="s-label">专注 / 休息</span>
+              <input id="s-focus" type="number" min="1" max="180" aria-label="专注时长（分钟）" />
+              <span class="s-val">/</span>
+              <input id="s-break" type="number" min="1" max="60" aria-label="休息时长（分钟）" />
+              <span class="s-val">分钟 · <b>立即生效</b>（改后倒计时回到专注起点）</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">自动开始下一轮</span>
+              <input id="s-autonext" type="checkbox" aria-label="是否自动开始下一轮" />
+              <span class="s-val">关闭后一轮结束即暂停（停在下一轮起点，点「开始」继续）· <b>立即生效</b></span>
+            </div>
+            <div class="s-hint">时长只在这里改；工具栏番茄胶囊始终显示倒计时（🍅 分:秒 + 开始/暂停）。</div>
+          </section>
 
-        <!-- ⑥ 远程：**改了必须重启**（反代在启动时绑端口；不在运行期热改） -->
-        <!-- ⑨ C9：入口改「自动（三档顺位 + 降级）/ 手动」，自动模式用 gateway.js 的三条候选 -->
-        <div class="s-group">
-          <div class="s-group-title">远程<span class="s-tag">重启生效</span></div>
-          <div class="s-row">
-            <span class="s-label">入口</span>
-            <select id="s-remote-mode" aria-label="入口模式">
-              <option value="auto">自动（按顺位探测三条线路 + 降级）</option>
-              <option value="manual">手动（只用下面的地址）</option>
-            </select>
-          </div>
-          <div class="s-row">
-            <span class="s-label">网关地址</span>
-            <input id="s-gateway" type="text" class="s-wide" aria-label="网关地址" />
-          </div>
-          <div class="s-row">
-            <span class="s-label">回环端口</span>
-            <input id="s-port" type="number" min="1024" max="65535" aria-label="回环端口" />
-          </div>
-          <!-- ⑩ U-20 #40④：上面两项带「重启生效」⇒ 给一个**一键重启**，不必手动关开窗口。
-               它走主进程的 `app.quit()`（优雅退出 ⇒ 未保存内容先落盘），不是强制杀进程。 -->
-          <div class="s-row">
-            <span class="s-label">立即生效</span>
-            <button id="s-restart" type="button">重启客户端</button>
-            <span class="s-val">改完上面两项点它即可（未保存内容会先落盘）</span>
-          </div>
-          <div class="s-hint" id="s-remote-note">
-            <b>入口 = 自动</b>时按顺位探测三条线路并降级：<b>①</b> Funnel HTTPS（网关登录）·
-            <b>②</b> Funnel mTLS（客户端证书，<b class="s-warn">尚未接上</b>）·
-            <b>③</b> tailnet 直连（最稳，需装 Tailscale）。本机<b>在 tailnet 内</b>时顺位为
-            <b>③→①→②</b>，否则 <b>①→②→③</b>。此时「网关地址」<b>不参与</b>，只给手动模式用。
-            这些在<b>启动时</b>读取（环境变量 <code>WC_GATEWAY</code> / <code>WC_PORT</code> 优先，
-            且 <code>WC_GATEWAY</code> 会<b>跳过探测</b>），反代在启动时绑定端口 ⇒
-            <b class="s-warn">必须重启客户端才生效</b>。
-          </div>
-          <!-- 实况由 writing.js 的 refreshRemoteEffectiveNote() 填（**不覆盖**上面那段静态规则） -->
-          <div class="s-hint" id="s-remote-eff"></div>
-        </div>
+          <!-- ④ 发送 -->
+          <section class="s-panel" data-set-panel="send" hidden>
+            <div class="s-row-col">
+              <span class="s-label">诉求预设</span>
+              <textarea id="s-send-intents" rows="4" aria-label="诉求预设（每行一个）"
+                placeholder="每行一个诉求，例如：&#10;成果&#10;结构诊断"></textarea>
+            </div>
+            <div class="s-hint">
+              发送弹窗里那个下拉的选项就来自这里（<b>每行一个</b>，最多 20 条、单条 ≤ 40 字），末尾恒有「其他…」。
+              <br>在发送弹窗里手填后点「<b>＋ 存为常用</b>」也会加进来。<b>留空</b>则下拉只剩「其他…」。
+              <br>⚠️ 这填的是消息里那行「<b>诉求：…</b>」（发给任务中心的提示词）。
+            </div>
+            <div class="s-row">
+              <span class="s-label">等待教练建议</span>
+              <input id="s-send-wait-result" type="checkbox" aria-label="发送后是否等待创作教练的修改建议" />
+              <span class="s-val">发送「今日成果」等成功后，右栏自动接收<b>创作教练</b>的查找/替换建议，逐条「应用」才改正文。<b>下次启动生效</b></span>
+            </div>
+          </section>
 
-        <!-- ⑥ B5 AI 校对：专用会话 id（会话在 [DSH] 页自己建 ⇒ 客户端不再自动建会话） -->
-        <div class="s-group">
-          <div class="s-group-title">AI 校对</div>
-          <div class="s-row">
-            <span class="s-label">校对会话 id</span>
-            <input id="s-proof-session" type="text" class="s-wide" aria-label="校对会话 id" placeholder="session-…" />
-          </div>
-          <div class="s-hint" id="s-proof-note">
-            校对走一条<b>专用会话</b>（默认 = 本机建的「文章校对」那条）：请在里面把<b>校对约定</b>作为第一条消息发给它。
-            想换会话就在下面填新 id；留空 = 用<b>内置默认</b>；填完<b>下次点「校对」即生效</b>（不用重启）。
-          </div>
-        </div>
+          <!-- ⑤ 外观 -->
+          <section class="s-panel" data-set-panel="appearance" hidden>
+            <div class="s-row">
+              <span class="s-label">主题</span>
+              <div class="s-seg" role="radiogroup" aria-label="主题">
+                <label class="s-seg-item"><input type="radio" name="s-theme" value="auto" />跟随 [DSH]</label>
+                <label class="s-seg-item"><input type="radio" name="s-theme" value="light" />强制亮</label>
+                <label class="s-seg-item"><input type="radio" name="s-theme" value="dark" />强制暗</label>
+              </div>
+            </div>
+            <div class="s-hint">
+              <b>跟随</b> = 镜像 [DSH] iframe 的主题（<code>body[data-ds-dark-theme]</code>，原行为）；
+              <b>强制</b>会<b>覆盖</b>跟随；切回「跟随」立即<b>恢复</b>镜像。立即生效。
+            </div>
+          </section>
 
-        <!-- §3 敏感词扫描（纯本地，零网络；开关/词表落 config.sensitive，归一化见 main.js normalizeSensitive） -->
-        <div class="s-group">
-          <div class="s-group-title">敏感词</div>
-          <div class="s-row">
-            <span class="s-label">分类开关</span>
-            <span class="s-val">
-              <label class="s-check"><input id="s-sensitive-politics" type="checkbox" /> 涉政</label>
-              <label class="s-check"><input id="s-sensitive-violence" type="checkbox" /> 暴恐</label>
-              <label class="s-check"><input id="s-sensitive-porn" type="checkbox" /> 色情</label>
-              <label class="s-check"><input id="s-sensitive-gamble" type="checkbox" /> 赌博</label>
-              <label class="s-check"><input id="s-sensitive-drugs" type="checkbox" /> 毒品</label>
-              <label class="s-check"><input id="s-sensitive-fraud" type="checkbox" /> 诈骗/传销</label>
-              <label class="s-check"><input id="s-sensitive-ads" type="checkbox" /> 广告法极限词</label>
-              <label class="s-check"><input id="s-sensitive-abuse" type="checkbox" /> 辱骂</label>
-              <label class="s-check"><input id="s-sensitive-custom" type="checkbox" /> 自定义词</label>
-            </span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">自定义词</span>
-            <textarea id="s-sensitive-custom-words" class="s-textarea" rows="4" aria-label="自定义敏感词，一行一个" placeholder="一行一个词；启用上方「自定义词」后参与扫描"></textarea>
-          </div>
-          <div class="s-row">
-            <span class="s-label">忽略词</span>
-            <textarea id="s-sensitive-ignore-words" class="s-textarea" rows="4" aria-label="忽略的敏感词，一行一个" placeholder="一行一个词；命中这些词一律不报（可从扫描结果点「忽略此词」自动加入）"></textarea>
-          </div>
-          <div class="s-hint">
-            扫描<b>纯本地运行</b>，不联网、不上传正文，只<b>定位</b>不自动替换。内置词库是<b>通用基础集</b>，
-            不保证覆盖任何平台的最新审核规则，投稿前以<b>目标平台规则</b>为准。
-            广告法极限词、辱骂两类默认<b>关</b>（小说正文误伤高）。改完点「保存设置」生效。
-          </div>
+          <!-- ⑥ 草稿 -->
+          <section class="s-panel" data-set-panel="drafts" hidden>
+            <div class="s-row">
+              <span class="s-label">保留上限</span>
+              <input id="s-draft-files" type="number" min="1" max="10000" aria-label="草稿份数上限" />
+              <span class="s-val">份（超出按最旧删除）· 1–10000，<b>下一个草稿写入时生效</b></span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">单份上限</span>
+              <input id="s-draft-bytes" type="number" min="0.001" max="256" step="0.5" aria-label="单份草稿大小上限（MB）" />
+              <span class="s-val">MB（超过则拒写草稿）· 0.001–256，<b>下一个草稿写入时生效</b></span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">总容量上限</span>
+              <input id="s-draft-total" type="number" min="1" max="4096" step="8" aria-label="草稿目录总容量上限（MB）" />
+              <span class="s-val">MB（超出按最旧删）· 1–4096，<b>下一个草稿写入时生效</b></span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">当前占用</span>
+              <span class="s-val" id="s-drafts-usage">（未知）</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">启动时提示</span>
+              <input id="s-notify" type="checkbox" aria-label="启动时是否自动提示" />
+              <span class="s-val">启动时自动提示（可恢复草稿 / 上次保存失败）· <b>下次启动生效</b></span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">草稿目录</span>
+              <span class="s-val" id="s-drafts-dir">（未知）</span>
+            </div>
+          </section>
+
+          <!-- ⑦ 敏感词 -->
+          <section class="s-panel" data-set-panel="sensitive" hidden>
+            <div class="s-row">
+              <span class="s-label">分类开关</span>
+              <span class="s-val s-checks">
+                <label class="s-check"><input id="s-sensitive-politics" type="checkbox" /> 涉政</label>
+                <label class="s-check"><input id="s-sensitive-violence" type="checkbox" /> 暴恐</label>
+                <label class="s-check"><input id="s-sensitive-porn" type="checkbox" /> 色情</label>
+                <label class="s-check"><input id="s-sensitive-gamble" type="checkbox" /> 赌博</label>
+                <label class="s-check"><input id="s-sensitive-drugs" type="checkbox" /> 毒品</label>
+                <label class="s-check"><input id="s-sensitive-fraud" type="checkbox" /> 诈骗/传销</label>
+                <label class="s-check"><input id="s-sensitive-ads" type="checkbox" /> 广告法极限词</label>
+                <label class="s-check"><input id="s-sensitive-abuse" type="checkbox" /> 辱骂</label>
+                <label class="s-check"><input id="s-sensitive-custom" type="checkbox" /> 自定义词</label>
+              </span>
+            </div>
+            <div class="s-row-col">
+              <span class="s-label">自定义词</span>
+              <textarea id="s-sensitive-custom-words" class="s-textarea" rows="4" aria-label="自定义敏感词，一行一个" placeholder="一行一个词；启用上方「自定义词」后参与扫描"></textarea>
+            </div>
+            <div class="s-row-col">
+              <span class="s-label">忽略词</span>
+              <textarea id="s-sensitive-ignore-words" class="s-textarea" rows="4" aria-label="忽略的敏感词，一行一个" placeholder="一行一个词；命中这些词一律不报（可从扫描结果点「忽略此词」自动加入）"></textarea>
+            </div>
+            <div class="s-hint">
+              扫描<b>纯本地运行</b>，不联网、不上传正文，只<b>定位</b>不自动替换。内置词库是<b>通用基础集</b>，
+              不保证覆盖任何平台的最新审核规则，投稿前以<b>目标平台规则</b>为准。广告法极限词、辱骂两类默认<b>关</b>。
+            </div>
+          </section>
+
+          <!-- ⑧ 远程（重启生效） -->
+          <section class="s-panel" data-set-panel="remote" hidden>
+            <div class="s-row">
+              <span class="s-label">入口</span>
+              <select id="s-remote-mode" aria-label="入口模式">
+                <option value="auto">自动（按顺位探测三条线路 + 降级）</option>
+                <option value="manual">手动（只用下面的地址）</option>
+              </select>
+              <span class="s-tag">重启生效</span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">网关地址</span>
+              <input id="s-gateway" type="text" class="s-wide" aria-label="网关地址" />
+            </div>
+            <div class="s-row">
+              <span class="s-label">回环端口</span>
+              <input id="s-port" type="number" min="1024" max="65535" aria-label="回环端口" />
+            </div>
+            <div class="s-row">
+              <span class="s-label">设备证书</span>
+              <input id="s-cert-path" type="text" class="s-wide" aria-label="设备证书路径" placeholder="&lt;名字&gt;.cert.pem（留空 = 不配置）" />
+              <button id="s-cert-pick" type="button" class="s-btn">选取…</button>
+            </div>
+            <div class="s-row">
+              <span class="s-label">私钥</span>
+              <input id="s-key-path" type="text" class="s-wide" aria-label="私钥路径" placeholder="&lt;名字&gt;.key.pem（留空 = 不配置）" />
+              <button id="s-key-pick" type="button" class="s-btn">选取…</button>
+            </div>
+            <div class="s-row">
+              <span class="s-label">服务器证书</span>
+              <input id="s-ca-path" type="text" class="s-wide" aria-label="服务器证书(CA)路径" placeholder="网关 tls/cert.pem（留空 = 不配置）" />
+              <button id="s-ca-pick" type="button" class="s-btn">选取…</button>
+            </div>
+            <div class="s-row">
+              <span class="s-label">立即生效</span>
+              <button id="s-restart" type="button" class="s-btn">重启客户端</button>
+              <span class="s-val">改完上面两项点它即可（未保存内容会先落盘）</span>
+            </div>
+            <div class="s-hint" id="s-remote-note">
+              <b>入口 = 自动</b>时按顺位探测三条线路并降级：<b>①</b> Funnel HTTPS（网关登录）·
+              <b>②</b> Funnel mTLS（客户端证书）· <b>③</b> tailnet 直连（最稳，需装 Tailscale）。
+              这些在<b>启动时</b>读取（环境变量 <code>WC_GATEWAY</code> / <code>WC_PORT</code> 优先），反代在启动时绑定端口 ⇒
+              <b class="s-warn">必须重启客户端才生效</b>。
+            </div>
+            <div class="s-hint" id="s-remote-eff"></div>
+          </section>
+
+          <!-- ⑨ 启动与高级（启动托盘 + AI 校对小节） -->
+          <section class="s-panel" data-set-panel="advanced" hidden>
+            <div class="s-subtitle">启动与托盘</div>
+            <div class="s-row">
+              <span class="s-label">开机自动启动</span>
+              <input id="s-autostart" type="checkbox" aria-label="是否开机自动启动" />
+              <span class="s-val">登录 Windows 后自动打开本客户端（写入系统登录启动项）· <b>立即生效</b></span>
+            </div>
+            <div class="s-row">
+              <span class="s-label">托盘图标</span>
+              <input id="s-tray" type="checkbox" aria-label="是否显示托盘图标并点关闭时收进托盘" />
+              <span class="s-val">通知区常驻图标，点 ✕ <b>不退出</b>、收进托盘 · <b>立即生效</b></span>
+            </div>
+            <div class="s-hint" id="s-tray-note"></div>
+            <div class="s-hint" id="s-general-note">
+              默认：自启<b>关</b>，托盘<b>开</b>。<b>关</b>掉托盘 = 通知区没有图标，且点 ✕ 直接退出。
+              想<b>彻底退出</b>：托盘右键 →「退出」，或随时按 <code>Ctrl+Q</code>。
+            </div>
+            <div class="s-subtitle">AI 校对</div>
+            <div class="s-row">
+              <span class="s-label">校对会话 id</span>
+              <input id="s-proof-session" type="text" class="s-wide" aria-label="校对会话 id" placeholder="session-…" />
+            </div>
+            <div class="s-hint" id="s-proof-note">
+              校对走一条<b>专用会话</b>（默认 = 本机建的「文章校对」那条）。留空 = 用<b>内置默认</b>；
+              填完<b>下次点「校对」即生效</b>（不用重启）。
+            </div>
+          </section>
         </div>
-        <!-- ⑧ T-10：启动与托盘（默认值见 main.js 的 SETTINGS_DEFAULTS.general；自启默认**关**） -->
-        <div class="s-group">
-          <div class="s-group-title">启动与托盘</div>
-          <div class="s-row">
-            <span class="s-label">开机自动启动</span>
-            <input id="s-autostart" type="checkbox" aria-label="是否开机自动启动" />
-            <span class="s-val">登录 Windows 后自动打开本客户端（写入系统登录启动项）· <b>立即生效</b></span>
-          </div>
-          <div class="s-row">
-            <span class="s-label">托盘图标</span>
-            <input id="s-tray" type="checkbox" aria-label="是否显示托盘图标并点关闭时收进托盘" />
-            <span class="s-val">通知区常驻图标，点 ✕ <b>不退出</b>、收进托盘（左键显示主窗口 / 右键退出）· <b>立即生效</b></span>
-          </div>
-          <!-- 托盘**实况**（不是设置值）：主进程每次建/拆托盘都会回填这里 -->
-          <div class="s-hint" id="s-tray-note"></div>
-          <div class="s-hint" id="s-general-note">
-            默认：自启<b>关</b>（不擅自改开机项），托盘<b>开</b>。
-            <b>关</b>掉托盘 = 通知区没有图标，且点 ✕ 直接退出（两者联动，只开其一会造成「关不掉的窗口」）。
-            想<b>彻底退出</b>：托盘右键 →「退出」，或随时按 <code>Ctrl+Q</code>。
-          </div>
-        </div>
+      </div>
+      <div class="s-foot">
+        <span class="s-foot-note">改动即时写入 config.json</span>
+        <span class="s-foot-actions">
+          <button id="s-restore-preset" type="button" class="s-btn">恢复预设</button>
+          <button id="s-done" type="button" class="s-btn s-btn-primary">完成</button>
+        </span>
       </div>
     </div>
   </div>
@@ -856,16 +888,22 @@
   <script src="/__shell__/send-net.js"></script>
   <!-- B5：校对链路层（HTTP + 轮询 + 右栏渲染 + 应用）；依赖 send.js（信封）与 writing.js（桥）⇒ 最后加载 -->
   <script src="/__shell__/proofread-net.js"></script>
+  <!-- relay 创作教练回程（方案 C）：复用 proofread.js 纯逻辑与 writing.js 的 __wcProofBridge；必须在 proofread.js 之后加载 -->
+  <script src="/__shell__/coach-net.js"></script>
   <!-- C11：同步链路层（clientZoneList / clientZoneRead / clientZoneDelete）；依赖 sync-core.js 与 writing.js（桥）⇒ 最后加载 -->
   <script src="/__shell__/sync-net.js"></script>
   <script>
     // 两页常驻 + display( hidden ) 显隐：不销毁重建 ⇒ iframe 每次切换都保持原状（不重载）
-    const tabs = Array.from(document.querySelectorAll('.tab'))
+    const tabs = Array.from(document.querySelectorAll('.w-rail-item[data-page]'))
     const pages = { dsh: document.getElementById('page-dsh'), writing: document.getElementById('page-writing') }
     // 显隐的**唯一入口**：只有页签高亮 + hidden 两件事，其它任何地方要改都调它或下面的 __wcTabs
     const showPages = (names) => {
       const set = new Set(names)
-      for (const t of tabs) t.classList.toggle('active', set.has(t.dataset.page))
+      for (const t of tabs) {
+        const on = set.has(t.dataset.page)
+        t.classList.toggle('is-active', on)
+        t.setAttribute('aria-current', on ? 'page' : 'false')
+      }
       for (const [name, el] of Object.entries(pages)) el.hidden = !set.has(name)
     }
     /* ⑥ CR-6 分栏：两页要**同时**显示 ⇒ 给 writing.js 一个入口。

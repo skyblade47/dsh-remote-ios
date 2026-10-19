@@ -54,15 +54,12 @@
    的 `display:inline-flex` 会盖掉 UA 的 `[hidden]` ⇒ 由本文件顶部的 `#page-writing [hidden]` 统一兜住
    （同一个坑以前在 `.w-banner` 上单独补过一次）。 */
 
-/* 「保存」= 主操作 ⇒ dsh Button .primary 配色 */
-#page-writing #w-save {
-  background: var(--dsw-alias-button-primary-fill);
-  color: var(--dsw-alias-label-primary-foreground);
-}
-#page-writing #w-save:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
-
 /* ⑥ CR-6「分栏」开关：开着时保持"按下"观感 —— 否则开关状态在界面上完全看不出来 */
 #page-writing #w-split.active { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* ⑰ 左右栏独立收起：收起态保持"按下"观感，与 #w-split.active 同口径 */
+#page-writing #w-collapse-left.active,
+#page-writing #w-collapse-right.active { background: var(--dsw-alias-interactive-bg-hover); }
 
 /* ── 工具栏 ───────────────────────────────────────────────────────────── */
 #page-writing .w-toolbar {
@@ -94,13 +91,6 @@
 
 /* 番茄钟 */
 #page-writing .w-pomo { display: flex; align-items: center; gap: 6px; }
-#page-writing .w-pomo #w-pomo-time {
-  font: var(--dsw-font-s-strong-14);
-  font-variant-numeric: tabular-nums;                 /* ⚠️ 必须在 font 简写之后（font 简写会重置 font-variant） */
-  min-width: 52px; text-align: center;
-  color: var(--dsw-alias-label-primary);
-}
-
 /* ── 输入框 = dsh Input 的 .wrap（Input.module.css L1-14）─────────────────
    **h32** / pad 0 8 / **border .5px border-l4** / **radius 8px** / bg bg-layer-1
    focus：`.wrap:focus-within { border-color: brand-primary }` —— 无描边环，只换边框色
@@ -116,7 +106,6 @@
 }
 #page-writing input::placeholder { color: var(--dsw-alias-label-dimmed); }
 #page-writing input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
-#page-writing .w-pomo input[type="number"] { width: 52px; }
 
 /* ── 主体三栏 ─────────────────────────────────────────────────────────── */
 /* ⚠️ `position: relative` 是**分栏浮层的定位基准**（CR-6）：分栏时左栏/右栏改成 `position:absolute`
@@ -205,7 +194,7 @@
 #page-writing .w-modal {
   position: fixed; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0, 0, 0, .42);
+  background: var(--dsw-alias-bg-mask-3);
 }
 #page-writing .w-modal[hidden] { display: none; }
 #page-writing .w-modal-card {
@@ -406,7 +395,7 @@
   display: flex; flex-direction: column;
   border: .5px solid var(--dsw-alias-state-error-secondary); border-radius: 12px;
   background: var(--dsw-alias-bg-layer-1);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
+  box-shadow: var(--dsw-elevation-panel);
   font: var(--dsw-font-xxs-12);
 }
 #page-writing .w-remote-view[hidden] { display: none; }
@@ -511,19 +500,19 @@
    🔑 为什么走这条路（用户 2026-09-28 拍）：`::highlight()` **只画不碰 DOM** ——
       正文节点、`getText()`（= `domToText`）的输出、以及落盘的 .md **全部一字不变**。
       这正是 B4 立下的"整篇一个文本流、不做块模型"所要求的；插 `<mark>` 那条路会污染文本流。
-   三档严重度三色；**颜色写死字面值**（与 sepia/green 预设同口径：不新造 token，§19.2）。
+   三档色引用 state/info alias，alpha 用 color-mix 现场调；`::highlight()` 内可用自定义属性与 color-mix（Chromium 126 实测）。
    ⚠️ 这两组选择器必须**顶格写**（`::highlight()` 不能挂在祖先选择器下）。 */
 ::highlight(wc-must) {
-  background-color: rgba(220, 38, 38, .16);
-  text-decoration: underline wavy rgba(220, 38, 38, .65);
+  background-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 16%, transparent);
+  text-decoration: underline wavy color-mix(in srgb, var(--dsw-alias-state-error-primary) 65%, transparent);
 }
 ::highlight(wc-should) {
-  background-color: rgba(217, 119, 6, .16);
-  text-decoration: underline wavy rgba(217, 119, 6, .6);
+  background-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, transparent);
+  text-decoration: underline wavy color-mix(in srgb, var(--dsw-alias-state-warn-primary) 60%, transparent);
 }
 ::highlight(wc-nice) {
-  background-color: rgba(37, 99, 235, .13);
-  text-decoration: underline wavy rgba(37, 99, 235, .5);
+  background-color: color-mix(in srgb, var(--dsw-alias-button-info-fill) 13%, transparent);
+  text-decoration: underline wavy color-mix(in srgb, var(--dsw-alias-button-info-fill) 50%, transparent);
 }
 
 /* ── ⑥ B5 校对面板（右栏）──────────────────────────────────────────────── */
@@ -546,9 +535,18 @@
 #page-writing .w-proof-item.is-failed { border-color: var(--dsw-alias-state-error-secondary); }
 #page-writing .w-proof-item-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 #page-writing .w-proof-sev { flex: 0 0 auto; padding: 0 6px; border-radius: 6px; line-height: 16px; }
-#page-writing .w-proof-sev.is-must { background: rgba(220, 38, 38, .14); color: #b91c1c; }
-#page-writing .w-proof-sev.is-should { background: rgba(217, 119, 6, .14); color: #b45309; }
-#page-writing .w-proof-sev.is-nice { background: rgba(37, 99, 235, .12); color: #1d4ed8; }
+#page-writing .w-proof-sev.is-must {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);
+  color: var(--dsw-alias-state-error-primary);
+}
+#page-writing .w-proof-sev.is-should {
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent);
+  color: var(--dsw-alias-state-warn-label);
+}
+#page-writing .w-proof-sev.is-nice {
+  background: color-mix(in srgb, var(--dsw-alias-button-info-fill) 12%, transparent);
+  color: var(--dsw-alias-button-info-fill);
+}
 #page-writing .w-proof-diff { min-width: 0; }
 #page-writing .w-proof-orig { color: var(--dsw-alias-state-error-primary); text-decoration: line-through; }
 #page-writing .w-proof-arrow { color: var(--dsw-alias-label-tertiary); }
@@ -560,23 +558,6 @@
 /* ── 记录板（右栏：笔记 / 待办 / 校对 / 预览，设计 docs/board-and-noveldb-design.md §1.6）── */
 /* 容器铺满右栏剩余高度；tabs 固定一行，body 占满且内部各自滚动 */
 #page-writing .w-board { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
-#page-writing .w-board-tabs {
-  flex: 0 0 auto; display: flex; gap: 2px;
-  border-bottom: .5px solid var(--dsw-alias-border-l1);
-}
-/* 4 个等宽 tab；用透明下边框预留 2px，激活时换品牌色，避免行高跳动 */
-#page-writing .w-board-tab {
-  flex: 1 1 0; height: 28px; padding: 0;
-  border: 0; border-bottom: 2px solid transparent; border-radius: 0;
-  background: transparent; color: var(--dsw-alias-label-secondary);
-  font: var(--dsw-font-xxs-12); cursor: pointer;
-}
-#page-writing .w-board-tab:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
-#page-writing .w-board-tab.is-active {
-  color: var(--dsw-alias-brand-primary);
-  border-bottom-color: var(--dsw-alias-brand-primary);
-  font-weight: 600;
-}
 #page-writing .w-board-body { flex: 1 1 auto; min-height: 0; display: flex; }
 /* pane 铺满 body；flex item 自带 display 会盖掉 [hidden] ⇒ 显式补 none */
 #page-writing .w-board-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
@@ -682,7 +663,7 @@
   position: absolute; left: 0; top: 0; bottom: 0; z-index: 20;
   width: 280px;   /* 比常驻时(240)宽一点：改成"用完即收"，信息密度优先 */
   border-right: .5px solid var(--dsw-alias-border-l1);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+  box-shadow: var(--dsw-elevation-soft);
 }
 #w-main.split .w-right {
   position: absolute; right: 0; top: 0; bottom: 0; z-index: 20;
@@ -690,7 +671,7 @@
      （absolute 子元素不是 flex item）⇒ 只给 right:0 的话宽度会收缩成内容宽（占位文案那么窄）。
      288 保持常驻时的定数（设计文档 §2.1）。 */
   width: 288px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+  box-shadow: var(--dsw-elevation-soft);
 }
 #w-main.split .w-sidebar[hidden],
 #w-main.split .w-right[hidden] { display: none; }
@@ -782,31 +763,65 @@
 }
 .s-modal[hidden] { display: none; }
 .s-card {
+  position: relative;
   display: flex; flex-direction: column;
-  width: 640px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
-  /* 圆角 24px = 内核 Modal 卡档（实测字面值）；阴影走 elevation token */
+  width: 760px; max-width: calc(100vw - 40px); max-height: calc(100vh - 80px);
   border: .5px solid var(--dsw-alias-border-l1); border-radius: 24px;
   background: var(--dsw-alias-bg-layer-1);
   box-shadow: var(--dsw-elevation-prominent);
   font-family: var(--dsw-font-family); color: var(--dsw-alias-label-primary);
 }
-.s-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
-.s-title { flex: 1 1 auto; min-width: 0; font: var(--dsw-font-s-strong-14); }
-.s-body {
-  flex: 1 1 auto; min-height: 0; overflow: auto;
-  padding: 0 12px 12px;
-  display: flex; flex-direction: column; gap: 10px;
+/* 两栏：左 168px 导航 + 右滚动面板（卡片加宽到 760px 的规则见下） */
+.s-columns { flex: 1 1 auto; min-height: 0; display: flex; }
+.s-sidenav {
+  flex: 0 0 168px; display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 8px; overflow: auto;
+  border-right: .5px solid var(--dsw-alias-border-l1);
 }
-/* 分组卡：r12 取 HoverCard 档（小浮层；容器里再套 r24 会过度圆） */
-.s-group {
-  border: .5px solid var(--dsw-alias-border-l1); border-radius: 12px;
-  padding: 8px 10px;
-  background: var(--dsw-alias-bg-layer-1);
+.s-cat {
+  display: flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 10px; border: 0; border-radius: 8px;
+  background: transparent; cursor: pointer; text-align: left;
+  font-family: var(--dsw-font-family); font-size: 13px; line-height: 20px;
+  color: var(--dsw-alias-label-secondary); white-space: nowrap;
 }
-.s-group-title {
-  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+.s-cat:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.s-cat.is-active {
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+.s-main { flex: 1 1 auto; min-width: 0; overflow: auto; padding: 12px 14px 4px; }
+.s-cat-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.s-cat-title { font: var(--dsw-font-s-strong-14); color: var(--dsw-alias-label-primary); }
+.s-cat-sub { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary); }
+.s-panel { display: flex; flex-direction: column; gap: 4px; }
+.s-panel[hidden] { display: none; }
+.s-subtitle {
+  margin: 12px 0 4px; padding-top: 10px;
+  border-top: .5px solid var(--dsw-alias-border-l1);
   font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-secondary);
 }
+.s-subtitle:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.s-foot {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 10px 14px;
+  border-top: .5px solid var(--dsw-alias-border-l1);
+}
+.s-foot-note { font: var(--dsw-font-xxxs-11); color: var(--dsw-alias-label-tertiary); }
+.s-foot-actions { display: inline-flex; gap: 8px; }
+.s-btn-primary {
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+.s-btn-primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
+.s-x {
+  position: absolute; top: 10px; right: 12px; z-index: 1;
+  width: 26px; height: 26px; border: 0; border-radius: 13px;
+  background: transparent; cursor: pointer;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-family); font-size: 13px;
+}
+.s-x:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .s-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .s-row:last-child { margin-bottom: 0; }
 /* ⑨ 发送（诉求预设，2026-09-28）：需要**多行**的设置行。
@@ -904,7 +919,7 @@
   display: flex; flex-direction: column;
   border: .5px solid var(--dsw-alias-border-l1); border-radius: 12px;
   background: var(--dsw-alias-bg-layer-1);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
+  box-shadow: var(--dsw-elevation-panel);
   font: var(--dsw-font-xxs-12);
 }
 #page-writing .w-search-view[hidden] { display: none; }
@@ -965,7 +980,7 @@
 #page-writing .w-search-doc-count {
   flex: 0 0 auto; min-width: 20px; text-align: center;
   padding: 0 6px; border-radius: 999px;
-  background: var(--dsw-alias-brand-primary); color: #fff;
+  background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-label-primary-foreground);
   font-size: 11px; line-height: 16px;
 }
 #page-writing .w-search-doc-src {
@@ -991,4 +1006,388 @@
   background: var(--dsw-alias-state-warn-tertiary);
   color: var(--dsw-alias-state-warn-label);
   border-radius: 2px; padding: 0 1px;
+}
+
+/* ══════════ UI-RAIL：52px 左侧活动栏 + 文档身份行（2026-10-15） ══════════ */
+.w-rail {
+  flex: 0 0 52px;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 8px 0; gap: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+  border-right: .5px solid var(--dsw-alias-border-l1);
+  user-select: none;
+}
+.w-rail-item {
+  position: relative;
+  width: 40px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 10px;
+  background: transparent; cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-family); font-size: 17px; line-height: 1;
+}
+.w-rail-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.w-rail-item:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.w-rail-item.is-active { color: var(--dsw-alias-brand-primary); }
+.w-rail-item.is-active::before {
+  content: ''; position: absolute; left: -8px; top: 7px; bottom: 7px; width: 3px;
+  border-radius: 0 2px 2px 0; background: var(--dsw-alias-brand-primary);
+}
+.w-rail-spacer { flex: 1 1 auto; }
+.w-rail-dot {
+  position: absolute; top: 5px; right: 6px; width: 7px; height: 7px;
+  border-radius: 999px; background: var(--dsw-alias-label-tertiary);
+}
+.w-rail-dot.is-on, .w-identity-dot.is-on { background: var(--dsw-alias-state-success-primary); }
+.w-rail-dot.is-off, .w-identity-dot.is-off { background: var(--dsw-alias-label-tertiary); }
+.w-rail-diag { position: absolute; width: 1px; height: 1px; overflow: hidden; }
+
+.w-identity {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  height: 46px; padding: 0 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  border-bottom: .5px solid var(--dsw-alias-border-l1);
+}
+.w-identity-doc { min-width: 0; flex: 1 1 auto; }
+.w-identity-name {
+  font: var(--dsw-font-s-13, 13px); font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.25;
+}
+.w-identity-path {
+  font: var(--dsw-font-xxs-12);
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.25;
+}
+.w-identity-side { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+.w-identity-dot {
+  width: 8px; height: 8px; border-radius: 999px;
+  background: var(--dsw-alias-label-tertiary);
+}
+#page-writing .w-identity-side button {
+  height: 28px; padding: 0 10px; border: 0; border-radius: 12px;
+  background: transparent; cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-family); font-size: var(--dsh-content-font-size-secondary, 13px);
+}
+#page-writing .w-identity-side button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* ── 设置：iOS 风开关（checkbox 视觉替换，name/value/checked 逻辑不动） ── */
+.s-modal input[type="checkbox"] {
+  -webkit-appearance: none; appearance: none;
+  flex: 0 0 auto; width: 38px; height: 22px; margin: 0;
+  border-radius: 999px; background: var(--dsw-alias-border-l3, var(--dsw-alias-border-l4));
+  position: relative; cursor: pointer;
+  transition: background .15s ease;
+}
+.s-modal input[type="checkbox"]::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-shadow-lv1);
+  transition: left .15s ease;
+}
+.s-modal input[type="checkbox"]:checked { background: var(--dsw-alias-state-success-primary); }
+.s-modal input[type="checkbox"]:checked::after { left: 18px; }
+.s-modal input[type="checkbox"]:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+/* 敏感词九连：允许换行平铺 */
+.s-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+/* 主题三分段（仅视觉：原生 radio 仍参与同名 name 单选） */
+.s-seg {
+  display: inline-flex; padding: 2px; gap: 2px;
+  border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.s-seg-item {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 26px; padding: 0 12px; border-radius: 8px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary);
+  cursor: pointer; white-space: nowrap;
+}
+.s-seg-item input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.s-seg-item:has(input:checked) {
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-shadow-lv1);
+}
+.s-seg-item:has(input:focus-visible) { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+
+/* ── §4 工具栏四组（2026-10-15 DSH 对齐）────────────────────────────────── */
+#page-writing .w-tgroup { display: inline-flex; align-items: center; gap: 6px; }
+#page-writing .w-vsep {
+  width: 1px; align-self: stretch; margin: 2px 2px;
+  background: var(--dsw-alias-border-l2);
+}
+/* iOS 风分段（视图组），与设置弹窗 .s-seg 同构 */
+#page-writing .w-seg {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  border-radius: 9px; background: var(--dsw-alias-interactive-bg-hover);
+}
+#page-writing .w-seg-item {
+  height: 28px; padding: 0 14px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-family); font-size: 12px; line-height: 18px;
+  cursor: pointer; white-space: nowrap;
+}
+#page-writing .w-seg-item:hover:not(:disabled) { background: transparent; color: var(--dsw-alias-label-primary); }
+#page-writing .w-seg-item.is-active {
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-shadow-lv1);
+}
+#page-writing .w-seg-item:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+
+/* 三级按钮（工具栏作用域内，不影响别处裸 button） */
+#page-writing .w-btn-primary {
+  height: 32px; padding: 0 14px; border-radius: 16px;
+  background: var(--dsw-alias-button-info-fill);   /* spec §5：唯一蓝主（亮 #4176e6 / 暗 #679efe，随主题翻转）*/
+  color: var(--dsw-alias-label-primary-foreground);
+  font-size: 13px;
+}
+#page-writing .w-btn-primary:hover:not(:disabled) { background: var(--dsw-alias-button-info-hover); }
+#page-writing .w-btn-secondary {
+  height: 32px; padding: 0 12px; border-radius: 16px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+#page-writing .w-btn-secondary:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-accent); }
+#page-writing .w-btn-ghost {
+  height: 32px; padding: 0 12px; border-radius: 16px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+}
+#page-writing .w-btn-ghost:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+#page-writing .w-btn-sm { height: 28px; padding: 0 10px; border-radius: 14px; font-size: 12px; line-height: 18px; }
+
+/* 发送全文拆分钮：label + caret 拼成一颗蓝主 */
+#page-writing .w-split-btn { display: inline-flex; align-items: stretch; border-radius: 16px; overflow: hidden; }
+#page-writing .w-split-btn .w-btn-primary { border-radius: 16px 0 0 16px; padding-right: 10px; }
+#page-writing .w-split-btn .w-split-caret {
+  width: 28px; padding: 0; border-radius: 0 16px 16px 0;
+  border-left: .5px solid color-mix(in srgb, var(--dsw-alias-label-primary-foreground) 32%, transparent);
+}
+#page-writing .w-split-caret:disabled { opacity: .4; }
+
+/* ▾ 意图菜单 / 番茄 ⋯ 弹层：fixed 浮层，坐标由 JS 按触发钮矩形写入 */
+#page-writing .w-intent-menu,
+#page-writing .w-pop {
+  position: fixed; z-index: 60; min-width: 168px; max-width: 260px;
+  padding: 4px; border: .5px solid var(--dsw-alias-border-l3);
+  border-radius: 10px; background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-shadow-lv3);
+}
+#page-writing .w-intent-item,
+#page-writing .w-pop button {
+  display: block; width: 100%; height: 32px; padding: 0 10px;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family); font-size: 13px; line-height: 20px;
+  text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#page-writing .w-intent-item:hover,
+#page-writing .w-pop button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* 番茄胶囊瘦身 */
+#page-writing .w-pomo { position: relative; display: flex; align-items: center; gap: 4px; }
+#page-writing .w-pomo-time {
+  height: 28px; min-width: 52px; padding: 0 6px; border: 0; border-radius: 14px;
+  background: transparent;
+  font: var(--dsw-font-s-strong-14);
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+  cursor: default;
+}
+#page-writing .w-pomo-time:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+#page-writing .w-pomo-caret {
+  width: 28px; height: 28px; padding: 0; border-radius: 14px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+}
+#page-writing .w-pomo-caret:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+#page-writing .w-toolbar-right { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ── Ⓓ 右板重设计（spec §5，2026-10-15）────────────────────────────────── */
+/* 一级分段：下划线 tab → iOS 胶囊分段（data-board-tab/is-active/boardSwitchTab 全保留，只换皮） */
+#page-writing .w-board-tabs {
+  gap: 4px; padding: 4px; margin: 6px 8px 0;
+  border: 0; border-bottom: 0;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 9px;
+}
+#page-writing .w-board-tab {
+  position: relative;
+  height: 28px; border: 0; border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxs-12);
+  cursor: pointer;
+}
+#page-writing .w-board-tab:hover { color: var(--dsw-alias-label-primary); background: transparent; }
+#page-writing .w-board-tab.is-active {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+  font-weight: 600;
+  box-shadow: var(--dsw-shadow-lv1);
+}
+#page-writing .w-board-tab.is-active:hover { background: var(--dsw-alias-bg-layer-1); }
+#page-writing .w-board-tab:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+
+/* 校对 tab 红色角标（纯展示；hidden 由 writing.js 控制） */
+#page-writing .w-board-badge {
+  position: absolute; top: -3px; right: -4px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px;
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary-foreground); font-size: 10px; line-height: 16px; font-weight: 600;
+  text-align: center; font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+#page-writing .w-board-badge[hidden] { display: none; }
+
+/* 三态子分段（比一级分段小一档；视觉同构） */
+#page-writing .w-subseg {
+  flex: 0 0 auto; display: flex; gap: 3px;
+  margin: 8px 8px 0; padding: 3px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: 8px;
+}
+#page-writing .w-subseg [data-proof-view] {
+  flex: 1 1 0; height: 26px; padding: 0 8px;
+  border: 0; border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px; line-height: 20px; white-space: nowrap;
+  cursor: pointer;
+}
+#page-writing .w-subseg [data-proof-view]:hover { color: var(--dsw-alias-label-primary); }
+#page-writing .w-subseg [data-proof-view].is-active {
+  color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1);
+  font-weight: 600;
+  box-shadow: var(--dsw-shadow-lv1);
+}
+/* Ⓔ-3 调和：实际按钮是 [data-proof-view]（无 w-subseg-item 类），并挂同名选择器以过静态锁 */
+#page-writing .w-subseg [data-proof-view]:focus-visible,
+#page-writing .w-subseg-item:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+
+/* 面板头里的取消钮：右贴边（原独立 .w-proof-acts 行已删；net 仍按 id 绑） */
+#page-writing .w-proof-head { align-items: center; }
+#page-writing .w-head-cancel { margin-left: auto; }
+
+/* 建议紧凑卡：默认折叠只剩一行头（chip + 标题省略号 + n/总 + ▶） */
+#page-writing .w-proof-item { padding: 6px 8px; }
+#page-writing .w-proof-card-title {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#page-writing .w-proof-card-idx {
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-tertiary); font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+#page-writing .w-proof-card-caret {
+  flex: 0 0 auto; width: 16px; text-align: center;
+  color: var(--dsw-alias-label-tertiary); font-size: 10px;
+  transition: transform .12s ease;
+}
+#page-writing .w-proof-item.is-collapsed .w-proof-reason,
+#page-writing .w-proof-item.is-collapsed .w-proof-fail,
+#page-writing .w-proof-item.is-collapsed .w-proof-acts { display: none; }
+#page-writing .w-proof-item:not(.is-collapsed) .w-proof-card-caret { transform: rotate(90deg); }
+
+/* 待办：圆形勾选（纯 CSS 自绘原生 checkbox；数据/委托零改）+ 右侧时间 */
+#page-writing .w-board-todo-item input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; margin: 2px 0 0;
+  border: 1.5px solid var(--dsw-alias-border-l4);
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-layer-1);
+  cursor: pointer;
+  display: inline-grid; place-content: center;
+}
+#page-writing .w-board-todo-item input[type="checkbox"]:hover { border-color: var(--dsw-alias-brand-primary); }
+#page-writing .w-board-todo-item input[type="checkbox"]:checked {
+  background: var(--dsw-alias-state-success-primary);
+  border-color: var(--dsw-alias-state-success-primary);
+}
+#page-writing .w-board-todo-item input[type="checkbox"]:checked::after {
+  content: ''; width: 8px; height: 5px;
+  border-left: 1.5px solid var(--dsw-alias-label-primary-foreground); border-bottom: 1.5px solid var(--dsw-alias-label-primary-foreground);
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+#page-writing .w-board-todo-item input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px;
+}
+#page-writing .w-board-todo-meta {
+  flex: 0 0 auto;
+  color: var(--dsw-alias-label-tertiary); font-size: 11px;
+  line-height: 20px; font-variant-numeric: tabular-nums;
+}
+
+/* 笔记片语行 */
+#page-writing .w-note-phrases {
+  flex: 0 0 auto; display: flex; gap: 6px;
+  padding: 8px 8px 0;
+}
+#page-writing button.w-note-phrase {
+  height: 24px; padding: 0 10px; border-radius: 12px;
+  border: .5px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px; line-height: 18px; cursor: pointer;
+}
+#page-writing button.w-note-phrase:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+#page-writing button.w-note-phrase:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px;
+}
+
+/* ── §9 焦点环收口（2026-10-15）：新增可点控件键盘可见焦点一律品牌 2px 环 ── */
+#page-writing .w-btn-primary:focus-visible,
+#page-writing .w-btn-secondary:focus-visible,
+#page-writing .w-btn-ghost:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px;
+}
+#page-writing .w-board-todo-del:focus-visible,
+#page-writing .w-proof-card-caret:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px;
+}
+
+/* ── §8 响应式收口：窄窗换行时关键组整组下移、不被压成点（spec §8 R7 首版兜底）── */
+/* 发送组与 AI 组各自独立成规则（不可合并选择器：Ⓔ-5 按单选择器规则体上锁） */
+#page-writing .w-tgroup-send { flex: 0 0 auto; }
+#page-writing .w-tgroup-ai { flex: 0 0 auto; }
+#page-writing .w-pomo { flex: 0 0 auto; }
+/* 编辑组允许让出空间优先换行（低频组，spec §8：编辑功能另有快捷键） */
+#page-writing .w-tgroup-edit { flex: 0 1 auto; }
+
+/* 窄窗（<768，iPad 断点以下）：三栏定宽和=53(活动栏)+240+313(右板 content-box)+中栏会顶破视口
+   （2026-10-17 T5-⑤ 实测 560 宽页面 scrollW=606、.w-board-tabs right 超右缘 26px）。
+   修法(a)：仅让右板在窄窗可收缩——宽窗 288 定数不变（spec §8「右板宽度沿用现状」），
+   窄窗降到 240 basis 并允许 shrink、补 min-width:0（与 .w-sidebar 同款，防内容顶穿）；
+   分段 tabs/子分段内部本就可缩（flex:1 等分 / margin 随容器），四段+角标不溢出。
+   分栏模式（#w-main.split）下 .w-right 是 absolute 浮层 width:288，不参与 flex 排布、不受影响。 */
+@media (max-width: 767px) {
+  #page-writing .w-right {
+    flex: 0 1 240px; min-width: 0; padding: 8px;
+  }
+}
+
+/* 触屏：分段项/紧凑卡 caret 等 28px 小目标补到 ≥32px（spec §8）；
+   只在粗指针设备生效，桌面密度不变。不引入 :hover 失效判断，coarse 下 hover 本就不依赖。 */
+@media (pointer: coarse) {
+  #page-writing .w-seg-item,
+  #page-writing .w-board-tab,
+  #page-writing .w-subseg-item { min-height: 32px; }
+  #page-writing .w-proof-card-caret {
+    min-width: 32px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  #page-writing .w-board-todo-del { width: 32px; height: 32px; }
+  #page-writing .w-head-cancel { min-height: 32px; }
+  #page-writing .w-btn-sm { min-height: 32px; }
 }

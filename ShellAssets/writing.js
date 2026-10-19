@@ -69,6 +69,14 @@
     //   pending  —— 横幅上等待用户决策的那一条 `{ relPath, kind, detail }`
     //   seq      —— 递增令牌：切文档后旧请求的结论**必须丢弃**（否则会把 A 的结论画到 B 身上）
     sync: { baseline: null, list: null, last: null, note: '', pending: null, seq: 0, listPending: false, sig: '',
+      // ⑬ 横幅决策前去重：键 syncDismissedKey(rel,kind)，值=决策时该文档的远端版本（'' 表示无版本/删除/硬删）。
+      //   用户对「同一篇、同一结论、远端没再变」点过保留本地等处置后，自动保存/重开不得反复弹；远端版本一变就重弹。
+      dismissed: {},
+      // ⑭ §8 离线待办队列：`{op:'archive'|'restore'|'purge', rel, at}[]`（落 userData/sync/pending-ops.json，主进程只 IO）
+      //   pendingDrain —— 重放在跑保护（联网恢复与同步成功可能并发触发，只许一轮在跑）
+      pendingOps: [], pendingDrain: false,
+      // ⑯ §7 后台自动对齐：alignPending 在跑保护；alignSig 已对齐过的清单签名（清单没变不重扫）
+      alignPending: false, alignSig: '',
       // ⑪ C11 补（2026-09-29 用户报「保存不推线上」）：
       //   pushWanted —— 待推的那一份 `{rel, text}`（自动保存会反复覆盖它，只推最后一份）
       //   pushTimer  —— 去抖/补推定时器（**保证最终一定推**，不会因为节流把最后一段改动丢掉）
@@ -77,11 +85,14 @@
     // ⑥ CR-6 分栏：on = 写作页与对话页并排；ratio = 写作页占的宽度比例（0.2–0.8）；
     //   docs / board = 左栏 / 右栏浮层**当前是否展开**（只在分栏时有意义，是瞬时 UI 态、不落盘）
     split: { on: false, ratio: 0.5, docs: false, board: false },
+    // ⑰ 左右栏独立收起偏好（落盘 ui.collapseLeft/Right；分栏时两栏是浮层，本偏好只管常驻模式）
+    ui: { collapseLeft: false, collapseRight: false },
     // 记录板（设计 docs/board-and-noveldb-design.md §1）：notes/todos 按 relPath 分文档；
     //   seq = 切文档令牌（防过期响应回填）；dirty = {relPath:true} 待推远端；
     //   previewCache = 预览清单缓存 {lastRelPath,lastListAt}；各类 timer 挂这里好清理。
     board: {
       activeTab: 'notes',
+      activeProofView: 'proof', // proof pane 三态子分段当前态（UI 瞬时态，不落盘）
       notes: {},
       todos: {},
       previewCache: {},
@@ -207,7 +218,6 @@
     syncTitle: document.getElementById('w-sync-title'),
     syncNote: document.getElementById('w-sync-note'),
     syncClose: document.getElementById('w-sync-close'),
-    syncReupload: document.getElementById('w-sync-reupload'),
     syncTakeRemote: document.getElementById('w-sync-take-remote'),
     syncKeepLocal: document.getElementById('w-sync-keep-local'),
     syncTrashLocal: document.getElementById('w-sync-trash-local'),
@@ -246,6 +256,11 @@
     split: document.getElementById('w-split'),
     splitDocs: document.getElementById('w-docs'),
     splitBoard: document.getElementById('w-board'),
+    collapseLeft: document.getElementById('w-collapse-left'),
+    collapseRight: document.getElementById('w-collapse-right'),
+    identityName: document.getElementById('w-identity-name'),
+    identityPath: document.getElementById('w-identity-path'),
+    identityDot: document.getElementById('w-identity-dot'),
     sidebar: document.getElementById('w-sidebar'),
     right: document.getElementById('w-right'),
     pomoTime: document.getElementById('w-pomo-time'),
@@ -253,12 +268,20 @@
     pomoToggle: document.getElementById('w-pomo-toggle'),
     pomoReset: document.getElementById('w-pomo-reset'),
     pomoNote: document.getElementById('w-pomo-note'),
-    focusMin: document.getElementById('w-focus-min'),
-    breakMin: document.getElementById('w-break-min'),
+    coachOpen: document.getElementById('w-coach-open'),
+    viewWrite: document.querySelector('[data-view-seg="write"]'),
+    viewPreview: document.querySelector('[data-view-seg="preview"]'),
+    sendCaret: document.getElementById('w-send-caret'),
+    intentMenu: document.getElementById('w-intent-menu'),
+    pomoCaret: document.getElementById('w-pomo-caret'),
+    pomoPop: document.getElementById('w-pomo-pop'),
+    pomoSettings: document.getElementById('w-pomo-settings'),
     // ⑤ 「设置」弹层（壳层级；DOM 在 body 下，不在 #page-writing 里）
     setBtn: document.getElementById('shell-settings'),
     setBox: document.getElementById('s-modal'),
     setClose: document.getElementById('s-close'),
+    setDone: document.getElementById('s-done'),
+    setRestore: document.getElementById('s-restore-preset'),
     setRoot: document.getElementById('s-root'),
     setName: document.getElementById('s-ws-name'),
     setSwitch: document.getElementById('s-ws-switch'),
@@ -288,9 +311,17 @@
     setNotify: document.getElementById('s-notify'),
     setDraftsDir: document.getElementById('s-drafts-dir'),
     setSendIntents: document.getElementById('s-send-intents'), // ⑨ 诉求预设（**可自定义**，2026-09-28）
+    setSendWaitResult: document.getElementById('s-send-wait-result'), // relay 回程（方案 C）：发送后等不等创作教练建议
     setGateway: document.getElementById('s-gateway'),
     setPort: document.getElementById('s-port'),
     setRemoteMode: document.getElementById('s-remote-mode'), // ⑨ C9：入口 自动 / 手动
+    // ④ mTLS 三件套：路径输入 + 各自的「选取…」按钮
+    setCertPath: document.getElementById('s-cert-path'),
+    setKeyPath: document.getElementById('s-key-path'),
+    setCaPath: document.getElementById('s-ca-path'),
+    setCertPick: document.getElementById('s-cert-pick'),
+    setKeyPick: document.getElementById('s-key-pick'),
+    setCaPick: document.getElementById('s-ca-pick'),
     setProofSession: document.getElementById('s-proof-session'),
     setRemoteNote: document.getElementById('s-remote-note'), // 静态规则（不覆盖）
     setRemoteEff: document.getElementById('s-remote-eff'), // ⑨ C9：入口实况（本次生效 + 顺位 + 逐条结果）
@@ -309,6 +340,10 @@
     boardPreviewPicker: document.getElementById('w-board-preview-picker'),
     boardPreviewRefresh: document.getElementById('w-board-preview-refresh'),
     boardPreviewBody: document.getElementById('w-board-preview-body'),
+    proofBadge: document.getElementById('w-proof-badge'),
+    proofCount: document.getElementById('w-proof-count'),
+    proofSubsegItems: document.querySelectorAll('[data-proof-view]'),
+    boardNotePhrases: document.querySelector('.w-note-phrases'),
     // §3 敏感词：工具栏按钮 + 右栏敏感词面板（与 .w-proof 同 pane 互斥）
     sensitiveBtn: document.getElementById('w-sensitive'),
     sensitivePanel: document.getElementById('w-sensitive-panel'),
@@ -316,6 +351,12 @@
     sensitiveChips: document.getElementById('w-sensitive-chips'),
     sensitiveStatus: document.getElementById('w-sensitive-status'),
     sensitiveList: document.getElementById('w-sensitive-list'),
+    // relay 回程（方案 C）：coach 面板五件套（与 .w-proof / .w-sensitive 同 pane 三态）
+    coachPanel: document.getElementById('w-coach-panel'),
+    coachCount: document.getElementById('w-coach-count'),
+    coachStatus: document.getElementById('w-coach-status'),
+    coachList: document.getElementById('w-coach-list'),
+    coachCancel: document.getElementById('w-coach-cancel'),
     setSensitive: {
       politics: document.getElementById('s-sensitive-politics'),
       violence: document.getElementById('s-sensitive-violence'),
@@ -1051,6 +1092,21 @@
         : (state.root ? '（未选择文档）' : '（未选择工作区）')
       els.path.title = state.root ? (state.root + '\\' + (state.current ? state.current.relPath.replace(/\//g, '\\') : '')) : ''
     }
+    renderIdentity()
+  }
+
+  /** 文档身份行：与底部 #w-path 同源（state.current.relPath / state.root），只换两行排版 */
+  function renderIdentity() {
+    var cur = state.current
+    var name = cur ? (cur.name || String(cur.relPath || '').split('/').pop() || '未命名') : '未命名'
+    var sub = cur ? cur.relPath : (state.root ? '未选择文档' : '未选择工作区')
+    if (els.identityName) els.identityName.textContent = name
+    if (els.identityPath) {
+      els.identityPath.textContent = sub
+      els.identityPath.title = state.root
+        ? (state.root + '\\' + (cur ? cur.relPath.replace(/\//g, '\\') : ''))
+        : ''
+    }
   }
 
   // （原 updatePreviewNow / schedulePreview 已随 PREVIEW BLOCK 一起删除 —— B4 起没有预览栏）
@@ -1174,6 +1230,7 @@
     state.view = state.root ? 'works' : 'empty'
     Editor.setValue('')
     proofReset() // B5：换了工作区 ⇒ 校对建议一定失效（内容和会话都换了）
+    coachReset() // relay 回程：换工作区 ⇒ 创作教练等待/建议一并作废
     renderRootLabel()
     renderWsBar()
     renderSidebar()
@@ -1394,6 +1451,7 @@
     state.dirty = false
     state.saveState = 'idle'
     proofReset() // B5：当前文档没了 ⇒ 校对建议立刻作废（否则会指着别的文档改字）
+    coachReset() // relay 回程：当前文档没了 ⇒ 创作教练等待/建议立刻作废
     reportDirty()
     renderSaveState()
     renderStatusBar()
@@ -1493,10 +1551,43 @@
     // 两个浮层入口只在分栏时有意义（单页模式下左栏/右栏本来就在）
     if (els.splitDocs) els.splitDocs.hidden = !on
     if (els.splitBoard) els.splitBoard.hidden = !on
-    // ⚠️ 单页模式下必须**显式恢复常驻**（hidden=false）：否则用户在分栏里开过浮层再退出，
-    //    左栏会一直隐形 —— 这是"浮层态是瞬时 UI 态"的代价，得在这里兜住。
-    if (els.sidebar) els.sidebar.hidden = on ? !state.split.docs : false
-    if (els.right) els.right.hidden = on ? !state.split.board : false
+    // 两栏 hidden 交 renderPanels 统一裁决：退出分栏时回到用户持久化的收起偏好（旧代码强制 false 会冲掉它）
+    renderPanels()
+  }
+
+  /** ⑰ 两栏显隐的**唯一裁决入口**（renderSplit 与收起开关都走它）：
+        · 分栏中 → 两栏是浮层，显隐看 state.split.docs/board 瞬时态，收起钮禁用；
+        · 常驻模式 → 看 state.ui.collapseLeft/Right 持久化偏好；中栏靠 flex:1 自动占满。 */
+  function renderPanels() {
+    var on = !!(state.split && state.split.on)
+    if (els.sidebar) els.sidebar.hidden = on ? !state.split.docs : !!state.ui.collapseLeft
+    if (els.right) els.right.hidden = on ? !state.split.board : !!state.ui.collapseRight
+    if (els.collapseLeft) {
+      els.collapseLeft.disabled = on
+      els.collapseLeft.classList.toggle('active', !!state.ui.collapseLeft)
+      els.collapseLeft.setAttribute('aria-pressed', state.ui.collapseLeft ? 'true' : 'false')
+    }
+    if (els.collapseRight) {
+      els.collapseRight.disabled = on
+      els.collapseRight.classList.toggle('active', !!state.ui.collapseRight)
+      els.collapseRight.setAttribute('aria-pressed', state.ui.collapseRight ? 'true' : 'false')
+    }
+  }
+
+  /** ⑰ 左右栏收起偏好落盘（只写 collapseLeft/Right，不碰 split） */
+  function saveCollapse() {
+    if (!api || !api.saveConfig) return
+    api.saveConfig({
+      ui: { collapseLeft: !!state.ui.collapseLeft, collapseRight: !!state.ui.collapseRight },
+    })
+  }
+
+  /** ⑰ 点收起/展开：翻转偏好 → 重渲染 → 落盘 */
+  function toggleCollapse(which) {
+    if (which === 'left') state.ui.collapseLeft = !state.ui.collapseLeft
+    if (which === 'right') state.ui.collapseRight = !state.ui.collapseRight
+    renderPanels()
+    saveCollapse()
   }
 
   /** 分栏开关与比例**落盘**（只写这两个；`docs`/`board` 是瞬时态，不落盘） */
@@ -1653,6 +1744,7 @@
         return window.WCSyncNet.deleteDraft(d.relPath).then(function (r) {
           if (!r || r.ok !== true) {
             notice('云端归档失败：' + d.name + ' ' + ((r && r.error) || ''), true)
+            syncEnqueueOp('archive', d.relPath) // ⑭ §8：失败/离线入队，启动/联网/同步成功后重放
             return
           }
           res.ok++
@@ -1681,7 +1773,8 @@
           detachCurrent()
         }
         if (!syncReady()) {
-          notice('已把《' + d.name + '》移入本地回收站（远程未就绪，联网后请重新删除以同步云端）')
+          syncEnqueueOp('archive', d.relPath) // ⑭ §8：离线删除入队，联网后自动归档（不再要求用户重新删除）
+          notice('已把《' + d.name + '》移入本地回收站（联网后将自动同步到云端回收站）')
           return afterOp()
         }
         notice('正在把云端《' + d.name + '》移入云端回收站…')
@@ -1714,7 +1807,9 @@
           }
           if (state.currentWork === w.name) { state.currentWork = null; state.view = 'works' }
           if (!syncReady()) {
-            notice('已把作品《' + w.name + '》移入本地回收站（远程未就绪，联网后请重新删除以同步云端）')
+            // ⑭ §8：离线整作品删除 ⇒ 按本地作品树逐件入队（此时作品尚未进本地回收站，w.docs 仍可读）
+            ;(w.docs || []).forEach(function (d) { syncEnqueueOp('archive', d.relPath) })
+            notice('已把作品《' + w.name + '》移入本地回收站（联网后将自动同步到云端回收站）')
             return afterOp()
           }
           if (!cdocs.length) {
@@ -1745,7 +1840,10 @@
     rdocs.forEach(function (d) {
       chain = chain.then(function () {
         return window.WCSyncNet.deleteDraft(d.relPath).then(function (r) {
-          if (!r || !r.ok) { fail++; notice('删除失败：' + d.name + ' ' + ((r && r.error) || ''), true) }
+          if (!r || !r.ok) {
+            fail++; notice('删除失败：' + d.name + ' ' + ((r && r.error) || ''), true)
+            syncEnqueueOp('archive', d.relPath) // ⑭ §8：失败留待联网后重放
+          }
         })
       })
     })
@@ -1810,8 +1908,60 @@
     api.restoreTrash(it.relPath).then(function (res) {
       if (!res || !res.ok) { opFail('恢复', res); return }
       var what = res.kind === 'work' ? ('作品《' + res.work + '》') : ('《' + res.relPath.split('/').pop() + '》')
-      notice('已恢复 ' + what)
-      return refreshTree().then(function () { return loadTrash(true) }).then(function () { renderSidebar() })
+      // 先让本地还原可见，再联动云端（refreshTree 会重建 state.works，作品形态要靠它枚举章节）
+      return refreshTree().then(function () { return loadTrash(true) }).then(function () {
+        renderSidebar()
+        if (!syncReady()) return 0
+        // 云端联动还原**一篇**（spec §5.3）。🔴 rel 一律用正文原 rel，绝不传 `_回收/...`。返回 true=该篇失败。
+        function restoreDoc(rel) {
+          return window.WCSyncNet.restoreDraft(rel).then(function (r) {
+            if (r && r.ok) {
+              state.sync.list = null
+              syncClearDismissed(rel) // ⑬ 云端已还原：旧决策作废
+              return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, r.version, Date.now())).then(function () { return false })
+            }
+            // 云端回收也没有（NO_ARCHIVE/404）⇒ 读本地正文、无 baseVersion 补传
+            if (r && r.noArchive) {
+              return api.readDoc(rel).then(function (rd) {
+                return window.WCSyncNet.saveDraft(rel, rd && rd.content, null).then(function (sv) {
+                  if (sv && sv.ok) {
+                    state.sync.list = null
+                    syncClearDismissed(rel) // ⑬ 补传成功：旧决策作废
+                    return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, sv.version, Date.now())).then(function () { return false })
+                  }
+                  // 补传撞 409（远端已被占）⇒ 绝不覆盖，弹 conflict 交用户（409 不入队）
+                  if (sv && sv.conflict) { syncShowBanner(rel, 'conflict', { remoteVersion: '' }); return false }
+                  syncEnqueueOp('restore', rel) // ⑭ §8：补传失败/离线入队
+                  return true
+                })
+              }).catch(function () {
+                syncEnqueueOp('restore', rel) // ⑭ §8：读本地/补传异常入队
+                return true
+              })
+            }
+            // 原位被占（VERSION_CONFLICT）⇒ 不动本地，弹 conflict 交用户（409 不入队）
+            if (r && r.occupied) { syncShowBanner(rel, 'conflict', { remoteVersion: '' }); return false }
+            syncEnqueueOp('restore', rel) // ⑭ §8：其它失败（网络/5xx）入队
+            return true
+          }).catch(function () {
+            syncEnqueueOp('restore', rel) // ⑭ §8：restoreDraft 异常入队
+            return true
+          })
+        }
+        if (res.kind === 'work') {
+          // 作品：本地还原后 state.works 即真相，枚举该作品全部章节，逐件 restoreDraft（任一失败计数，不阻断其余）
+          var w = null
+          for (var i = 0; i < state.works.length; i++) if (state.works[i].name === res.work) { w = state.works[i]; break }
+          var docs = (w && w.docs) || []
+          return docs.reduce(function (p, d) {
+            return p.then(function (fails) { return restoreDoc(d.relPath).then(function (failed) { return fails + (failed ? 1 : 0) }) })
+          }, Promise.resolve(0))
+        }
+        return restoreDoc(res.relPath).then(function (failed) { return failed ? 1 : 0 })
+      }).then(function (failN) {
+        if (failN) notice(what + '已在本地恢复；但有 ' + failN + ' 篇未能同步回云端（可再打开该篇由自动补传兜底）', true)
+        else notice('已恢复 ' + what)
+      })
     })
   }
 
@@ -1822,9 +1972,43 @@
     api.purgeTrash(it.relPath).then(function (res) {
       if (!res || !res.ok) { opFail('彻底删除', res); return }
       notice('已彻底删除「' + it.name + '」')
-      return loadTrash(true).then(function () { renderSidebar() })
+      // spec §9：本地动作已完成即不回滚；云端清回收+硬删标记失败也不"恢复本地"，只提示
+      return loadTrash(true).then(function () { renderSidebar() }).then(function () {
+        // ⑭ §8：离线硬删——doc 形态 rel 已知，可入队；work 形态离线无法枚举章节，只能等在线时重删
+        if (!syncReady()) {
+          if (it.kind !== 'work') syncEnqueueOp('purge', it.work + '/' + it.name)
+          return 0
+        }
+        // 云端硬删一篇（入参为正文原 rel）并清正文基线。返回 true=失败。
+        function purgeDoc(rel) {
+          return window.WCSyncNet.purgeRecycled(rel).then(function (r) {
+            saveSyncBaseline(SYNC.dropBaseline(state.sync.baseline, rel))
+            if (!(r && r.ok)) syncEnqueueOp('purge', rel) // ⑭ §8：硬删联动失败/离线入队（purged:0 回 ok 不入）
+            return !(r && r.ok)
+          }).catch(function () {
+            saveSyncBaseline(SYNC.dropBaseline(state.sync.baseline, rel))
+            syncEnqueueOp('purge', rel) // ⑭ §8：网络异常入队
+            return true
+          })
+        }
+        if (it.kind === 'work') {
+          // 作品：preload 无枚举回收作品目录之面，故原 rel 清单以云端归档 idx.archived 为准，按「作品名/」前缀逐件 purge
+          var prefix = it.name + '/'
+          return syncRemoteIndex(true).then(function (ix) {
+            var rels = Object.keys((ix && ix.archived) || {}).filter(function (rel) { return rel.indexOf(prefix) === 0 })
+            return rels.reduce(function (p, rel) {
+              return p.then(function (fails) { return purgeDoc(rel).then(function (failed) { return fails + (failed ? 1 : 0) }) })
+            }, Promise.resolve(0))
+          }).catch(function () { return 1 })
+        }
+        return purgeDoc(it.work + '/' + it.name).then(function (failed) { return failed ? 1 : 0 })
+      }).then(function (failN) {
+        state.sync.list = null
+        if (failN) notice('本地已彻底删除；云端清理有 ' + failN + ' 项未完成（不影响本地，可稍后重试）', true)
+      }).catch(function () { state.sync.list = null })
     })
   }
+
 
   // ════════════════════════════════════════════════════════════════════════
   // ③-e 旧路径看门狗（B3 兜底 · 2026-09-27 用户要求）
@@ -2110,6 +2294,7 @@
       state.lastSavedAt = 0
       Editor.setValue(res.content)
       proofReset() // B5：换文档 ⇒ 上一份的建议必须清掉（判据是"文本匹配"，留着会指错地方）
+      coachReset() // relay 回程：换文档 ⇒ 上一份的教练等待/建议必须清掉
       findHide(false) // ③ 换文档 ⇒ 旧文档的查找命中作废（不抢焦点）
       remoteViewHide() // ⑪ D-sync-1：「看远端内容」浮层不跨文档留
       // 分栏下：选中文档后自动收起左栏浮层 —— 否则它正好盖着刚打开的正文（"用完即收"）
@@ -2468,19 +2653,12 @@
     if (!noReset) pomoReset()
   }
 
-  /** 把 state.pomodoro 回填到**工具栏**与**设置弹层**两处输入框（保持两者一致） */
+  /** 把 state.pomodoro 回填到**设置弹层**输入（工具栏时长输入已收纳进设置） */
   function syncPomodoroInputs() {
     var p = state.pomodoro
-    if (els.focusMin) els.focusMin.value = p.focusMin
-    if (els.breakMin) els.breakMin.value = p.breakMin
     if (els.setFocus) els.setFocus.value = p.focusMin
     if (els.setBreak) els.setBreak.value = p.breakMin
     if (els.setAutoNext) els.setAutoNext.checked = p.autoNext !== false
-  }
-
-  function onPomodoroConfigChange() {
-    applyPomodoro(els.focusMin.value, els.breakMin.value)
-    notice('番茄钟已设为 专注 ' + state.pomodoro.focusMin + ' 分 / 休息 ' + state.pomodoro.breakMin + ' 分')
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -2504,6 +2682,7 @@
   function settingsOpen() {
     if (!els.setBox) return
     renderSettings()
+    settingsShowCat(settingsCat)
     els.setBox.hidden = false
     if (els.setClose) els.setClose.focus()
   }
@@ -2514,6 +2693,40 @@
 
   function settingsIsOpen() {
     return !!els.setBox && !els.setBox.hidden
+  }
+
+  var SETTINGS_CATS = [
+    { name: 'workspace', title: '工作区', sub: '当前工作区与切换/新建流程', restore: '' },
+    { name: 'editor', title: '编辑器与排版', sub: '自动保存去抖 + 写作区排版（字号/字体族/行高/字间距/行宽/配色）', restore: 'editor' },
+    { name: 'pomodoro', title: '番茄钟', sub: '专注/休息时长与自动轮次（工具栏胶囊始终显示倒计时）', restore: 'pomodoro' },
+    { name: 'send', title: '发送', sub: '诉求预设与创作教练回程建议', restore: '' },
+    { name: 'appearance', title: '外观', sub: '亮 / 暗 / 跟随 [DSH]', restore: '' },
+    { name: 'drafts', title: '草稿', sub: '份数、单份与总容量上限', restore: '' },
+    { name: 'sensitive', title: '敏感词', sub: '纯本地扫描分类、自定义词与忽略词', restore: '' },
+    { name: 'remote', title: '远程', sub: '入口顺位、网关地址与 mTLS 证书（重启生效）', restore: '' },
+    { name: 'advanced', title: '启动与高级', sub: '开机自启、托盘与 AI 校对会话', restore: '' }
+  ]
+  var settingsCat = 'workspace'
+
+  /** 左导航切类：只翻 .s-panel hidden 与导航高亮，不重新初始化任何控件（监听按 id 常驻） */
+  function settingsShowCat(name) {
+    var hit = null
+    SETTINGS_CATS.forEach(function (c) { if (c.name === name) hit = c })
+    if (!hit) return
+    settingsCat = hit.name
+    var navEls = document.querySelectorAll('.s-sidenav [data-set-cat]')
+    for (var i = 0; i < navEls.length; i++) {
+      navEls[i].classList.toggle('is-active', navEls[i].getAttribute('data-set-cat') === hit.name)
+    }
+    var panEls = document.querySelectorAll('.s-panel[data-set-panel]')
+    for (var j = 0; j < panEls.length; j++) {
+      panEls[j].hidden = panEls[j].getAttribute('data-set-panel') !== hit.name
+    }
+    var ct = document.getElementById('s-cat-title')
+    var cs = document.getElementById('s-cat-sub')
+    if (ct) ct.textContent = hit.title
+    if (cs) cs.textContent = hit.sub
+    if (els.setRestore) els.setRestore.hidden = !hit.restore
   }
 
   /** 把当前配置填进弹层（打开时 / 外部变更后调用） */
@@ -2554,6 +2767,10 @@
       var si = (s.send && s.send.intents) || []
       els.setSendIntents.value = si.join('\n')
     }
+    // relay 回程（方案 C）：只有显式 false 才不勾（旧配置无此键 ⇒ 默认开，与桥 waitResult 判据同口径）
+    if (els.setSendWaitResult) {
+      els.setSendWaitResult.checked = (s.send && s.send.waitResult) !== false
+    }
     if (els.setDraftsDir) {
       els.setDraftsDir.textContent = state.draftsDir || '（未知）'
       els.setDraftsDir.title = state.draftsDir || ''
@@ -2562,6 +2779,10 @@
     if (els.setPort) els.setPort.value = r.port != null ? r.port : 18080
     // ⑨ C9：入口模式（自动 = 按顺位探测 + 降级；手动 = 只用上面的地址）
     if (els.setRemoteMode) els.setRemoteMode.value = r.mode === 'manual' ? 'manual' : 'auto'
+    // ④ mTLS 三件套路径（主进程已 trim；空串 = 未配置）
+    if (els.setCertPath) els.setCertPath.value = r.certPath || ''
+    if (els.setKeyPath) els.setKeyPath.value = r.keyPath || ''
+    if (els.setCaPath) els.setCaPath.value = r.caPath || ''
     // ⑥ B5：校对专用会话 id（主进程已把"配置为空 ⇒ 内置默认"解析好 ⇒ 这里显示的是**生效值**）
     if (els.setProofSession) els.setProofSession.value = state.proofreadSessionId || ''
     // §3 敏感词：9 个分类勾选 + 自定义词/忽略词（数组 ⇄ 每行一个）；值一律以主进程归一化结果为准
@@ -2616,9 +2837,49 @@
         } else {
           parts.push('入口 ' + rp.mode + '（来源 ' + rp.source + '）')
         }
+        // ④ mTLS：证书实况（ready/expired/error 都要让用户看见；none = 没配，不吵）
+        var cert = rp.cert
+        if (cert && cert.status === 'ready') {
+          parts.push('mTLS 证书就绪（' + (cert.source === 'env' ? '环境变量' : '设置') + '：' + (cert.detail || '') + '）')
+        } else if (cert && cert.status === 'expired') {
+          parts.push('⚠ mTLS 证书已过期（' + (cert.detail || '') + '）⇒ ② 握手大概率被拒')
+        } else if (cert && cert.status === 'error') {
+          parts.push('⚠ mTLS 证书不可用 ⇒ ② 跳过：' + (cert.error || ''))
+        }
       }
     }
     els.setRemoteEff.textContent = parts.join('　｜　')
+  }
+
+  // ④ mTLS：手输证书路径 ⇒ 失焦(change)保存（允许清空 = 不配置；只写配置，重启才生效）
+  function bindCertPath(input, field, label) {
+    if (!input) return
+    input.addEventListener('change', function () {
+      var patch = {}
+      patch[field] = input.value
+      saveSettings({ remote: patch }).then(function (res) {
+        if (res && res.ok) notice(label + '已保存 —— 重启客户端后生效')
+      })
+    })
+  }
+
+  // ④ mTLS：「选取…」按钮 ⇒ 主进程弹文件框 ⇒ 写回输入框 + 立即按 change 同口径保存
+  function bindCertPick(btn, kind, input, field) {
+    if (!btn || !input) return
+    btn.addEventListener('click', function () {
+      api.pickCertFile(kind).then(function (res) {
+        if (!res || res.canceled) return
+        if (!res.ok) { notice('选取失败：' + (res.error || ''), true); return }
+        input.value = res.path
+        var patch = {}
+        patch[field] = res.path
+        return saveSettings({ remote: patch }).then(function (r) {
+          if (r && r.ok) notice('证书路径已保存 —— 重启客户端后生效')
+        })
+      }).catch(function (e) {
+        notice('选取证书失败：' + ((e && e.message) || e), true)
+      })
+    })
   }
 
   /** 把配置**真正作用到运行时**（供启动时与每次保存后调用） */
@@ -2829,6 +3090,24 @@
         if (e.target === els.setBox) settingsClose() // 点遮罩关闭（照导入模态）
       })
     }
+    var sidenav = document.querySelector('.s-sidenav')
+    if (sidenav) sidenav.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-set-cat]') : null
+      if (btn) settingsShowCat(btn.getAttribute('data-set-cat'))
+    })
+    if (els.setDone) els.setDone.addEventListener('click', settingsClose)
+    if (els.setRestore) els.setRestore.addEventListener('click', function () {
+      var hit = null
+      SETTINGS_CATS.forEach(function (c) { if (c.name === settingsCat) hit = c })
+      if (!hit || !hit.restore) return
+      if (hit.restore === 'editor') {
+        applyTypoPreset('default')
+        notice('排版已恢复默认预设')
+      } else if (hit.restore === 'pomodoro') {
+        applyPomodoro(25, 5, state.pomodoro.autoNext !== false)
+        notice('番茄钟已恢复 25 / 5')
+      }
+    })
 
     // ① 工作区：复用**既有** IPC 与既有流程（含 flush + confirm）
     if (els.setSwitch) {
@@ -2964,6 +3243,12 @@
         saveSettings({ send: { intents: els.setSendIntents.value } })
       })
     }
+    // relay 回程（方案 C）：勾选态即时落盘；载荷只带 send.waitResult，intents 由主进程从现值补齐
+    if (els.setSendWaitResult) {
+      els.setSendWaitResult.addEventListener('change', function () {
+        saveSettings({ send: { waitResult: !!els.setSendWaitResult.checked } })
+      })
+    }
 
     // ⑧ T-10 启动与托盘：**立即生效**（主进程写盘后会 setLoginItemSettings / 建或拆托盘；
     //   只改一项时另两项由主进程按现值补齐，见 wc:save-config 的 general 分支）
@@ -3015,6 +3300,13 @@
         })
       })
     }
+    // ④ mTLS 三件套：手输路径 change 即存（允许清空）；「选取…」弹框后写回输入框并保存
+    bindCertPath(els.setCertPath, 'certPath', '设备证书路径')
+    bindCertPath(els.setKeyPath, 'keyPath', '私钥路径')
+    bindCertPath(els.setCaPath, 'caPath', '服务器证书路径')
+    bindCertPick(els.setCertPick, 'cert', els.setCertPath, 'certPath')
+    bindCertPick(els.setKeyPick, 'key', els.setKeyPath, 'keyPath')
+    bindCertPick(els.setCaPick, 'ca', els.setCaPath, 'caPath')
     // ⑥ B5 校对会话 id：改完**不用重启**（下一次点「校对」就用新的）；换会话 ⇒ 旧建议作废
     if (els.setProofSession) {
       els.setProofSession.addEventListener('change', function () {
@@ -3085,6 +3377,12 @@
   function syncNotice(text) {
     state.sync.note = text || ''
     if (els.syncState) els.syncState.textContent = state.sync.note
+    if (els.identityDot) {
+      var online = !state.sync.note
+      els.identityDot.classList.toggle('is-on', online)
+      els.identityDot.classList.toggle('is-off', !online)
+      els.identityDot.title = online ? '任务中心在线' : (state.sync.note || '任务中心未连接')
+    }
   }
 
   /** 远端清单（带 TTL 缓存）。🔴 任何失败都回 `known:false` 的索引 —— 调用方按"远端未知"处理 */
@@ -3093,7 +3391,7 @@
     if (!force && state.sync.list && now - state.sync.list.at < SYNC_LIST_TTL_MS) {
       return Promise.resolve(state.sync.list.index)
     }
-    if (!syncReady()) return Promise.resolve(SYNC ? SYNC.indexList(null) : { known: false, byRel: {}, tomb: {} })
+    if (!syncReady()) return Promise.resolve(SYNC ? SYNC.indexList(null) : { known: false, byRel: {}, archived: {}, purged: {}, tomb: {} })
     return window.WCSyncNet.listDrafts().then(function (r) {
       var idx = SYNC.indexList(r && r.ok ? r.data : null)
       state.sync.list = { at: Date.now(), index: idx }
@@ -3102,15 +3400,24 @@
   }
 
   function initSync() {
+    // ⑭ 离线待办即使在同步模块缺失时也要载入（只是不重放），避免内存态与磁盘脱节
+    var loadOps = api.syncPendingOps
+      ? api.syncPendingOps().then(function (r) {
+          state.sync.pendingOps = (r && Array.isArray(r.ops)) ? r.ops : []
+        }).catch(function () { state.sync.pendingOps = [] })
+      : Promise.resolve()
     if (!syncReady()) {
       // 模块缺失**不能**让写作功能受影响：只在状态栏如实说一句
       syncNotice(SYNC ? '未同步（链路未加载）' : '未同步（同步模块未加载）')
-      return Promise.resolve()
+      return loadOps
     }
-    if (!api.syncBaseline) { syncNotice('未同步（接口不可用）'); return Promise.resolve() }
+    if (!api.syncBaseline) { syncNotice('未同步（接口不可用）'); return loadOps }
     return api.syncBaseline().then(function (r) {
       state.sync.baseline = SYNC.normalizeBaseline(r && r.baseline)
       syncNotice('')
+    }).then(function () { return loadOps }).then(function () {
+      // ⑭ §8：启动重放一次（懒拉取，不主动拉正文清单；drain 内部各自按需取数）
+      return syncDrainPendingOps()
     })
   }
 
@@ -3124,10 +3431,119 @@
     })
   }
 
+  // ── ⑭ §8 离线待办队列 ────────────────────────────────────────────────────
+  // 软删/还原/硬删的云端联动失败或离线时入队；启动 / 联网恢复 / 每次同步成功后重放。
+  // 归并规则：同一 rel 只留**最后一条** op（archive 后又 restore ⇒ 只留 restore）。
+
+  /** 入队一条待办并按 rel 归并，然后整体写回主进程（同步改内存；写盘失败只提示，内存仍为准，下次入队再写） */
+  function syncEnqueueOp(op, rel) {
+    if (!rel || (op !== 'archive' && op !== 'restore' && op !== 'purge')) return
+    var ops = state.sync.pendingOps || []
+    for (var i = 0; i < ops.length; i++) {
+      if (ops[i] && ops[i].rel === rel) { ops.splice(i, 1); break } // 同 rel：旧 op 被后 op 顶掉
+    }
+    ops.push({ op: op, rel: rel, at: Date.now() })
+    state.sync.pendingOps = ops
+    if (api.syncPendingOpsSet) {
+      api.syncPendingOpsSet(ops).then(function (r) {
+        if (!r || !r.ok) notice('离线待办写入失败：' + ((r && r.error) || '未知错误'), true)
+      }).catch(function () {})
+    }
+  }
+
+  /** 顺序重放全部待办；成功的出队，失败的留队，**全部成功才整体清空**。未就绪/已在跑则跳过本轮 */
+  function syncDrainPendingOps() {
+    if (!syncReady() || state.sync.pendingDrain) return Promise.resolve()
+    var ops = state.sync.pendingOps || []
+    if (!ops.length) return Promise.resolve()
+
+    /**
+     * 重放**一条**待办（drain 的内嵌闭包）。🔴 幂等（spec §8）：
+     *  · archive 重复 ⇒ 云端回收里多一个时间戳副本，不报错；
+     *  · restore 遇 404 NO_ARCHIVE ⇒ 读本地正文、无 baseVersion 补传，补传成功即完成；
+     *  · purge 认 ok（`purged:0` 也算成功）。
+     * 409（原位占用 / 补传被拒）是**用户决策态**，不当离线失败：弹横幅并视为该 op 终结（出队，不重试）。
+     * 返回 true=成功（出队）；false=仍失败（留队稍后重试）。
+     */
+    function replayOp(item) {
+      var rel = item.rel
+      switch (item.op) {
+        case 'archive':
+          return window.WCSyncNet.deleteDraft(rel).then(function (r) {
+            if (r && r.ok) {
+              state.sync.list = null
+              return saveSyncBaseline(SYNC.dropBaseline(state.sync.baseline, rel)).then(function () { return true })
+            }
+            return false
+          }).catch(function () { return false })
+        case 'restore':
+          return window.WCSyncNet.restoreDraft(rel).then(function (r) {
+            if (r && r.ok) {
+              state.sync.list = null
+              syncClearDismissed(rel)
+              return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, r.version, Date.now())).then(function () { return true })
+            }
+            if (r && r.occupied) { syncShowBanner(rel, 'conflict', { remoteVersion: '' }); return true }
+            if (r && r.noArchive) {
+              // 云端回收已被独立清掉 ⇒ 读本地正文走首推口径补传
+              return api.readDoc(rel).then(function (rd) {
+                return window.WCSyncNet.saveDraft(rel, rd && rd.content, null).then(function (sv) {
+                  if (sv && sv.ok) {
+                    state.sync.list = null
+                    syncClearDismissed(rel)
+                    return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, sv.version, Date.now())).then(function () { return true })
+                  }
+                  if (sv && sv.conflict) { syncShowBanner(rel, 'conflict', { remoteVersion: '' }); return true }
+                  return false
+                })
+              }).catch(function () { return false })
+            }
+            return false
+          }).catch(function () { return false })
+        case 'purge':
+          return window.WCSyncNet.purgeRecycled(rel).then(function (r) {
+            if (r && r.ok) { // purged:0 也回 ok:true ⇒ 幂等成功
+              state.sync.list = null
+              return saveSyncBaseline(SYNC.dropBaseline(state.sync.baseline, rel)).then(function () { return true })
+            }
+            return false
+          }).catch(function () { return false })
+        default:
+          return Promise.resolve(true) // 未知 op（坏数据）⇒ 不当毒药留队
+      }
+    }
+
+    state.sync.pendingDrain = true
+    var kept = []
+    return ops.reduce(function (p, item) {
+      return p.then(function () {
+        return replayOp(item).then(function (done) { if (!done) kept.push(item) })
+      })
+    }, Promise.resolve()).then(function () {
+      state.sync.pendingOps = kept
+      state.sync.pendingDrain = false
+      if (!kept.length && api.syncPendingOpsSet) return api.syncPendingOpsSet([])
+      return null
+    }).catch(function () { state.sync.pendingDrain = false })
+  }
+
   function syncHideBanner() {
     state.sync.pending = null
     if (els.syncBanner) els.syncBanner.hidden = true
     remoteViewHide() // 「看远端内容」浮层跟着横幅一起收
+  }
+
+  /** ⑬ 去重键：同一篇文档 + 同一类结论才算同一个待决策（不同文档/不同结论互不干扰） */
+  function syncDismissedKey(relPath, kind) {
+    return String(relPath) + '\u0000' + String(kind)
+  }
+
+  /** 清掉某篇文档的**全部**已决策记录（远端已变/文档换了内容时，旧结论作废） */
+  function syncClearDismissed(relPath) {
+    var prefix = String(relPath) + '\u0000'
+    Object.keys(state.sync.dismissed).forEach(function (k) {
+      if (k.indexOf(prefix) === 0) delete state.sync.dismissed[k]
+    })
   }
 
   function syncBtn(btn, on) {
@@ -3142,9 +3558,17 @@
    */
   function syncShowBanner(relPath, kind, detail) {
     if (!els.syncBanner) return
+    // ⑬ 同篇 + 同结论 + 远端版本没变 ⇒ 用户已处置过（如点过「保留本地」），不再反复弹
+    var dk = syncDismissedKey(relPath, kind)
+    var prev = state.sync.dismissed[dk]
+    if (prev !== undefined && prev === ((detail && detail.remoteVersion) || '')) return
     state.sync.pending = { relPath: relPath, kind: kind, detail: detail || {} }
     var d = detail || {}
-    if (kind === 'remote-deleted') {
+    if (kind === 'remote-purged') {
+      els.syncTitle.textContent = '《' + relPath + '》在远端已被彻底删除'
+      els.syncNote.textContent = '服务器正文与云端回收都已清空这份（硬删，无法从云端恢复）。' +
+        '🔴 本地这份**不会被自动删，也不会重新上传** —— 保留还是移入本地回收站，由你决定。'
+    } else if (kind === 'remote-deleted') {
       if (d.tomb) {
         els.syncTitle.textContent = '远端已删除《' + relPath + '》'
         els.syncNote.textContent = '服务器上这份已被删除' +
@@ -3152,9 +3576,9 @@
           '。🔴 本地这份**不会被自动删** —— 保留还是清掉，由你决定。'
       } else {
         els.syncTitle.textContent = '服务器上缺这份《' + relPath + '》'
-        els.syncNote.textContent = '上次同步之后，服务器上现在查不到这份，也没在云端回收目录里看到它' +
-          '（常见于服务端改了存储位置、或数据被挪动）。🔴 本地这份**不会被自动删**。' +
-          '选「重新上传到服务器」可把本地这份重新共享给其它客户端。'
+        els.syncNote.textContent = '上次同步之后，服务器正文与云端回收里都查不到这份' +
+          '（常见于服务端改了存储位置、或数据被挪动）。🔴 本地这份**不会被自动删**；' +
+          '下次保存时会自动补传回服务器，也可先「保留本地」稍后再传。'
       }
     } else if (kind === 'remote-newer') {
       els.syncTitle.textContent = '《' + relPath + '》远端有更新'
@@ -3167,14 +3591,13 @@
         '「本地这份另存为…」会把你本地的内容用带时间戳的新名字另存一篇（本地和服务器各多一篇新文件，原来的两边都不动）；' +
         '「保留本地」则不动任何一侧，等你下次保存/发送时再决定。'
     }
-    var canReupload = kind === 'remote-deleted' && !d.tomb
-    syncBtn(els.syncReupload, canReupload)
-    syncBtn(els.syncTakeRemote, kind !== 'remote-deleted')
+    // §10 手动「重新上传」按钮已移除：缺件（有基线、回收无、硬删无）由 decidePush 判 push/reupload 自动补传
+    syncBtn(els.syncTakeRemote, kind !== 'remote-deleted' && kind !== 'remote-purged')
     // ⑤ 「另存为」只给两边都改过的真冲突：remote-newer 本地没动、覆盖即可，没有需要另存的内容
     syncBtn(els.syncSaveAs, kind === 'conflict')
     syncBtn(els.syncKeepLocal, true)
-    syncBtn(els.syncTrashLocal, kind === 'remote-deleted')
-    // ⑪ D-sync-1（b）：远端**有内容可看**的两种横幅才给「看远端内容」（已删除/缺件没得看）
+    syncBtn(els.syncTrashLocal, kind === 'remote-deleted' || kind === 'remote-purged')
+    // ⑪ D-sync-1（b）：远端**有内容可看**的两种横幅才给「看远端内容」（已删除/缺件/硬删没得看）
     syncBtn(els.syncRemoteView, kind === 'remote-newer' || kind === 'conflict')
     els.syncBanner.hidden = false
   }
@@ -3196,6 +3619,7 @@
         remoteVersion: hit ? hit.version : '',
         remoteBytes: hit ? hit.bytes : 0,
         tombstone: tomb,
+        purged: !!idx.purged[relPath],
         baselineVersion: SYNC.baselineVersionOf(state.sync.baseline, relPath),
       })
       state.sync.last = { relPath: relPath, action: r.action, at: Date.now() }
@@ -3203,6 +3627,7 @@
       if (!idx.known) return // 远端未知：只显示状态，**不做任何判断**
       if (r.action === 'in-sync') {
         // 记下共同祖先 —— 下次才能区分"谁动过"（没有它就只能一律判冲突）
+        syncDrainPendingOps() // ⑭ §8：链路已验证可用，顺手重放离线待办
         return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, relPath, r.remoteVersion, Date.now()))
       }
       if (r.action === 'local-only') {
@@ -3214,6 +3639,7 @@
       if (r.action === 'remote-newer') return syncShowBanner(relPath, 'remote-newer', { remoteVersion: r.remoteVersion })
       if (r.action === 'conflict') return syncShowBanner(relPath, 'conflict', { remoteVersion: r.remoteVersion })
       if (r.action === 'remote-deleted') return syncShowBanner(relPath, 'remote-deleted', { tomb: tomb })
+      if (r.action === 'remote-purged') return syncShowBanner(relPath, 'remote-purged', {})
     }).catch(function () { syncNotice('未同步（比对失败）') })
   }
 
@@ -3283,7 +3709,8 @@
         remoteKnown: idx.known === true,
         remoteExists: !!hit,
         remoteVersion: hit ? hit.version : '',
-        remotelyDeleted: !!(idx.tomb[rel] || null),
+        archived: !!idx.archived[rel],
+        purged: !!idx.purged[rel],
       })
       syncNotice(SYNC.pushText(d.action))
       state.sync.last = { relPath: rel, action: d.action, at: Date.now(), dir: 'push' }
@@ -3292,6 +3719,7 @@
         if (seq !== state.sync.seq) return null // 🔴 D-sync-1：结论已过期（刚完成过重新上传等）⇒ 不弹横幅
         if (d.action === 'remote-newer') syncShowBanner(rel, 'remote-newer', { remoteVersion: hit ? hit.version : '' })
         else if (d.action === 'remote-deleted') syncShowBanner(rel, 'remote-deleted', { tomb: idx.tomb[rel] || null })
+        else if (d.action === 'remote-purged') syncShowBanner(rel, 'remote-purged', {})
         else if (d.action === 'conflict') syncShowBanner(rel, 'conflict', { remoteVersion: hit ? hit.version : '' })
         return null
       }
@@ -3299,8 +3727,10 @@
         if (r && r.ok) {
           state.sync.lastPushAt = Date.now()
           state.sync.list = null // 远端内容变了 ⇒ 清单缓存作废
+          syncClearDismissed(rel) // ⑬ 成功上行：旧决策作废
           syncNotice('已同步')
           notice('已同步到服务器：' + rel)
+          syncDrainPendingOps() // ⑭ §8：每次同步成功后重放离线待办（在跑保护防并发）
           return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, r.version, Date.now()))
         }
         if (r && r.conflict) {
@@ -3331,70 +3761,12 @@
       state.lastSavedAt = res.mtime || Date.now()
       Editor.setValue(res.content)
       proofReset()
+      coachReset()
       renderSidebar()
       renderSaveState()
       renderStatusBar()
       // 记录板（§1.5-4）：远端覆盖本地后同样重新装载该文档的笔记/待办
       boardLoadFor(relPath)
-    })
-  }
-
-  /**
-   * 「重新上传到服务器」：服务器缺这份、又没有删除墓碑时，把本地内容以 force 强覆盖写回，
-   * 成功后更新基线、作废清单缓存。本地内容只读不改。
-   *
-   * 🔴 D-sync-1 修复（2026-10-12 真机首报，2026-10-13 修）：旧版在这里 `api.readDoc(rel)` 读
-   *    **正式盘快照**强推 —— 编辑器里还没落盘的新输入（自动保存去抖未触发 / 保存中又在输入）
-   *    会被旧稿盖掉 ⇒ **云端变成更旧的版本**。修复后，横幅针对的正是当前打开的文档时：
-   *    ① 先 `flush(force)` 把编辑器内容落盘；② 推 **编辑器当前稿**（flush 期间又有输入 ⇒
-   *    那份才是最新的）；③ 推送期间编辑器又变了 ⇒ 补一次 flush 让盘追上。
-   *    横幅针对的不是当前文档（开着横幅又切了篇）⇒ 该篇没有编辑缓冲，读盘即最新，走旧路径。
-   */
-  function syncReupload() {
-    var p = state.sync.pending
-    if (!p || !p.relPath || !syncReady()) return
-    var rel = p.relPath
-    if (p.kind === 'remote-deleted' && p.detail && p.detail.tomb) return
-    syncNotice('重新上传中…')
-    var isCurrent = !!(state.current && state.current.relPath === rel)
-    var step = isCurrent ? flush({ force: true, reason: 'reupload' }) : Promise.resolve({ ok: true })
-    Promise.resolve(step).then(function (fl) {
-      if (isCurrent && fl && fl.ok === false) {
-        notice('上传已中止：本地这份保存失败（' + (fl.error || '未知错误') + '）—— 未推送', true)
-        return null
-      }
-      var read = isCurrent
-        ? Promise.resolve({ ok: true, content: Editor.getText() })
-        : api.readDoc(rel)
-      return read.then(function (rd) {
-        if (!rd || !rd.ok) {
-          notice('上传已中止：读不到本地这份（' + ((rd && rd.error) || '未知错误') + '）', true)
-          return null
-        }
-        return window.WCSyncNet.saveDraft(rel, rd.content, { force: true }).then(function (r) {
-          if (r && r.ok) {
-            state.sync.lastPushAt = Date.now()
-            state.sync.list = null
-            state.sync.seq++ // 让重传期间并发的比对/推送结论**过期**（见 syncPush 的闸）
-            syncHideBanner()
-            syncNotice('已重新上传：' + rel)
-            notice('已重新上传到服务器：' + rel)
-            // 推送期间编辑器又有新输入 ⇒ 补一次落盘（盘追上编辑器；下一拍自动保存也会兜）
-            if (isCurrent && Editor.getText() !== rd.content) flush({ reason: 'reupload-after' })
-            return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, r.version, Date.now()))
-          }
-          if (r && r.conflict) {
-            syncNotice('上传被拒（远端版本冲突）—— 请改用其它处理')
-            notice('服务器仍报版本冲突，未覆盖（' + ((r && r.error) || '409') + '）', true)
-            return null
-          }
-          syncNotice('未上传（' + ((r && r.error) || '失败') + '）—— 本地内容未动')
-          notice('重新上传失败：' + ((r && r.error) || '未知错误') + '（本地内容未动）', true)
-          return null
-        })
-      })
-    }).catch(function (e) {
-      notice('重新上传失败：' + ((e && e.message) || String(e)) + '（本地内容未动）', true)
     })
   }
 
@@ -3456,6 +3828,7 @@
           .then(function () { return syncReloadDoc(rel) })
           .then(function () {
             state.sync.list = null // 远端已变 ⇒ 缓存作废
+            syncClearDismissed(rel) // ⑬ 已用远端覆盖：旧决策作废
             syncNotice('已用远端版本覆盖本地（旧内容在回收站）')
             notice('已用远端版本覆盖本地（旧内容在回收站）')
           })
@@ -3468,6 +3841,8 @@
   /** 「保留本地」：什么都不做 —— 只关横幅，并把状态说清（改动会在下次保存/发送时走三选） */
   function syncKeepLocal() {
     var p = state.sync.pending
+    // ⑬ 记住「这一篇 + 这个结论 + 这个远端版本」已决策：自动保存/重开不再反复弹；远端版本一变仍会重弹
+    if (p && p.relPath) state.sync.dismissed[syncDismissedKey(p.relPath, p.kind)] = (p.detail && p.detail.remoteVersion) || ''
     syncHideBanner()
     syncNotice('保留本地（远端那份没动）')
     notice(p ? '已保留本地版本；远端那份保持不变（下次保存/发送时再处理冲突）' : '已保留本地版本')
@@ -3483,6 +3858,7 @@
     syncHideBanner()
     doTrashDoc(work, { name: name, relPath: p.relPath })
     saveSyncBaseline(SYNC.dropBaseline(state.sync.baseline, p.relPath))
+    syncClearDismissed(p.relPath) // ⑬ 本地已移入回收站：旧决策作废
     syncNotice('已把本地这份移入回收站')
   }
 
@@ -3526,7 +3902,7 @@
 
   /**
    * ⑤ 冲突横幅「本地这份另存为…」：
-   *   ① 冲突稿是当前打开文档 ⇒ 先 flush 落盘（与 syncReupload 同一 D-sync-1 口径，不丢未保存输入）；
+   *   ① 冲突稿是当前打开文档 ⇒ 先 flush 落盘（与自动补传同一 D-sync-1 口径，不丢未保存输入）；
    *   ② 先写本地新文件，再无 baseVersion 推服务器（全新文件，正常不会 409；若 409 ⇒ 不 force，交回用户）；
    *   ③ 成功后记基线、作废清单、刷新侧栏并打开新文档；原文档两边一律不动。
    * 🔴 fail-closed：本地写失败就中止；服务器没上去也**不删本地新文件**（打开新文档会走 local-only 自动补传）。
@@ -3589,6 +3965,7 @@
                 state.sync.list = null
                 state.sync.seq++ // 旧文档那条冲突结论作废（用户已选择另存出口）
                 syncHideBanner()
+                syncClearDismissed(rel) // ⑬ 原文档已走另存出口：旧决策作废
                 syncNotice('已另存为：' + altRel)
                 notice('本地这份已另存为《' + altName + '》并上传到服务器；原来的两边都没动')
                 return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, altRel, r.version, Date.now()))
@@ -3626,7 +4003,7 @@
 
   /** 远端清单索引（没拉到 ⇒ `known:false`） */
   function syncIndex() {
-    return (state.sync.list && state.sync.list.index) || { known: false, byRel: {}, tomb: {} }
+    return (state.sync.list && state.sync.list.index) || { known: false, byRel: {}, archived: {}, purged: {}, tomb: {} }
   }
 
   /**
@@ -3730,6 +4107,7 @@
   /**
    * 侧栏渲染时顺带把远端清单拉一次（**懒拉取**：设计 §5.1 的"打开作品拉清单"）。
    * 🔴 只在**清单签名变了**时才重画 ⇒ 否则 `renderSidebar → 拉 → 重画` 会自己转圈。
+   * ⑯ §7：拿到清单后顺跑一次后台三态自动对齐（静默，不弹横幅、不阻断编辑）。
    */
   function syncEnsureListForSidebar() {
     if (!syncReady() || state.sync.listPending) return
@@ -3738,15 +4116,139 @@
       state.sync.listPending = false
       if (!idx || !idx.known) return
       var sig = Object.keys(idx.byRel).sort().join('|')
-      if (sig === state.sync.sig) return
-      state.sync.sig = sig
-      renderSidebar()
+      if (sig !== state.sync.sig) {
+        state.sync.sig = sig
+        renderSidebar()
+      }
+      syncAutoAlign(idx)
     }).catch(function () { state.sync.listPending = false })
+  }
+
+  // ── ⑯ §7 多端后台自动对齐（软删 / 还原 / 硬删三态，静默、无轮询、不阻断编辑）────────
+  //
+  // 触发：只挂在侧栏懒拉清单这一条链上（syncEnsureListForSidebar），**不做任何定时轮询**。
+  // 一切联动只看「正文在不在、回收有没有同原路径件」（spec §6），不认时间戳：
+  //   · 软删对齐：云端正文无 + archived 有 + 本地正文在 ⇒ 静默把本地这份移入本机回收（可恢复），清基线。
+  //     云端已经是删的（archived 即云端回收件），本地只对齐文件，**绝不重复发云端删除**。
+  //   · 还原对齐：云端正文有 + 本地正文无 ⇒ 本机回收有同原路径件就本地还原；
+  //     本机回收也没有 ⇒ 当云端新件静默拉回（readDraft→writeDoc→记基线）。
+  //   · 硬删对齐：purged 有 ⇒ 本地回收保留不动（云端无权删本地回收）、不重传、不拉；
+  //     本地正文还在的情形由打开文档时的 remote-purged 中性横幅兜底，这里一律跳过。
+  // 保护：正在编辑的那一篇（state.current）绝不在后台移动/覆盖；清单签名没变不重扫。
+  function syncAutoAlign(idx) {
+    if (!idx || idx.known !== true || !syncReady()) return
+    if (state.sync.alignPending) return
+    // 签名同时纳入 archived / purged，回收状态变化也要重扫
+    var sig = Object.keys(idx.byRel).sort().join('|') +
+      '#A#' + Object.keys(idx.archived).sort().join('|') +
+      '#P#' + Object.keys(idx.purged).sort().join('|')
+    if (sig === state.sync.alignSig) return
+    state.sync.alignPending = true
+
+    // 本地正文：rel(work/doc.md) → {work, name}
+    var localDocs = {}
+    ;(state.works || []).forEach(function (w) {
+      ;(w.docs || []).forEach(function (d) {
+        if (d && d.relPath) localDocs[d.relPath] = { work: w.name, name: d.name || d.relPath.split('/').pop() }
+      })
+    })
+
+    var openRel = state.current ? state.current.relPath : ''
+    var changed = false
+    var chain = Promise.resolve()
+
+    function refreshOnce() {
+      if (!changed) return Promise.resolve()
+      changed = false
+      state.sync.list = null
+      return refreshTree().then(function () { return loadTrash(true) }).then(function () { renderSidebar() })
+    }
+
+    // ① 软删对齐：遍历云端回收归组（archived 键=去戳后的正文原 rel）
+    Object.keys(idx.archived).forEach(function (rel) {
+      if (idx.purged[rel]) return                 // 硬删优先：purge 信号在，交给中性横幅口径
+      if (idx.byRel[rel]) return                  // 云端正文已回到原位 ⇒ 不是删除（残留回收件，decide 已处理）
+      if (!localDocs[rel]) return                 // 本地正文本就不在 ⇒ 两边一致，无需动作
+      if (rel === openRel) return                 // 正在编辑：绝不在后台移走未保存内容
+      var work = localDocs[rel].work
+      var name = localDocs[rel].name
+      chain = chain.then(function () {
+        return api.trashDoc(work, name).then(function (res) {
+          if (!res || !res.ok) return
+          changed = true
+          syncClearDismissed(rel)
+          return saveSyncBaseline(SYNC.dropBaseline(state.sync.baseline, rel))
+        }).catch(function () { /* 静默：失败就等下一轮清单刷新再对齐 */ })
+      })
+    })
+
+    // ② 还原对齐：云端正文有、本地正文无（purged 有则跳过——硬删后重传不由后台自动拉）
+    Object.keys(idx.byRel).forEach(function (rel) {
+      if (idx.purged[rel]) return
+      if (localDocs[rel]) return
+      if (rel === openRel) return
+      chain = chain.then(function () { return syncAutoAlignRestore(rel, idx.byRel[rel]) })
+        .then(function (did) { if (did) changed = true })
+    })
+
+    chain.then(function () {
+      state.sync.alignPending = false
+      state.sync.alignSig = sig
+      return refreshOnce()
+    }).catch(function () { state.sync.alignPending = false })
+  }
+
+  /**
+   * ⑯ 还原对齐的单篇处理：本机回收有同原路径件 ⇒ 取最新一件本地还原（保留本机删除前那份）；
+   * 本机回收也没有 ⇒ 静默拉云端正文写本地（当云端新件）。成功后记基线。🔴 不弹任何横幅。
+   * @returns {Promise<boolean>} 是否真的发生了对齐动作
+   */
+  function syncAutoAlignRestore(rel, hit) {
+    return api.listTrash().then(function (tr) {
+      var pick = null
+      var pickM = 0
+      ;((tr && tr.items) || []).forEach(function (it) {
+        if (!it || it.kind !== 'doc' || !it.relPath) return
+        // 本地回收件 `_回收/<作品>/<文档>-14位戳.md` → 正文原 rel（本地口径，区别于云端 `回收/正文/...`）
+        var segs = it.relPath.split('/')
+        if (segs.length !== 3 || segs[0] !== '_回收') return
+        var st = SYNC.stripRecycleStamp(segs[2])
+        if (!st) return // 本地回收件必有 14 位戳；无戳件不参与自动还原
+        var origin = segs[1] + '/' + st.base
+        if (origin !== rel) return
+        var m = Date.parse(it.mtime) || 0
+        if (!pick || m > pickM) { pick = it; pickM = m }
+      })
+      if (pick) {
+        // 本机回收有对应件：先本地还原（原位被占则 restoreTrash 拒绝 ⇒ fail-soft 等下轮）
+        return api.restoreTrash(pick.relPath).then(function (rr) {
+          if (!rr || !rr.ok) return false
+          return syncAutoAlignRecord(rel, hit && hit.version).then(function () { return true })
+        }).catch(function () { return false })
+      }
+      // 本机回收也没有：拉云端正文写本地（已存在不覆盖，与 pullAndOpen 同口径）
+      return window.WCSyncNet.readDraft(rel).then(function (rd) {
+        if (!rd || !rd.ok) return false
+        return api.readDoc(rel).then(function (ex) {
+          if (ex && ex.ok) return false // 本地其实已有（缓存过期）⇒ 不覆盖
+          return api.writeDoc(rel, rd.content).then(function (wr) {
+            if (!wr || !wr.ok) return false
+            return syncAutoAlignRecord(rel, rd.version || (hit && hit.version)).then(function () { return true })
+          })
+        })
+      }).catch(function () { return false })
+    }).catch(function () { return false })
+  }
+
+  /** ⑯ 对齐成功后记共同祖先基线（version 为空则不改），并清该篇旧横幅去重 */
+  function syncAutoAlignRecord(rel, version) {
+    syncClearDismissed(rel)
+    if (!version) return Promise.resolve()
+    return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, rel, version, Date.now()))
   }
 
   function wireSync() {
     if (els.syncClose) els.syncClose.addEventListener('click', syncHideBanner)
-    if (els.syncReupload) els.syncReupload.addEventListener('click', syncReupload)
     if (els.syncTakeRemote) els.syncTakeRemote.addEventListener('click', syncTakeRemote)
     if (els.syncKeepLocal) els.syncKeepLocal.addEventListener('click', syncKeepLocal)
     if (els.syncTrashLocal) els.syncTrashLocal.addEventListener('click', syncTrashLocal)
@@ -3772,6 +4274,29 @@
         pushTimerArmed: !!state.sync.pushTimer,
         lastPushAt: state.sync.lastPushAt || 0,
       }
+    },
+    /**
+     * ⑮ 双通道版本对齐（读）：send-net 发送落盘前问持久 baseline 要 baseVersion。
+     * 入参是**端点 rel**（带 `正文/` 前缀，send-net 的口径）；桥内转成本地 rel 再查。
+     * 查不到 / 未就绪 ⇒ ''（调用方退回无 baseVersion 的创建式保存，安全）。
+     */
+    versionOf: function (remoteRel) {
+      if (!SYNC || !syncReady()) return ''
+      var localRel = SYNC.toLocalRel(remoteRel)
+      if (!localRel) return ''
+      return SYNC.baselineVersionOf(state.sync.baseline, localRel)
+    },
+    /**
+     * ⑮ 双通道版本对齐（写）：send-net 任一路 clientZoneSave 成功（普通/force 覆盖/另存新 rel）
+     * 后回填权威版本，避免另一通道拿着过期 baseVersion 下次保存撞 409 反复弹。
+     * fire-and-forget：返回值调用方不等（落盘失败有 notice，内存 baseline 已先更新）。
+     */
+    noteSavedVersion: function (remoteRel, version) {
+      if (!SYNC || !syncReady() || !version) return
+      var localRel = SYNC.toLocalRel(remoteRel)
+      if (!localRel) return
+      syncClearDismissed(localRel) // 新落盘 ⇒ 旧横幅去重缓存作废（与 syncPush 成功同口径）
+      return saveSyncBaseline(SYNC.updateBaseline(state.sync.baseline, localRel, version, Date.now()))
     },
   }
 
@@ -3820,8 +4345,107 @@
     },
     /** 发送前把关：先把本地未保存内容落到工作区（返回 {ok,error?}，调用方失败即中止发送） */
     flush: function () { return flush({ reason: 'send' }) },
+    /** relay 回程（方案 C）：是否在发送成功后等待创作教练建议；只有显式 false 才关（默认开，Task 9 落设置项） */
+    waitResult: function () {
+      var s = (state.settings && state.settings.send) || {}
+      return s.waitResult !== false
+    },
+    /**
+     * relay 回程（方案 C）：发送成功后启动创作教练建议轮询。
+     * 只做三件事——切到右栏 proof tab、切到 coach 视图、把 requestId 交给 coach-net；
+     * 🔴 不碰正文（改正文只能由 coach-net 的「应用」按钮经 __wcProofBridge.setText 走）。
+     * 整段 try/catch：coach-net 没加载 / 切视图函数缺失都不能影响"已发送成功"这条主路径。
+     */
+    coachResult: function (requestId) {
+      try {
+        if (typeof boardSwitchTab === 'function') boardSwitchTab('proof')
+        if (typeof coachShowView === 'function') coachShowView('coach')
+        if (window.__wcCoachStart) window.__wcCoachStart({ requestId: requestId })
+      } catch (e) {}
+    },
     /** 状态条提示（成功/失败文案都走既有 notice ⇒ 沿用现有状态条机制） */
     notice: function (text, isError) { notice(text, isError) },
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // §4 工具栏（2026-10-15 DSH 对齐）：🎯 教练手动入口 / ▾ 意图菜单 / 正文·预览分段 / 番茄 ⋯ 弹层
+  // ════════════════════════════════════════════════════════════════════════
+
+  // 🎯 手动入口：只做 coachResult 的前两个动作（切右板 proof tab + 切教练态），
+  // 🔴 不调 __wcCoachStart —— 不发送、不启动轮询；面板内容由 coach-net 现状决定。
+  function openCoachPanel() {
+    if (typeof boardSwitchTab === 'function') boardSwitchTab('proof')
+    if (typeof coachShowView === 'function') coachShowView('coach')
+  }
+
+  // 正文/预览分段高亮：预览段 ↔ 右板 preview tab（boardSwitchTab 切换时回调本函数）
+  function syncViewSeg() {
+    var onPreview = state.board && state.board.activeTab === 'preview'
+    if (els.viewWrite) {
+      els.viewWrite.classList.toggle('is-active', !onPreview)
+      els.viewWrite.setAttribute('aria-pressed', onPreview ? 'false' : 'true')
+    }
+    if (els.viewPreview) {
+      els.viewPreview.classList.toggle('is-active', onPreview)
+      els.viewPreview.setAttribute('aria-pressed', onPreview ? 'true' : 'false')
+    }
+  }
+
+  // ▾ 意图菜单（条目=设置 send.intents + 恒补「其他…」；不新增通道）
+  function intentClose() {
+    if (!els.intentMenu) return
+    els.intentMenu.hidden = true
+    if (els.sendCaret) els.sendCaret.setAttribute('aria-expanded', 'false')
+  }
+  function intentOpen() {
+    if (!els.intentMenu || !els.sendCaret) return
+    var list = (window.__wcSendBridge && window.__wcSendBridge.intents)
+      ? window.__wcSendBridge.intents() : []
+    var items = list.slice()
+    items.push('__other__')
+    els.intentMenu.textContent = ''
+    items.forEach(function (label) {
+      var b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'w-intent-item'
+      b.setAttribute('role', 'menuitem')
+      b.textContent = label === '__other__' ? '其他…' : label
+      b.dataset.intentValue = label
+      b.addEventListener('click', function () { intentPick(label) })
+      els.intentMenu.appendChild(b)
+    })
+    var r = els.sendCaret.getBoundingClientRect()
+    els.intentMenu.style.top = Math.round(r.bottom + 4) + 'px'
+    els.intentMenu.style.left = Math.round(r.left) + 'px'
+    els.intentMenu.hidden = false
+    els.sendCaret.setAttribute('aria-expanded', 'true')
+  }
+  function intentPick(value) {
+    intentClose()
+    // 复用 send-net 的唯一开窗路径：对 #w-send-full 派发 click（openSend('full')），
+    // 再把弹窗内 #w-send-intent 预选为所选意图并派发 change（「其他…」由此露出手填行）。
+    var full = document.getElementById('w-send-full')
+    if (full) full.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    var sel = document.getElementById('w-send-intent')
+    if (sel) {
+      sel.value = value
+      sel.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+  }
+
+  // 番茄 ⋯ 小弹层（R8：重置能力不丢，但不占胶囊常驻位）
+  function pomoPopClose() {
+    if (!els.pomoPop) return
+    els.pomoPop.hidden = true
+    if (els.pomoCaret) els.pomoCaret.setAttribute('aria-expanded', 'false')
+  }
+  function pomoPopOpen() {
+    if (!els.pomoPop || !els.pomoCaret) return
+    var r = els.pomoCaret.getBoundingClientRect()
+    els.pomoPop.style.top = Math.round(r.bottom + 4) + 'px'
+    els.pomoPop.style.left = Math.round(r.right - 168) + 'px' // 菜单宽 168，右缘对齐 caret
+    els.pomoPop.hidden = false
+    els.pomoCaret.setAttribute('aria-expanded', 'true')
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -3835,6 +4459,9 @@
 
   /** 换文档 / 换工作区 / 文档被删 ⇒ 让校对面板作废（面板自己实现；没加载时是空操作） */
   function proofReset() { if (window.__wcProofReset) window.__wcProofReset() }
+
+  /** relay 回程（方案 C）：同口径让创作教练等待/建议作废——换上下文后绝不能对着错文档等结果或应用建议 */
+  function coachReset() { if (window.__wcCoachReset) window.__wcCoachReset() }
 
   window.__wcProofBridge = {
     context: currentDocContext,
@@ -3878,18 +4505,101 @@
   function boardNet() { return window.WCSyncNet || null }
 
   /** 切 tab：pane hidden + is-active；瞬时态落盘（§1.4） */
+  /** 子分段高亮跟随 state.board.activeProofView（只切 class，不碰面板 hidden——hidden 归 coachShowView 管） */
+  function syncProofSubseg() {
+    if (!els.proofSubsegItems || !els.proofSubsegItems.length) return
+    Array.prototype.forEach.call(els.proofSubsegItems, function (b) {
+      var on = b.getAttribute('data-proof-view') === state.board.activeProofView
+      b.classList.toggle('is-active', on)
+      b.setAttribute('aria-pressed', on ? 'true' : 'false')
+    })
+  }
+
+  /** 从「N 条…」/「敏感词 N 处」文本里读数；空文本=0（纯展示，不碰 net 内部状态） */
+  function boardCountNum(el) {
+    if (!el || !el.textContent) return 0
+    var m = String(el.textContent).match(/\d+/)
+    return m ? parseInt(m[0], 10) || 0 : 0
+  }
+
+  /** 校对 tab 角标：当前看不见的子态里有多少条结果（在该 tab 且该子态时不打扰） */
+  function boardBadgeRefresh() {
+    if (!els.proofBadge) return
+    var nCoach = boardCountNum(els.coachCount)
+    var nProof = boardCountNum(els.proofCount)
+    var nSensitive = boardCountNum(els.sensitiveCount)
+    var unseen
+    if (state.board.activeTab === 'proof') {
+      unseen = state.board.activeProofView === 'coach' ? nProof + nSensitive
+        : state.board.activeProofView === 'sensitive' ? nCoach + nProof
+        : nCoach + nSensitive
+    } else {
+      unseen = nCoach + nProof + nSensitive
+    }
+    els.proofBadge.hidden = unseen <= 0
+    els.proofBadge.textContent = unseen > 99 ? '99+' : String(unseen)
+  }
+
+  /** 三个 count 文本任一变化 ⇒ 刷新角标（observer，无轮询；面板 hidden 时文本变化同样捕获） */
+  function boardBadgeObserve() {
+    if (typeof MutationObserver !== 'function') { boardBadgeRefresh(); return }
+    var mo = new MutationObserver(function () { boardBadgeRefresh() })
+    ;[els.proofCount, els.coachCount, els.sensitiveCount].forEach(function (el) {
+      if (el) mo.observe(el, { childList: true, characterData: true, subtree: true })
+    })
+    boardBadgeRefresh()
+  }
+
+  /** 片语前缀（与按钮 data-note-phrase 对应；插入到笔记光标处，走既有 input 落盘链） */
+  var BOARD_PHRASES = {
+    inspire: '💡 灵感：',
+    list: '□ ',
+    outline: '# ',
+  }
+  function boardInsertNotePhrase(key) {
+    var ta = els.boardNotes
+    if (!ta || ta.disabled) return
+    var prefix = BOARD_PHRASES[key]
+    if (!prefix) return
+    var start = ta.selectionStart != null ? ta.selectionStart : ta.value.length
+    var end = ta.selectionEnd != null ? ta.selectionEnd : ta.value.length
+    var before = ta.value.slice(0, start)
+    var atLineStart = start === 0 || before.charAt(before.length - 1) === '\n'
+    var insert = (atLineStart ? '' : '\n') + prefix
+    ta.value = ta.value.slice(0, start) + insert + ta.value.slice(end)
+    var pos = start + insert.length
+    ta.selectionStart = ta.selectionEnd = pos
+    ta.focus()
+    boardOnNoteInput() // 复用既有去抖落盘 + 标脏（不另造保存通道）
+  }
+
+  /** 待办时间标注：只用既有 createdAt，今天显 HH:MM、今年显 MM-DD、更早显 YYYY-MM-DD */
+  function boardTodoTimeLabel(ts) {
+    var n = Number(ts)
+    if (!n) return ''
+    var d = new Date(n)
+    if (isNaN(d.getTime())) return ''
+    function p2(x) { return (x < 10 ? '0' : '') + x }
+    var now = new Date()
+    var sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+    if (sameDay) return p2(d.getHours()) + ':' + p2(d.getMinutes())
+    if (d.getFullYear() === now.getFullYear()) return p2(d.getMonth() + 1) + '-' + p2(d.getDate())
+    return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
+  }
+
   function boardSwitchTab(name) {
     if (['notes', 'todos', 'proof', 'preview'].indexOf(name) < 0) return
     state.board.activeTab = name
-    Array.prototype.forEach.call(els.boardTabs, function (b) {
-      b.classList.toggle('is-active', b.getAttribute('data-board-tab') === name)
-    })
+    els.boardTabs.forEach(function (b) { b.setAttribute('aria-selected', b.classList.toggle('is-active', b.dataset.boardTab === name)) })
     Array.prototype.forEach.call(els.boardPanes, function (p) {
       p.hidden = p.getAttribute('data-board-pane') !== name
     })
     if (api && api.saveConfig) api.saveConfig({ board: { activeTab: name } })
     // 进预览 tab 才拉清单（TTL 内不重复请求）
     if (name === 'preview') boardPreviewList(false)
+    syncViewSeg()
+    if (name === 'proof') syncProofSubseg()
+    boardBadgeRefresh()
   }
 
   /** 无当前文档 ⇒ 笔记/待办禁用（预览不绑文档，始终可用） */
@@ -3952,6 +4662,10 @@
       span.className = 'w-board-todo-text'
       span.textContent = t.text
 
+      var meta = document.createElement('span')
+      meta.className = 'w-board-todo-meta'
+      meta.textContent = boardTodoTimeLabel(t.createdAt)
+
       var del = document.createElement('button')
       del.type = 'button'
       del.className = 'w-board-todo-del'
@@ -3961,6 +4675,7 @@
 
       li.appendChild(cb)
       li.appendChild(span)
+      if (meta.textContent) li.appendChild(meta)
       li.appendChild(del)
       ul.appendChild(li)
     })
@@ -4245,6 +4960,10 @@
   function wireBoard() {
     if (!els.boardPanel) return
     els.boardPanel.addEventListener('click', function (e) {
+      var sub = e.target.closest ? e.target.closest('[data-proof-view]') : null
+      if (sub) { coachShowView(sub.getAttribute('data-proof-view')); return }
+      var phrase = e.target.closest ? e.target.closest('[data-note-phrase]') : null
+      if (phrase) { boardInsertNotePhrase(phrase.getAttribute('data-note-phrase')); return }
       var tab = e.target.closest ? e.target.closest('.w-board-tab') : null
       if (tab) { boardSwitchTab(tab.getAttribute('data-board-tab')); return }
       var delId = e.target.getAttribute && e.target.getAttribute('data-todo-del')
@@ -4293,6 +5012,9 @@
     if (els.split) els.split.addEventListener('click', function () { setSplit(!state.split.on) })
     if (els.splitDocs) els.splitDocs.addEventListener('click', function () { toggleSplitPanel('docs') })
     if (els.splitBoard) els.splitBoard.addEventListener('click', function () { toggleSplitPanel('board') })
+    // ⑰ 左右栏独立收起 / 展开（分栏时按钮 disabled，点不到，这里也无需特判）
+    if (els.collapseLeft) els.collapseLeft.addEventListener('click', function () { toggleCollapse('left') })
+    if (els.collapseRight) els.collapseRight.addEventListener('click', function () { toggleCollapse('right') })
     wireSplitHandle()
     document.addEventListener('pointerdown', function (e) {
       if (!state.split.on || (!state.split.docs && !state.split.board)) return
@@ -4407,8 +5129,33 @@
 
     if (els.pomoToggle) els.pomoToggle.addEventListener('click', pomoToggle)
     if (els.pomoReset) els.pomoReset.addEventListener('click', pomoReset)
-    if (els.focusMin) els.focusMin.addEventListener('change', onPomodoroConfigChange)
-    if (els.breakMin) els.breakMin.addEventListener('change', onPomodoroConfigChange)
+    if (els.coachOpen) els.coachOpen.addEventListener('click', openCoachPanel)
+    if (els.viewWrite) els.viewWrite.addEventListener('click', function () {
+      if (state.board && state.board.activeTab === 'preview') boardSwitchTab('notes')
+      syncViewSeg(); Editor.focus()
+    })
+    if (els.viewPreview) els.viewPreview.addEventListener('click', function () { boardSwitchTab('preview') })
+    if (els.sendCaret) els.sendCaret.addEventListener('click', function (e) {
+      e.stopPropagation()
+      if (els.intentMenu && !els.intentMenu.hidden) { intentClose(); return }
+      intentOpen()
+    })
+    if (els.pomoCaret) els.pomoCaret.addEventListener('click', function (e) {
+      e.stopPropagation()
+      if (els.pomoPop && !els.pomoPop.hidden) { pomoPopClose(); return }
+      pomoPopOpen()
+    })
+    // 时长设置…：打开设置弹窗并直达「番茄钟」类（settingsShowCat 为 Task 2 产出）
+    if (els.pomoSettings) els.pomoSettings.addEventListener('click', function () {
+      pomoPopClose()
+      settingsOpen()
+      settingsShowCat('pomodoro')
+      if (els.setFocus) els.setFocus.focus()
+    })
+    // 点空白处收两个弹层（caret 自己已 stopPropagation，不会触发即关）
+    document.addEventListener('click', function () { intentClose(); pomoPopClose() })
+    if (els.intentMenu) els.intentMenu.addEventListener('click', function (e) { e.stopPropagation() })
+    if (els.pomoPop) els.pomoPop.addEventListener('click', function (e) { e.stopPropagation() })
 
     // Ctrl/Cmd+S = 手动保存；Ctrl/Cmd+F = 查找条；Esc = 收查找条/设置弹层/「▾ 切换」菜单/导入模态
     window.addEventListener('keydown', function (e) {
@@ -4428,6 +5175,8 @@
         return
       }
       if (e.key === 'Escape') {
+        if (els.intentMenu && !els.intentMenu.hidden) { intentClose(); return }
+        if (els.pomoPop && !els.pomoPop.hidden) { pomoPopClose(); return }
         // §4 搜全书浮层优先收（它盖在写作区上；同时 abort 在途云端请求）
         if (searchIsOpen()) { searchClose(); return }
         // ③ 查找条优先收（它浮在写作区上，最近的"弹层"）
@@ -4445,7 +5194,7 @@
     window.addEventListener('beforeunload', function () { boardFlushCurrent(); flushSync('beforeunload') })
 
     // 切到 [DSH] 页前 flush（切换本身由 shell.html 的 tab 逻辑负责，这里只补一个"离开前保存"）
-    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
+    Array.prototype.forEach.call(document.querySelectorAll('.w-rail-item[data-page]'), function (t) {
       t.addEventListener('click', function () {
         if (t.getAttribute('data-page') === 'dsh') flush({ reason: 'page-switch' })
       })
@@ -4485,6 +5234,7 @@
     })
     window.addEventListener('online', function () {
       refreshToday().then(drainWritingQueue)
+      syncDrainPendingOps() // ⑭ §8：联网恢复后重放离线待办（不轮询，只接系统事件）
     })
     refreshToday()
   }
@@ -4670,12 +5420,27 @@
   function sensitiveCore() { return window.WCSensitive || null }
   function sensitiveWordsData() { return window.WCSensitiveWords || null }
 
-  /** 右栏「校对」tab 内的视图切换：proof（AI 校对）/ sensitive（敏感词）；切走只 hidden 不销毁 */
+  /** @deprecated 兼容薄封装（coach-wiring 锁保留其形态）；新入口一律 coachShowView。 */
+  /** 右栏「校对」tab 内的视图切换：proof（AI 校对）/ sensitive（敏感词）；切走只 hidden 不销毁。
+   *  relay 回程（方案 C）加了第三态 coach：本函数只从敏感词链路调用，任何入口都把 coach 面板藏掉。 */
   function sensitiveShowView(name) {
     var pane = document.querySelector('.w-board-pane[data-board-pane="proof"]')
     var proofBox = pane ? pane.querySelector('.w-proof') : document.querySelector('.w-proof')
     if (proofBox) proofBox.hidden = (name === 'sensitive')
     if (els.sensitivePanel) els.sensitivePanel.hidden = (name !== 'sensitive')
+    if (els.coachPanel) els.coachPanel.hidden = true
+  }
+
+  /** relay 回程（方案 C）：proof / sensitive / coach 三态互斥，切走只 hidden 不销毁（保留各面板状态） */
+  function coachShowView(name) {
+    var pane = document.querySelector('.w-board-pane[data-board-pane="proof"]')
+    var proofBox = pane ? pane.querySelector('.w-proof') : document.querySelector('.w-proof')
+    if (proofBox) proofBox.hidden = (name !== 'proof')
+    if (els.sensitivePanel) els.sensitivePanel.hidden = (name !== 'sensitive')
+    if (els.coachPanel) els.coachPanel.hidden = (name !== 'coach')
+    if (['coach', 'proof', 'sensitive'].indexOf(name) >= 0) state.board.activeProofView = name
+    syncProofSubseg()
+    boardBadgeRefresh()
   }
 
   /** 当前生效的敏感词配置（state.settings 已在 getState / save-config 回填时更新） */
@@ -4702,7 +5467,7 @@
   function sensitiveRun() {
     var core = sensitiveCore()
     if (!core) {
-      sensitiveShowView('sensitive')
+      coachShowView('sensitive')
       boardSwitchTab('proof')
       if (els.sensitiveStatus) els.sensitiveStatus.textContent = '敏感词扫描不可用：sensitive.js 没加载（壳层白名单少了它？）'
       if (els.sensitiveList) els.sensitiveList.textContent = ''
@@ -4721,7 +5486,7 @@
     sensitiveState.hits = hits
     sensitiveState.text = text
     sensitiveState.activeCats = null // 每次重跑 ⇒ chips 回到「全部」
-    sensitiveShowView('sensitive')
+    coachShowView('sensitive')
     boardSwitchTab('proof')
     sensitiveRenderChips()
     sensitiveRenderList()
@@ -4782,7 +5547,7 @@
     })
     hits.forEach(function (h) {
       var row = document.createElement('div')
-      row.className = 'w-proof-item'
+      row.className = 'w-proof-item is-collapsed'
 
       var head = document.createElement('div')
       head.className = 'w-proof-item-head'
@@ -4791,9 +5556,17 @@
       sev.textContent = sensitiveCategoryLabel(h.category) + '（' + (SENSITIVE_SEV_LABEL[h.severity] || h.severity) + '）'
       head.appendChild(sev)
       var word = document.createElement('span')
-      word.className = 'w-sensitive-word'
+      word.className = 'w-sensitive-word w-proof-card-title'
       word.textContent = h.word
       head.appendChild(word)
+      var idx = document.createElement('span')
+      idx.className = 'w-proof-card-idx'
+      idx.textContent = (hits.indexOf(h) + 1) + '/' + hits.length
+      head.appendChild(idx)
+      var caret = document.createElement('span')
+      caret.className = 'w-proof-card-caret'
+      caret.textContent = '▶'
+      head.appendChild(caret)
       row.appendChild(head)
 
       var frag = document.createElement('div')
@@ -4811,6 +5584,7 @@
       go.title = '选中正文里这个词并滚到视野内（不改正文）'
       go.addEventListener('click', function (e) {
         e.stopPropagation()
+        row.classList.remove('is-collapsed')
         Editor.focus()
         Editor.selectOffsets(h.start, h.end)
         Editor.scrollSelectionIntoView()
@@ -4823,6 +5597,13 @@
       skip.addEventListener('click', function (e) {
         e.stopPropagation()
         sensitiveIgnoreWord(h.word)
+      })
+      row.addEventListener('click', function (e) {
+        if (e.target && e.target.closest && e.target.closest('.w-proof-acts')) return
+        row.classList.toggle('is-collapsed')
+        Editor.focus()
+        Editor.selectOffsets(h.start, h.end)
+        Editor.scrollSelectionIntoView()
       })
       acts.appendChild(go)
       acts.appendChild(skip)
@@ -4845,11 +5626,11 @@
     if (els.sensitiveBtn) {
       els.sensitiveBtn.addEventListener('click', function () { sensitiveRun() })
     }
-    // 用户点「✎ 校对」⇒ proofread-net 跑校对；这里把右栏视图切回 .w-proof（若停在敏感词视图）。
+    // 用户点「✎ 校对」⇒ proofread-net 跑校对；这里把右栏视图切回 .w-proof（若停在敏感词/教练视图）。
     // capture 阶段先切视图，proofread-net 的监听照常运行，两边互不知道对方。
     var proofBtn = document.getElementById('w-proof')
     if (proofBtn) {
-      proofBtn.addEventListener('click', function () { sensitiveShowView('proof') }, true)
+      proofBtn.addEventListener('click', function () { coachShowView('proof') }, true)
     }
   }
 
@@ -4963,7 +5744,7 @@
         })
       })
     })
-    return chain.then(function () { return { results: results, unknown: false } })
+    return chain.then(function () { return { results: results, unknown: false, total: docs.length } })
   }
 
   /** 并发上限 concurrency 的任务队列；onProgress(done,total) 每完成一个任务回调一次 */
@@ -5046,6 +5827,25 @@
     }, function () { return { results: [], unknown: true, failed: 0, total: 0 } })
   }
 
+  /**
+   * §6.7 搜索度量埋点（仅本地日志、不上报）。
+   * 走 console.error 是因为主进程 console-message 钩子只把 error 级落盘到
+   * <userData>/logs/client.log；只记结构化数字（耗时/扫描数/命中数/作用域/可达性），
+   * 绝不带检索词，避免 query 或正文片段进日志。异常一律吞掉，不影响搜索主路径。
+   */
+  function searchEmitMetric(m) {
+    console.error('[wc][search-metric] ' +
+      'ms=' + m.ms +
+      ' scope=' + m.scope +
+      ' localDocs=' + m.localDocs +
+      ' remoteDocs=' + m.remoteDocs +
+      ' remoteFailed=' + m.remoteFailed +
+      ' remoteUnknown=' + m.remoteUnknown +
+      ' items=' + m.items +
+      ' hits=' + m.hits +
+      ' capped=' + m.capped)
+  }
+
   /** 一轮搜索的总入口（debounce 后调用） */
   function searchExecute() {
     var core = searchCore()
@@ -5082,6 +5882,8 @@
 
     searchSetProgress(scope === 'remote' ? '正在索引云端…' : '正在搜索本机…', true)
 
+    // §6.7 度量起点：一轮墙钟耗时（本机+云端并发整体），用于 P95>800ms 门槛判定
+    var searchT0 = performance.now()
     Promise.all([localP, remoteP]).then(function (rs) {
       if (seq !== searchState.seq) return // 旧轮结果丢弃
       var loc = rs[0]
@@ -5089,6 +5891,20 @@
       var merged = core.mergeResults(loc.results, rem.results)
       searchState.items = merged.items
       searchRender(merged, rem, scope)
+      // §6.7 本地埋点：只记数字不记 query；埋点失败绝不影响搜索结果
+      try {
+        searchEmitMetric({
+          ms: Math.max(0, Math.round(performance.now() - searchT0)),
+          scope: scope,
+          localDocs: loc.total || 0,
+          remoteDocs: rem.total || 0,
+          remoteFailed: rem.failed || 0,
+          remoteUnknown: !!rem.unknown,
+          items: merged.items.length,
+          hits: merged.totalHits,
+          capped: !!merged.capped,
+        })
+      } catch (e) { /* 埋点不可影响主路径 */ }
     })
   }
 
@@ -5196,6 +6012,7 @@
     wireSync()
     initSync()
     wireBoard() // 记录板（§1）：tab / 笔记 / 待办 / 预览事件
+    boardBadgeObserve() // Ⓓ 校对 tab 红色角标（observer，无轮询）
     wireSensitive() // §3 敏感词：工具栏按钮 + 右栏敏感词面板（纯本地）
     wireSearch() // §4 搜全书：浮层开关 / 输入 debounce / 范围切换（本机+云端遍历）
 
@@ -5218,6 +6035,11 @@
         if (els.wsName && !els.wsName.value) els.wsName.value = state.defaultRootName
         if (els.importNewWork && !els.importNewWork.value) els.importNewWork.value = ''
 
+        // ⑰ 左右栏收起偏好（必须先于 renderSplit 回填：renderSplit 末尾的 renderPanels 读它）
+        if (st.ui) {
+          state.ui.collapseLeft = st.ui.collapseLeft === true
+          state.ui.collapseRight = st.ui.collapseRight === true
+        }
         // ⑥ CR-6 分栏：开关与比例（从配置回填；非法值当场夹紧，不信任磁盘上的值）
         if (st.ui && st.ui.split && typeof st.ui.split === 'object') {
           state.split.on = st.ui.split.on === true
