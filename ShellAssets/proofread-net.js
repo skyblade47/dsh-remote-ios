@@ -28,29 +28,23 @@
 
   // ── 常量（一处可改）──────────────────────────────────────────────────────
   var PROMPT_PATH = '/api/session/prompt'
-  // ── 轮询参数（2026-09-28 按用户实测反馈改：**不能只靠时钟**）────────────────
-  // 实测：一篇正文的校对**真的跑完了，但花了 115 秒**（用户报告）⇒ 原先 90 秒的硬上限会误判失败。
-  // 而正文规模还会更大（一章 2000–3000 字；短篇不分章可到 8000–10000 字）⇒ 纯按时间放大既不够
-  // 也不可靠。⇒ 三条判据并用：
+  // ── 轮询参数（2026-10-19 用户拍板：**删掉一切自动判死，永不超时**）──────────
+  // 起因：约 1 万字的校对因网络不稳定，曾被「连续 5 次读会话失败 / 无进展 / 总时长」之一误杀，
+  // 但任务本身未必失败。用户决策：客户端**不再自行判定失败**，唯一退出方式是右栏头部的
+  // 「取消等待」按钮（AbortController，全链路可中断）；若怀疑结果异常，用户会自己切到对话页确认。
+  // 所以轮询只做两件事：
   //   ① **认领到本次回复** ⇒ 立刻收工（正常路径，与时间无关）；
-  //   ② **这一轮答完了**（我们那条 prompt 之后已出现 `turn/end`）⇒ 立刻判"没有可解析的 JSON"，
-  //      而不是继续干等（这是"综合对话工作情况"的那一条）；
-  //   ③ **没有进展**：会话尾部连续 IDLE_MS 没有任何新事件 ⇒ 判定卡住（不是"还在生成"）；
-  // 外加一个足够宽的**总上限**兜底（防"慢慢挤牙膏"式的无限等待）。
+  //   ② **这一轮答完了却没有可解析 JSON** ⇒ 只在状态行**提示**（非致命），轮询继续，
+  //      由用户决定切对话页核实、继续等、还是手动取消。
+  // 读会话失败只累加计数并在状态行如实展示，**永不 throw**；网络恢复后计数清零。
   var POLL_MS = 2000          // 前 20 次用 2s
   var POLL_MS_SLOW = 5000     // 之后降到 5s（长任务少打点请求；仍是只读）
   var POLL_FAST_TIMES = 20
-  var POLL_MAX_MS = 15 * 60 * 1000  // 总上限 15 分钟（1 万字的长篇也够）
-  // 无进展上限 3 分钟。⚠️ 不能太小：模型"想"的时候靠流式分片事件（`assistant/chunk` / `*-chunks`）
-  //   推进会话，那些事件是**会被写进会话日志**的（见 dsh-adapter 的 tail.js 注释），所以正常生成时
-  //   不会长时间没动静；留 3 分钟是为了容错，而不是把正常生成判死。
-  var POLL_IDLE_MS = 180 * 1000
   var PAGE_LIMIT = 120              // 每次取回的尾部事件条数
   var HL = { must: 'wc-must', should: 'wc-should', nice: 'wc-nice' }
   var SEV_LABEL = { must: '必改', should: '建议', nice: '可选' }
 
   var els = {}
-  var lastPollError = ''
   var st = {
     sessionId: '',
     requestId: '',
@@ -236,9 +230,9 @@
   }
 
   /**
-   * 轮询到"认领到本次回复"为止（**不以时钟为唯一判据**，见上面常量处的说明）。
-   * 🔴 读会话的失败**不再静默吞掉**（第四跑就是被吞掉才误报成"没动静"）：
-   *    状态行每次都如实写出"读到几条 / 读失败的原因"，连续 5 次失败直接给出该原因。
+   * 轮询到"认领到本次回复"为止（2026-10-19 起**永不自动判死、永不超时**，见常量处说明）。
+   * 读会话失败只累加计数并在状态行如实展示，网络恢复即清零；唯一退出路径＝认领到结果
+   * 或用户点「取消等待」（signal abort）。
    */
   async function pollReport(requestId, signal) {
     var t0 = Date.now()
@@ -247,20 +241,22 @@
     var fetchFails = 0
     var lastFetchErr = ''
     var lastCount = -1
+    var doneHintShown = false
     for (var n = 1; ; n++) {
       await sleep(n <= POLL_FAST_TIMES ? POLL_MS : POLL_MS_SLOW, signal)
       var waited = Math.round((Date.now() - t0) / 1000)
       var idle = Math.round((Date.now() - lastProgressAt) / 1000)
       var tail = lastFetchErr ? ('读会话失败 ' + fetchFails + ' 次：' + lastFetchErr)
         : ('读到 ' + (lastCount < 0 ? '—' : lastCount + ' 条'))
-      setStatus('校对中…（已等 ' + waited + ' 秒；会话最近一次更新 ' + idle + ' 秒前；' + tail + '）')
+      setStatus('校对中…（已等 ' + waited + ' 秒；会话最近一次更新 ' + idle + ' 秒前；' + tail +
+        '；可随时点「取消等待」，或切到对话页确认进展）')
 
       var page = null
       try { page = await pageTail(st.sessionId, signal) } catch (e) {
         if (isAbort(e)) throw e
+        // 网络抖动不再判死：只计数、在状态行展示，下一轮继续读
         fetchFails++
         lastFetchErr = msgOf(e)
-        if (fetchFails >= 5) throw new Error('连续 5 次读会话均失败：' + lastFetchErr)
       }
       var records = page || null
       if (records) {
@@ -275,30 +271,19 @@
         if (records.length) {
           var got = Proof.pickReport(records, requestId)
           if (got.ok) return got
-          lastPollError = got.error
 
-          // ② 这一轮**答完了**却没有可解析的 JSON ⇒ 立刻给出准确结论，不再干等
+          // ② 这一轮**答完了**却没有可解析的 JSON：只提示一次（非致命），轮询继续。
+          //    用户可切到对话页核实它实际答了什么，或继续等 / 手动取消。
           var ts = Proof.turnState(records, requestId)
-          if (ts.done) {
-            throw new Error('模型已经答完这一轮，但回复里没有可解析的校对 JSON ⇒ 到 [DSH] 页的「文章校对」' +
-              '会话里看看它实际答了什么（可能是把 JSON 写成了别的样子，或直接给了文字建议）')
+          if (ts.done && !doneHintShown) {
+            doneHintShown = true
+            say('模型似乎已经答完这一轮，但回复里暂未解析出校对 JSON。' +
+              '可切到 [DSH] 页的「文章校对」会话确认实际回复；若确认无望请点「取消等待」。本条提示只出现一次，轮询继续。', false)
           }
           if (!ts.sawPrompt && waited > 30) {
-            setStatus('校对中…（已等 ' + waited + ' 秒；还没在会话里看到本次请求，可能在排队；读到 ' + records.length + ' 条）')
+            setStatus('校对中…（已等 ' + waited + ' 秒；还没在会话里看到本次请求，可能在排队；读到 ' + records.length + ' 条；可点「取消等待」）')
           }
         }
-      }
-
-      // ③ 没有进展（会话尾部长时间一动不动）⇒ 判定卡住
-      if (Date.now() - lastProgressAt > POLL_IDLE_MS) {
-        throw new Error('会话已经 ' + Math.round(POLL_IDLE_MS / 1000) + ' 秒没有任何新动静' +
-          '（读到 ' + (lastCount < 0 ? '—' : lastCount + ' 条') + '）' +
-          (lastPollError ? '；最后一次读到的：' + lastPollError : ''))
-      }
-      // ④ 总上限兜底
-      if (Date.now() - t0 > POLL_MAX_MS) {
-        throw new Error('等待超过 ' + Math.round(POLL_MAX_MS / 60000) + ' 分钟仍未取到结果' +
-          (lastPollError ? '（最后一次读到的：' + lastPollError + '）' : ''))
       }
     }
   }
@@ -320,7 +305,6 @@
     st.items = []
     st.activeId = ''
     st.noteExtra = ''
-    lastPollError = ''
     paint()
     setBusy(true)
 
