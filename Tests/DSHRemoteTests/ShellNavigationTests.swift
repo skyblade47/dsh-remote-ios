@@ -2,12 +2,12 @@ import XCTest
 @testable import DSHRemote
 
 final class ShellNavigationTests: XCTestCase {
-    func testBundleShellHTMLRewritesSeventeenReferences() throws {
+    func testBundleShellHTMLRewritesEighteenReferences() throws {
         let url = try XCTUnwrap(Bundle(for: ShellNavigationTests.self)
             .url(forResource: "shell", withExtension: "html"))
         let raw = try String(contentsOf: url, encoding: .utf8)
         let out = try ShellHTMLRewriter.rewrite(raw)
-        XCTAssertEqual(out.components(separatedBy: "dsh-asset://local/").count - 1, 17)
+        XCTAssertEqual(out.components(separatedBy: "dsh-asset://local/").count - 1, 18)
         XCTAssertTrue(out.contains("dsh-asset://local/sensitive-words.js"))
         XCTAssertTrue(out.contains("dsh-asset://local/sensitive.js"))
         XCTAssertTrue(out.contains("dsh-asset://local/search-core.js"))

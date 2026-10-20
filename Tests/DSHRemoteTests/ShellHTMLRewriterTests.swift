@@ -8,7 +8,7 @@ final class ShellHTMLRewriterTests: XCTestCase {
 <link rel="stylesheet" href="/__shell__/writing.css" />
 """#
 
-    // 与 ShellAssets/shell.html 的 13 个 JS 外链同构（body，顺序一致）
+    // 与 ShellAssets/shell.html 的 14 个 JS 外链同构（body，顺序一致）
     private let jsRefs = #"""
 <script src="/__shell__/send.js"></script>
 <script src="/__shell__/watch.js"></script>
@@ -22,6 +22,7 @@ final class ShellHTMLRewriterTests: XCTestCase {
 <script src="/__shell__/writing.js"></script>
 <script src="/__shell__/send-net.js"></script>
 <script src="/__shell__/proofread-net.js"></script>
+<script src="/__shell__/coach-net.js"></script>
 <script src="/__shell__/sync-net.js"></script>
 """#
 
@@ -52,7 +53,7 @@ __JS__
             .replacingOccurrences(of: "__JS__", with: jsRefs)
     }
 
-    func testRewritesSeventeenRefsAndInjectsIPadAssets() throws {
+    func testRewritesEighteenRefsAndInjectsIPadAssets() throws {
         let out = try ShellHTMLRewriter.rewrite(fullHTML)
         XCTAssertFalse(out.contains("/__shell__/"))
         XCTAssertTrue(out.contains("dsh-asset://local/dsw-tokens.css"))
@@ -171,7 +172,7 @@ __JS__
     }
 
     // HTML 解析只认 </script 闭合：内联内容里的该串转义为 <\/script（JS 语义不变，
-    // 大小写不敏感）。当前 17 个资产均无此串（已全量扫描），此为防御未来资产变更。
+    // 大小写不敏感）。当前 18 个资产均无此串（已全量扫描），此为防御未来资产变更。
     func testScriptInlineEscapesClosingTag() throws {
         let out = try ShellHTMLRewriter.rewrite(fullHTML, js: { name in
             name == "writing.js" ? "var a=1</script>var b=2</SCRIPT>var c=3" : nil

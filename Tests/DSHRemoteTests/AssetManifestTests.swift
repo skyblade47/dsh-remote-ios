@@ -2,8 +2,8 @@ import XCTest
 @testable import DSHRemote
 
 final class AssetManifestTests: XCTestCase {
-    func testWhitelistContainsSeventeenAssets() {
-        XCTAssertEqual(AssetManifest.names.count, 17)
+    func testWhitelistContainsEighteenAssets() {
+        XCTAssertEqual(AssetManifest.names.count, 18)
         XCTAssertTrue(AssetManifest.isAsset("writing-count-core.js"))
         XCTAssertTrue(AssetManifest.isAsset("sensitive-words.js"))
         XCTAssertTrue(AssetManifest.isAsset("sensitive.js"))
