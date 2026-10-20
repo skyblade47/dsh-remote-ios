@@ -395,6 +395,7 @@
   var Editor = (function () {
     var box = els.editor
     var Plain = window.WCEditorPlain
+    var valueListeners = []   // setValue（切文档/清空/读盘）后的通知：行号槽需重排（不冒泡 input）
 
     /** 编辑器全文（判据与发送/校对同一份：`Plain.domToText`） */
     function getText() {
@@ -522,6 +523,51 @@
       }
     }
 
+    /**
+     * ⑱ 行号槽：实测每个**逻辑行**（字面 \n 分隔；软换行的续行不独立编号）的行顶。
+     * @returns {Array<{y:number, h:number}>} y = 相对 box 内容顶（含 padding-top）的 px；
+     *   长度 = getText().split('\n').length；空文 = [1 行]。
+     * 原理：用 locate(i) 取行首 DOM 点，Range 测其 rect，减去 box rect.top 得内容坐标。
+     * 空行（折叠 Range 在 pre-wrap 空行上常拿到 0 高）⇒ 用编辑器行高兜底、并保证严格不回退。
+     */
+    function lineTops() {
+      var text = getText()
+      var lines = text.split('\n')
+      var n = Math.max(1, lines.length)
+      var cs = window.getComputedStyle(box)
+      var lhPx = parseFloat(cs.lineHeight)
+      if (!isFinite(lhPx) || lhPx <= 0) lhPx = parseFloat(cs.fontSize) * 1.4 || 18
+      var padTop = parseFloat(cs.paddingTop) || 0
+      var padBottom = parseFloat(cs.paddingBottom) || 0
+      var boxTop = box.getBoundingClientRect().top + box.clientTop
+      var starts = [], acc = 0
+      for (var k = 0; k < n; k++) { starts.push(acc); acc += lines[k].length + 1 }
+
+      // 点测：在行首放折叠 Range 取首 rect（相对 box 内容顶）。
+      // pre-wrap 下中间空行仍生成行盒（光标可落位）⇒ 一般能拿到整行高的正确 rect；
+      // 拿不到（空文档 / 文末空行的边界）⇒ 用"上一行顶 + 行高"兜底，行号因此严格单调不回退。
+      var rr = document.createRange()
+      function probe(pos) {
+        var p = locate(pos)
+        try { rr.setStart(p.node, p.offset); rr.setEnd(p.node, p.offset) } catch (e) { return null }
+        var rcs = rr.getClientRects()
+        var rc = rcs && rcs.length ? rcs[0] : rr.getBoundingClientRect()
+        if (!rc) return null
+        return { y: rc.top - boxTop, h: rc.height }
+      }
+      var tops = [], prevTop = padTop - lhPx
+      for (var i = 0; i < n; i++) {
+        var a = probe(starts[i])
+        var y = (a && a.h > 0.5) ? a.y : prevTop + lhPx   // 空文档首行 ⇒ padTop；其余空行 ⇒ 上一行 + 行高
+        if (!isFinite(y) || y < padTop) y = Math.max(padTop, prevTop + lhPx)
+        tops.push({ y: y, h: lhPx })
+        prevTop = y
+      }
+      // 内层高（与 box 的 scrollHeight 同语义）：最后一行底 + 底部 padding；min 撑满可视高
+      var contentH = tops[n - 1].y + lhPx + padBottom
+      return { tops: tops, lineHeight: lhPx, padTop: padTop, padBottom: padBottom, height: Math.max(contentH, box.clientHeight) }
+    }
+
     /** Shift+Tab：删行首缩进（选中后走原生 delete ⇒ 进 undo 栈；失败才整篇重设） */
     function dedentAtCaret() {
       var off = caretOffsets()
@@ -631,10 +677,17 @@
         if (!box) return
         box.textContent = v == null ? '' : String(v)
         syncEmpty()
+        for (var i = 0; i < valueListeners.length; i++) {
+          try { valueListeners[i]() } catch (e) { /* 监听方异常不影响切文档主流程 */ }
+        }
       },
       onChange: function (cb) {
         if (box) box.addEventListener('input', cb)
       },
+      /** setValue（不冒泡 input）后的通知：切文档/清空/读盘后行号槽需重排 */
+      onSetValue: function (cb) { valueListeners.push(cb) },
+      /** ⑱ 行号槽：各逻辑行行顶实测（软换行也准）+ 行高/padding/内容高 */
+      lineTops: lineTops,
       focus: function () {
         if (box) box.focus()
       },
@@ -645,6 +698,99 @@
       selectOffsets: selectOffsets,
       scrollSelectionIntoView: scrollSelectionIntoView,
     }
+  })()
+
+  // ════════════════════════════════════════════════════════════════════════
+  // ⑱ IDE 式行号槽（gutter，2026-10-20）
+  //   纯显示层：不进编辑器 DOM、不改文本/选区/存盘。编号按**逻辑行**（字面 \n），
+  //   行顶用 Editor.lineTops() 实测 ⇒ 软换行续行不编号也能对齐；编辑器滚动时
+  //   内层 translateY(-scrollTop) 跟随。重排时机：输入 / setValue / 滚动(rAF 合帧) /
+  //   inline 排版变更 / 容器尺寸 / 字体加载。
+  // ════════════════════════════════════════════════════════════════════════
+  var Gutter = (function () {
+    var gutter = document.getElementById('w-editor-gutter')
+    var inner = document.getElementById('w-editor-gutter-inner')
+    var box = Editor.el
+    // 🔴 不在此处按「元素缺失」之外的原因提前返回：脚本加载时写作页可能 display:none
+    //   （默认停在 DSH 控制台页），若此刻返回，下面的监听全部不会绑定，切到写作页后
+    //   再也没人触发首排。可见性（0 尺寸）在 render 内跳过即可。
+    var disabled = !gutter || !inner || !box
+
+    // 用 setTimeout 而非 rAF 合帧：display:none 的页面里 rAF 回调不执行，
+    // 会让「已排程」标志永不复位、可见后的重排被去重吞掉；setTimeout 始终会触发。
+    var raf = 0
+    function schedule() {
+      if (disabled || raf) return
+      raf = window.setTimeout(function () { raf = 0; render() }, 16)
+    }
+    function render() {
+      // 不可见（display:none 的页面/宿主）时 rect 无意义 ⇒ 跳过，可见后由 RO/显示路径再排
+      if (disabled || !box.offsetWidth || !box.offsetHeight) return
+      var info = Editor.lineTops()
+      var cs = window.getComputedStyle(box)
+      gutter.style.fontSize = cs.fontSize
+      gutter.style.fontFamily = cs.fontFamily
+      gutter.style.lineHeight = String(info.lineHeight) + 'px'
+      // 槽宽：位数（每号 0.62em）+ 左右留白（左 8px 在 CSS，右走 --w-gutter-pad）
+      var digits = String(info.tops.length).length
+      gutter.style.width = (digits * 0.62).toFixed(2) + 'em'
+      inner.style.height = Math.ceil(info.height) + 'px'
+      // 行数变了才重建节点；否则只挪 transform（输入时多数是平移/行顶微调）
+      var kids = inner.children
+      if (kids.length !== info.tops.length) {
+        var html = ''
+        for (var i = 1; i <= info.tops.length; i++) html += '<div class="w-gutter-line">' + i + '</div>'
+        inner.innerHTML = html
+        kids = inner.children
+      }
+      for (var j = 0; j < kids.length; j++) {
+        kids[j].style.transform = 'translateY(' + info.tops[j].y.toFixed(2) + 'px)'
+        kids[j].style.height = info.lineHeight + 'px'
+      }
+      applyScroll(box.scrollTop)
+    }
+    function applyScroll(st) {
+      inner.style.transform = 'translateY(' + (-st) + 'px)'
+    }
+    function syncScroll() { if (!disabled) applyScroll(box.scrollTop) }
+
+    if (!disabled) {
+      // 输入（含 IME/undo/paste ⇒ 都冒泡 input）；setValue 不冒泡 ⇒ Editor 通知
+      Editor.onChange(schedule)
+      Editor.onSetValue(schedule)
+      // 滚动合帧：scroll 高频，且纯平移无需重新测位 ⇒ 直接 transform
+      box.addEventListener('scroll', syncScroll, { passive: true })
+      // inline 排版变更（字号/字体/行高/字间距/行宽）⇒ 重测；data-empty 变化顺带排一次
+      if (window.MutationObserver) {
+        var mo = new MutationObserver(schedule)
+        mo.observe(box, { attributes: true, attributeFilter: ['style', 'data-empty'] })
+      }
+      // 尺寸（窗口/侧栏开合/findbar/字体换列）与字体加载完成（首屏 KaiTi 异步到位）
+      if (window.ResizeObserver) {
+        var ro = new ResizeObserver(schedule)
+        ro.observe(box)
+        ro.observe(gutter)
+      } else {
+        window.addEventListener('resize', schedule)
+      }
+      // 确定性兜底：脚本加载时写作页可能 display:none（默认停 DSH 页），而 RO 对
+      // display:none→可见的 0→非 0 过渡不保证回调 ⇒ 监听 rail 切页点击，延迟两帧
+      // （等 shell 的 tab 逻辑改完 display 并完成布局）再合帧重排。
+      Array.prototype.forEach.call(
+        document.querySelectorAll('.w-rail-item[data-page="writing"]'),
+        function (t) {
+          t.addEventListener('click', function () {
+            window.setTimeout(schedule, 48)
+          })
+        }
+      )
+      if (document.fonts && document.fonts.ready && document.fonts.ready.then) {
+        document.fonts.ready.then(schedule).catch(function () {})
+      }
+      // 首屏（脚本在 DOM 末尾 ⇒ 元素已布局）
+      schedule()
+    }
+    return { refresh: schedule, syncScroll: syncScroll }
   })()
 
   // ── ③ 查找/替换条（2026-10-13 三段优化 · 第一段）──────────────────────────
@@ -1556,19 +1702,19 @@
   }
 
   /** ⑰ 两栏显隐的**唯一裁决入口**（renderSplit 与收起开关都走它）：
-        · 分栏中 → 两栏是浮层，显隐看 state.split.docs/board 瞬时态，收起钮禁用；
+        · 分栏中 → 两栏是浮层，显隐看 state.split.docs/board 瞬时态，边缘折叠把手整组隐藏；
         · 常驻模式 → 看 state.ui.collapseLeft/Right 持久化偏好；中栏靠 flex:1 自动占满。 */
   function renderPanels() {
     var on = !!(state.split && state.split.on)
     if (els.sidebar) els.sidebar.hidden = on ? !state.split.docs : !!state.ui.collapseLeft
     if (els.right) els.right.hidden = on ? !state.split.board : !!state.ui.collapseRight
     if (els.collapseLeft) {
-      els.collapseLeft.disabled = on
+      els.collapseLeft.hidden = on
       els.collapseLeft.classList.toggle('active', !!state.ui.collapseLeft)
       els.collapseLeft.setAttribute('aria-pressed', state.ui.collapseLeft ? 'true' : 'false')
     }
     if (els.collapseRight) {
-      els.collapseRight.disabled = on
+      els.collapseRight.hidden = on
       els.collapseRight.classList.toggle('active', !!state.ui.collapseRight)
       els.collapseRight.setAttribute('aria-pressed', state.ui.collapseRight ? 'true' : 'false')
     }

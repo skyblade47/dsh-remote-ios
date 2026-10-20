@@ -97,8 +97,6 @@
           <button id="w-split" class="w-btn-ghost" title="对话页与写作页并排显示；中间的分割条可拖动改比例，双击复位 50/50">⇤⇥ 分栏</button>
           <button id="w-docs" class="w-btn-ghost" title="作品 / 文档（分栏时收进浮层）" hidden>作品/文档</button>
           <button id="w-board" class="w-btn-ghost" title="记录板（分栏时收进浮层）" hidden>记录板</button>
-          <button id="w-collapse-left" class="w-btn-ghost" title="收起/展开左侧作品栏" aria-pressed="false">◂</button>
-          <button id="w-collapse-right" class="w-btn-ghost" title="收起/展开右侧记录板" aria-pressed="false">▸</button>
           <div class="w-seg" role="group" aria-label="视图切换">
             <button type="button" class="w-seg-item is-active" data-view-seg="write" aria-pressed="true">正文</button>
             <button type="button" class="w-seg-item" data-view-seg="preview" aria-pressed="false">预览</button>
@@ -196,6 +194,14 @@
 
       <!-- 三栏 -->
       <div class="w-body">
+        <!-- ⑰ 栏位边缘折叠把手：骑在栏与中栏的缝上，收起后贴窗口边（不放进顶部工具栏，也不放进会被收起的栏里）。
+             分栏（浮层）时整组隐藏，浮层显隐仍由工具栏「作品/文档」「记录板」控制。 -->
+        <button type="button" id="w-collapse-left" class="w-panel-collapse w-panel-collapse-left" title="收起/展开左侧作品栏" aria-pressed="false" aria-label="收起或展开左侧作品栏">
+          <svg class="w-pc-i" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M10 3.5 5.5 8 10 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button type="button" id="w-collapse-right" class="w-panel-collapse w-panel-collapse-right" title="收起/展开右侧记录板" aria-pressed="false" aria-label="收起或展开右侧记录板">
+          <svg class="w-pc-i" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <!-- 左栏：常驻「工作区：<路径> ▾」+ 常驻可操作提示 + 三层
              （① 空态：选/建工作区 ② 作品卡片墙 ③ 作品内文档树）。同一时间只显示一「层」，见 writing.js renderSidebar() -->
         <aside class="w-sidebar" id="w-sidebar">
@@ -326,10 +332,17 @@
               <div class="w-editor-empty-hint" id="w-editor-empty-hint"></div>
               <button id="w-editor-newdoc" hidden>新建一篇（自动命名）</button>
             </div>
-            <!-- EDITOR BLOCK：当前 = 纯文本所见即所得写作区（契约见 writing.js 顶部） -->
-            <div id="w-editor" class="w-editor" contenteditable="true" spellcheck="false"
-                 role="textbox" aria-multiline="true" aria-label="写作区"
-                 data-placeholder="在此写正文…"></div>
+            <!-- EDITOR BLOCK：当前 = 纯文本所见即所得写作区（契约见 writing.js 顶部）。
+                 .w-editor-scroll = 行号槽(左) + 编辑器(右) 的同排 flex 行：编辑器自身仍是滚动体，
+                 行号槽不进编辑器 DOM ⇒ 不碰"整篇一个文本节点"的纯文本契约，仅做显示参照（IDE gutter）。 -->
+            <div class="w-editor-scroll">
+              <div class="w-editor-gutter" id="w-editor-gutter" aria-hidden="true">
+                <div class="w-editor-gutter-inner" id="w-editor-gutter-inner"></div>
+              </div>
+              <div id="w-editor" class="w-editor" contenteditable="true" spellcheck="false"
+                   role="textbox" aria-multiline="true" aria-label="写作区"
+                   data-placeholder="在此写正文…"></div>
+            </div>
           </div>
           <!-- ⑪ D-sync-1（b）：「看远端内容」只读浮层 —— 弹覆盖横幅时先看清远端新旧再决定。
                只读：不碰本地一字；跟着横幅 / 切文档一起收（见 writing.js syncHideBanner / selectDoc）。 -->

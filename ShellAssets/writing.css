@@ -57,9 +57,7 @@
 /* ⑥ CR-6「分栏」开关：开着时保持"按下"观感 —— 否则开关状态在界面上完全看不出来 */
 #page-writing #w-split.active { background: var(--dsw-alias-interactive-bg-hover); }
 
-/* ⑰ 左右栏独立收起：收起态保持"按下"观感，与 #w-split.active 同口径 */
-#page-writing #w-collapse-left.active,
-#page-writing #w-collapse-right.active { background: var(--dsw-alias-interactive-bg-hover); }
+/* ⑰ 左右栏独立收起的边缘折叠把手样式见本文件「⑰ 栏位边缘折叠把手」（分栏浮层规则附近） */
 
 /* ── 工具栏 ───────────────────────────────────────────────────────────── */
 #page-writing .w-toolbar {
@@ -114,6 +112,8 @@
 
 /* 左栏：三层（空态 / 作品卡片墙 / 作品内文档树）（宽度 240 是设计文档 §2.1 的定数，非 token） */
 #page-writing .w-sidebar {
+  /* border-box：240 是**外宽**定数（含 .5px 分隔线），边缘折叠把手才能可靠骑缝（2026-10-20） */
+  box-sizing: border-box;
   flex: 0 0 240px; display: flex; flex-direction: column; min-height: 0;
   /* ⚠️ `min-width: 0` 必须留：flex 项默认 `min-width:auto` = 内容最小宽度，会把 `flex-basis:240px`
      **顶穿**。实测（2026-09-25）加入 nowrap 的层标题（`.w-panel-title` 里是**完整工作区路径**）后，
@@ -422,8 +422,16 @@
       不设（默认）时**不留 inline** ⇒ 下面这套值就是原行为。
    ⚠️ 行宽为什么用 **em** 不用 `ch`：`ch` 是 "0" 的宽度，等宽字体下 ≈0.6em，
       而中文全角字宽 ≈1em ⇒ 用 ch 会**低估**每行汉字数（实测见报告）。 */
+/* 行号槽 + 编辑器 的同排 flex 行（findbar 之下占满 host；editor 仍是自己的滚动体）。
+   min-height:0 让它在 column flex 的 host 里可以正确收窄，不顶破布局。 */
+#page-writing .w-editor-scroll {
+  position: relative;
+  flex: 1 1 auto; display: flex; flex-direction: row;
+  min-height: 0; min-width: 0;
+  background: var(--dsw-alias-bg-base);
+}
 #page-writing .w-editor {
-  flex: 1 1 auto; width: 100%; box-sizing: border-box;
+  flex: 1 1 auto; min-width: 0; box-sizing: border-box;
   border: 0; outline: none;
   padding: 12px 14px;
   white-space: pre-wrap;    /* 🔴 字面换行 + 连续空格原样显示（纯文本写作区的前提） */
@@ -445,6 +453,37 @@
   content: attr(data-placeholder);
   color: var(--dsw-alias-label-dimmed);
   pointer-events: none;
+}
+
+/* ── ⑱ IDE 式行号槽（gutter，2026-10-20）────────────────────────────────────
+   只做**显示参照**：agent 输出常以"第 N 行"定位，有行号槽可快速找到。
+   · 不进编辑器 DOM ⇒ 不碰"整篇一个文本节点 + 字面 \n"的纯文本/存盘往返契约；
+   · 每个**逻辑行**一个编号（软换行的续行不编号）⇒ 编号数 = getText().split('\n').length；
+   · 行顶位置由 writing.js 用 Range 实测（软换行也对得准），不靠行高乘序号估算；
+   · 编辑器是滚动体，槽不滚：内层 inner 用 translateY(-scrollTop) 跟着内容平移；
+   · 字体度量（字号/字体族）由 JS 从编辑器 copy，保证垂直对齐。 */
+#page-writing .w-editor-gutter {
+  flex: 0 0 auto; overflow: hidden;
+  box-sizing: content-box;
+  /* 顶部不留白：行号 translateY 已含编辑器顶部 12px 内边距（再加会双重下移） */
+  padding-left: 8px;
+  padding-right: 6px;                     /* 数字与右侧分隔线的留白；宽度由 JS 按位数写 inline */
+  background: var(--dsw-alias-bg-base);
+  border-right: .5px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-dimmed);
+  user-select: none; pointer-events: none;
+  text-align: right;
+}
+#page-writing .w-editor-gutter-inner {
+  position: relative;
+  width: 100%;
+}
+#page-writing .w-gutter-line {
+  position: absolute; left: 0; right: 0;
+  text-align: right;
+  line-height: 1;                        /* JS 会同步编辑器行高；默认值仅首屏兜底 */
+  white-space: nowrap; overflow: hidden;
+  will-change: transform;
 }
 
 /* ── 🔴 D-6：无归属时的「写作区锁定」覆盖层 ──────────────────────────────────
@@ -483,11 +522,19 @@
   background: #e6f0e4; color: #2e3a2c; caret-color: #4a6b45;
 }
 #page-writing[data-typo-color="green"] .w-editor::selection { background: #cbe0c5; color: #2e3a2c; }
+/* 行号槽随配色预设：底色同编辑器（分隔线沿用 --dsw-alias-border-l1，字色走 --dsw-alias-label-dimmed） */
+#page-writing[data-typo-color="sepia"] .w-editor-scroll,
+#page-writing[data-typo-color="sepia"] .w-editor-gutter { background: #f7f1e3; }
+#page-writing[data-typo-color="green"] .w-editor-scroll,
+#page-writing[data-typo-color="green"] .w-editor-gutter { background: #e6f0e4; }
 
 /* （原「预览块」样式整段已删 —— B4 起中栏只有写作区，`.w-preview` 不再存在） */
 
 /* 右栏：占位（阶段④ 记录板 / 文件预览）—— 宽度 288 是设计文档 §2.1 的定数 */
 #page-writing .w-right {
+  /* border-box：288 是**外宽**定数（含 12px*2 padding 与 .5px 分隔线；默认 content-box 时外宽实为 312.7px，
+     会把折叠把手的骑缝定位顶偏）（2026-10-20） */
+  box-sizing: border-box;
   flex: 0 0 288px; padding: 12px;
   font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary);
   background: var(--dsw-specific-sidebar-fill);
@@ -661,20 +708,61 @@
       「主体三栏」那条）⇒ 不会盖住顶部工具栏与底部状态栏，那两处操作仍可直接点。 */
 #w-main.split .w-sidebar {
   position: absolute; left: 0; top: 0; bottom: 0; z-index: 20;
-  width: 280px;   /* 比常驻时(240)宽一点：改成"用完即收"，信息密度优先 */
+  box-sizing: border-box;
+  width: 280px;   /* 比常驻时(240)宽一点：改成"用完即收"，信息密度优先；border-box 下即外宽 */
   border-right: .5px solid var(--dsw-alias-border-l1);
   box-shadow: var(--dsw-elevation-soft);
 }
 #w-main.split .w-right {
   position: absolute; right: 0; top: 0; bottom: 0; z-index: 20;
+  box-sizing: border-box;
   /* 🔴 `width` 必须显式给：绝对定位下 `flex: 0 0 288px` 的 flex-basis **完全失效**
      （absolute 子元素不是 flex item）⇒ 只给 right:0 的话宽度会收缩成内容宽（占位文案那么窄）。
-     288 保持常驻时的定数（设计文档 §2.1）。 */
+     288 保持常驻时的定数（设计文档 §2.1）；border-box 下即外宽。 */
   width: 288px;
   box-shadow: var(--dsw-elevation-soft);
 }
 #w-main.split .w-sidebar[hidden],
 #w-main.split .w-right[hidden] { display: none; }
+
+/* ══ ⑰ 栏位边缘折叠把手（2026-10-20 用户定：不放进顶部工具栏，改骑在栏靠写作区一侧的缝上）════
+   🔑 为什么是 .w-body 的绝对定位子元素：① 不占顶部工具栏空间，上方按钮保持一行；
+      ② 不能放进侧栏本身——侧栏收起（[hidden]）后把手会跟着消失，就没法再点回来；
+      ③ .w-body 本就是 position:relative（分栏浮层的定位基准），相对它骑缝最直接。
+   定位基准 .w-body：其内部 flex 行依次为 侧栏(240，border-box 外宽定数) / 中栏(flex:1) / 右栏(288 外宽定数)。
+        · 展开态：左把手 left:240px（左缘贴侧栏与中栏的缝，16px 宽落在中栏一侧）；
+                  右把手 right:288px（右缘贴右栏与中栏的缝）；
+        · 收起态（.active）：对应栏 [hidden] 后中栏占满 .w-body，左把手 left:0 贴左缘；
+                  右把手 right:18px —— 右栏收起后编辑器滚动条贴在窗口右缘（宽约 17px），
+                  若把手也 right:0 会盖住那 44px 高度内的滚动条，故向左让出滚动条宽。
+   层级 15：常驻下盖在栏缝之上可点；分栏浮层 z-index:20 时整组把手 display:none，
+        浮层显隐交回工具栏「作品/文档」「记录板」。 */
+#page-writing .w-panel-collapse {
+  position: absolute; top: 50%; z-index: 15;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 44px; padding: 0; margin: 0;
+  /* 2026-10-20：边框 l1(#0000000a,4%) 落在白底写作区上几乎不可见，用户全屏找不到把手
+     → 提到 l2(10%) 并加最轻投影 lv1，常态即可看出"浮起的小按钮"轮廓；hover 仍走灰底。 */
+  border: .5px solid var(--dsw-alias-border-l2); border-radius: 0 6px 6px 0;
+  box-shadow: var(--dsw-shadow-lv1);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background-color .12s ease, left .12s ease, right .12s ease;
+}
+#page-writing .w-panel-collapse:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+#page-writing .w-panel-collapse:focus-visible { outline: none; border-color: var(--dsw-alias-brand-primary); }
+#page-writing .w-panel-collapse-left { left: 240px; }
+#page-writing .w-panel-collapse-right { right: 288px; border-radius: 6px 0 0 6px; }
+#page-writing #w-collapse-left.active { left: 0; }
+#page-writing #w-collapse-right.active { right: 18px; }
+/* 收起后箭头翻转 180°（VS Code 惯例：始终指向"展开方向"）。
+   旋转落在 svg 上 ⇒ 不碰按钮自身的 translateY(-50%) 定位。 */
+#page-writing .w-panel-collapse svg { transition: transform .12s ease; }
+#page-writing .w-panel-collapse.active svg { transform: rotate(180deg); }
+/* 分栏（浮层）时整组隐藏：浮层由 #w-docs/#w-board 控制，边缘把手不参与 */
+#w-main.split .w-panel-collapse { display: none; }
 
 /* ── 状态栏 ───────────────────────────────────────────────────────────── */
 #page-writing .w-statusbar {
