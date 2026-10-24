@@ -47,7 +47,7 @@ xcodebuild test -project DSHRemote.xcodeproj -scheme DSHRemote -destination "id=
 | `ShellAssets/dsw-tokens.css` `writing.css` | PC 样式原样副本 | 新增（复制） |
 | `ShellAssets/send.js` `watch.js` `editor-plain.js` `proofread.js` `sync-core.js` `writing-count-core.js` `writing.js` `send-net.js` `proofread-net.js` `sync-net.js` | PC 核心 JS 原样副本（共 10） | 新增（复制） |
 | `ShellAssets/ipad.css` | **iOS 壳侧附加**样式：触控热区/touch-action/按 id 隐藏选目录 UI/软键盘；不改核心 | 新增 |
-| `ShellAssets/ipad.js` | **iOS 壳侧附加**脚本：visualViewport 键盘兜底/点空白收键盘（回网补推由 writing.js 核心已有 online 钩子承接，此处不重复绑定）；不改核心 | 新增 |
+| `ShellAssets/ipad.js` | **iOS 壳侧附加**脚本：visualViewport 键盘兜底/点空白收键盘（~~回网补推由 writing.js 核心已有 online 钩子承接，此处不重复绑定~~ **【2026-10-24 更正】该假设已证伪：writing.js 的 online 钩子只做 refreshToday/字数队列/syncDrainPendingOps（仅 archive/restore/purge），不补推正文；iOS 桥亦无 syncPendingOps，OutboxStore 长期无 JS 消费方。正文回网补推已改由 ipad.js 壳侧发件箱 drain 承接，见 [2026-10-24-ipad-outbox-drain.md](file:///e:/项目/dsh-remote-ios/docs/superpowers/plans/2026-10-24-ipad-outbox-drain.md)）；不改核心 | 新增 |
 | `Sources/AssetManifest.swift` | 资产白名单 + Content-Type | 改：白名单 11→12（Task 2）再 12→14（Task 12 加 ipad.css/ipad.js） |
 | `Sources/ShellHTMLRewriter.swift` | 壳 HTML 运行时改写（运行时 14 处命中） | Task 12 改：viewport meta 增补 `interactive-widget=resizes-content`、writing.css link 后注入 ipad.css、sync-net.js script 后注入 ipad.js（先插 `/__shell__/ipad.*` 字面量再复用既有正则，命中数自洽为 14） |
 | `Sources/ShellSchemeHandler.swift` | 应答 `dsh-asset://local/<name>` | 不改代码（仅注册） |
@@ -6398,6 +6398,8 @@ iPad 连 Tailscale 并确认写作页正常加载、登录态有效后：
 保持 13.7 的本地改动：
 
 1. 重开 Wi-Fi / Tailscale 回网；writing.js 核心的 `online → refreshToday().then(drainWritingQueue)` 与 sync-net.js 补推应自动发起，**不依赖**手动杀进程；
+
+   > **【2026-10-24 更正注记】** 本条原假设"writing.js online 钩子 + sync-net.js 自动补推正文"不成立：经代码核实，该钩子不重放正文保存（仅字数队列与 archive/restore/purge），iOS 桥也无 `syncPendingOps`。**正文回网补推实际由 ipad.js 壳侧发件箱 drain 承接**（OutboxStore 入队 → `drainOutbox` 经 WCSync.decidePush 裁决补推，触发点=安装即补推/window online/visibilitychange，另有 15→300s 有界退避）。本步验收判据（回网后自动发起、业务侧服务端可见）仍然有效、无需改动，只是承接实现改为壳 drain。详见 [2026-10-24-ipad-outbox-drain.md](file:///e:/项目/dsh-remote-ios/docs/superpowers/plans/2026-10-24-ipad-outbox-drain.md) Task 4.4（其场景 2/3/4 与本步对应）。
 2. 观察左栏/顶部同步状态从待同步转为已同步，`#w-sync-banner`（本端不隐藏）无错误态；
 3. 用 PC 客户端（或控制台）打开同一文档，确认 iPad 离线编辑内容**已在服务端**（保存即推/补推成功的业务判据，不只是 iPad UI 变绿）；
 4. 打开比对：在另一台端改动同一文档后回到 iPad 打开它，确认拉到的是服务端新版本而非旧缓存。

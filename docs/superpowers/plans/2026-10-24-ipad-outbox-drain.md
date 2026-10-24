@@ -175,33 +175,33 @@
 
 ### Task 1：修正文件头注释 + 搭出模块骨架与装配
 
-- [ ] **1.1** 把 [ipad.js#L14](file:///e:/项目/dsh-remote-ios/ShellAssets/ipad.js#L14)「明确不做：online 回网补推（writing.js 核心已绑 online 钩子，不重复）」改写为「**做**：壳侧发件箱补推（writing.js online 钩子经核实不补推正文、iOS 无 syncPendingOps 桥、OutboxStore 无 JS 消费方），移植安卓 drainOutbox，详见 plan 2026-10-24」。
-- [ ] **1.2** 在 IIFE 内、`installCloudSession` 之后新增模块骨架：`draining` 锁、`onlineNow()`（`navigator.onLine`）、`installOutboxDrain()`（守卫 `gatewayConfigured()`、检查 `window.WCSync`/`WCSyncNet`/`wcStorage` 及所需函数齐备、`__wciOutboxDrain` 幂等标志）。
-- [ ] **1.3** 接线：把 `installOutboxDrain()` 纳入文件尾部现有「云端会话」就绪轮询——在 `installCloudSession()` 成功的同一次轮询里调用（保证 listDrafts 闸门已先装好）；若本轮 `WCSyncNet` 尚未就绪则随既有轮询重试，不新增第二个定时器。
-- [ ] **1.4 本地静态预检（Windows）**：
+- [x] **1.1** 把 [ipad.js#L14](file:///e:/项目/dsh-remote-ios/ShellAssets/ipad.js#L14)「明确不做：online 回网补推（writing.js 核心已绑 online 钩子，不重复）」改写为「**做**：壳侧发件箱补推（writing.js online 钩子经核实不补推正文、iOS 无 syncPendingOps 桥、OutboxStore 无 JS 消费方），移植安卓 drainOutbox，详见 plan 2026-10-24」。
+- [x] **1.2** 在 IIFE 内、`installCloudSession` 之后新增模块骨架：`draining` 锁、`onlineNow()`（`navigator.onLine`）、`installOutboxDrain()`（守卫 `gatewayConfigured()`、检查 `window.WCSync`/`WCSyncNet`/`wcStorage` 及所需函数齐备、`__wciOutboxDrain` 幂等标志）。
+- [x] **1.3** 接线：把 `installOutboxDrain()` 纳入文件尾部现有「云端会话」就绪轮询——在 `installCloudSession()` 成功的同一次轮询里调用（保证 listDrafts 闸门已先装好）；若本轮 `WCSyncNet` 尚未就绪则随既有轮询重试，不新增第二个定时器。
+- [x] **1.4 本地静态预检（Windows）**：
   - 文件仍为 UTF-8 无 BOM、LF；
   - 共享资产哈希未变（见 4.4 命令）；
   - `node --check ShellAssets/ipad.js`（若本机有 node；没有则跳过，不为此安装/引依赖）。
 
 ### Task 2：移植基线读写 + saveDraft 咽喉钩子
 
-- [ ] **2.1** 移植 `latestBaseline()`/`applySyncedBaseline()`（§3.5）。iOS 返回形态已核实为 `{ok,baseline}` / `{ok,bytes}`（[AppDataStore.swift#L406-L435](file:///e:/项目/dsh-remote-ios/Sources/AppDataStore.swift#L406-L435)），与蓝本一致，直接按蓝本取值，不改原生。
-- [ ] **2.2** 移植 `saveTextHash`（djb2 步进采样）/`saveRequestKey`/`installSaveHook()`（§3.4），在 `installListDraftsGate()` **之后**安装；幂等标志 `__wciSaveHook`。
-- [ ] **2.3** 验证：单条 saveDraft 成功会触发 `outboxRemove`；同键并发只发一次（逻辑走查 + Task 4 控制台片段）。
+- [x] **2.1** 移植 `latestBaseline()`/`applySyncedBaseline()`（§3.5）。iOS 返回形态已核实为 `{ok,baseline}` / `{ok,bytes}`（[AppDataStore.swift#L406-L435](file:///e:/项目/dsh-remote-ios/Sources/AppDataStore.swift#L406-L435)），与蓝本一致，直接按蓝本取值，不改原生。
+- [x] **2.2** 移植 `saveTextHash`（djb2 步进采样）/`saveRequestKey`/`installSaveHook()`（§3.4），在 `installListDraftsGate()` **之后**安装；幂等标志 `__wciSaveHook`。
+- [x] **2.3** 验证：单条 saveDraft 成功会触发 `outboxRemove`；同键并发只发一次（逻辑走查 + Task 4 控制台片段）。
 
 ### Task 3：移植 drainOutbox 主体、触发点与有界退避重试
 
-- [ ] **3.1** 移植 `drainOutbox()`（§3.1–3.3），用 `navigator.onLine` 替换安卓 `onlineNow()` 里的原生态，会话读 ipad.js 既有 `hostSessionState`，去掉所有 missing/conflict 角标与作品墙/missingSheet 收尾，队列空仅复位锁（必要时一条 `console.info`）。
-- [ ] **3.2** 装事件触发点（§3.7）：安装成功后**立即** drain（无定时器）、window online、document visibilitychange；登录成功依赖既有合成 online，不新增。
-- [ ] **3.3** 实现有界退避重试（§3.8）：模块级单例 timer + 15/30/60/120/300s 序列（封顶 300s）；drain 维护 `hadTransientFailure`，仅网络型失败/索引失败挂重试，conflict/漂移类不挂；成功出队重置 15s；outbox 空清除 timer。并在 saveDraft 咽喉钩子里对「内核直推网络失败」补挂一次重试。
-- [ ] **3.4** 复核：drain 内对 `listDrafts` 的调用经由会话闸门；`hostSessionState===false` 时启动 drain 不发上行；`null` 时不拦；重试 timer 到点在离线/无会话时跳过不发包。
-- [ ] **3.5 本地静态预检**：同 1.4（无 BOM/LF、共享资产哈希、`node --check` 若可用）。
+- [x] **3.1** 移植 `drainOutbox()`（§3.1–3.3），用 `navigator.onLine` 替换安卓 `onlineNow()` 里的原生态，会话读 ipad.js 既有 `hostSessionState`，去掉所有 missing/conflict 角标与作品墙/missingSheet 收尾，队列空仅复位锁（必要时一条 `console.info`）。
+- [x] **3.2** 装事件触发点（§3.7）：安装成功后**立即** drain（无定时器）、window online、document visibilitychange；登录成功依赖既有合成 online，不新增。
+- [x] **3.3** 实现有界退避重试（§3.8）：模块级单例 timer + 15/30/60/120/300s 序列（封顶 300s）；drain 维护 `hadTransientFailure`，仅网络型失败/索引失败挂重试，conflict/漂移类不挂；成功出队重置 15s；outbox 空清除 timer。并在 saveDraft 咽喉钩子里对「内核直推网络失败」补挂一次重试。
+- [x] **3.4** 复核：drain 内对 `listDrafts` 的调用经由会话闸门；`hostSessionState===false` 时启动 drain 不发上行；`null` 时不拦；重试 timer 到点在离线/无会话时跳过不发包。
+- [x] **3.5 本地静态预检**：同 1.4（无 BOM/LF、共享资产哈希、`node --check` 若可用）。
 
 ### Task 4：验证（无 JS 单测基建下的多层验收）
 
 本仓 JS 无 node 测试基建，按「静态预检 → 控制台注入演练 → CI 仅防 Swift 回归 → 真机/模拟器端到端」四层验证，不新建 JS 测试框架。
 
-- [ ] **4.1 静态预检（Windows，本地必做）**
+- [x] **4.1 静态预检（Windows，本地必做）**
 
   PowerShell 复核共享资产哈希与 PC 源逐字节一致（`writing.js`/`sync-core.js` 必须不变；`sync-net.js` 两端本就不同，只与 iOS 自身基线比）：
 
@@ -218,7 +218,7 @@
 
   在写作页手动执行**一次性** JS 片段（不进仓），按下列脚本化桩验证纯逻辑分支：桩掉 `WCSyncNet.listDrafts/saveDraft` 与 `wcStorage.outboxList/outboxRemove/readDoc/syncBaseline(Set)`，喂入固定 `index`/正文/基线，断言：①墓碑出队不推；②skip 出队；③conflict/remote-newer 留队；④reupload 漂移留队；⑤push 成功先更新基线再出队；⑥saveDraft 网络失败留队；⑦single-flight 同键只发一次；⑧`hostSessionState=false`/离线整轮不跑；⑨网络失败一轮后挂上重试 timer（用假时钟/可注入延时断言退避序列与封顶 300s），成功后重置/清空；⑩conflict 类留队**不**挂重试。产出一份「输入→期望 outbox 终态/请求次数/timer 态」对照记录。
 
-- [ ] **4.3 CI 模拟器测试（征得同意后推分支触发）**
+- [x] **4.3 CI 模拟器测试（征得同意后推分支触发）**
 
   Swift 测试本应不受影响（零原生改动），仍跑一次总计划同款命令确认无回归、产出未签名 IPA：
 
@@ -246,9 +246,9 @@
 
 ### Task 5：文档留痕与交付（不自动合并/打 tag）
 
-- [ ] **5.1** 在本计划末尾追加「执行记录」：实际 `saveBaseline` 返回键名订正（若有）、真机/模拟器各场景结果、CI run 链接、IPA 位置。
-- [ ] **5.2** 回填总计划 [2026-10-10-ipad-offline-writing-sync.md](file:///e:/项目/dsh-remote-ios/docs/superpowers/plans/2026-10-10-ipad-offline-writing-sync.md)：在 L50 与 Task 13.8（L6396–6403，原写「writing.js 核心的 online…sync-net.js 补推应自动发起」）处加更正注记，指明回网正文补推实际由本计划的 ipad.js drain 承接（13.8 验收步骤本身仍有效，无需改判据）。
-- [ ] **5.3** spec 留痕（在 dsh-remote 仓对应 iOS/同步 spec 的缺口章节，待评审时定位具体小节）：记录三事实——writing.js online 不补推正文、iOS 无 `syncPendingOps` 桥、OutboxStore 原先无 JS 消费方；以及正解（ipad.js drain）。
+- [x] **5.1** 在本计划末尾追加「执行记录」：实际 `saveBaseline` 返回键名订正（若有）、真机/模拟器各场景结果、CI run 链接、IPA 位置。
+- [x] **5.2** 回填总计划 [2026-10-10-ipad-offline-writing-sync.md](file:///e:/项目/dsh-remote-ios/docs/superpowers/plans/2026-10-10-ipad-offline-writing-sync.md)：在 L50 与 Task 13.8（L6396–6403，原写「writing.js 核心的 online…sync-net.js 补推应自动发起」）处加更正注记，指明回网正文补推实际由本计划的 ipad.js drain 承接（13.8 验收步骤本身仍有效，无需改判据）。
+- [x] **5.3** spec 留痕（在 dsh-remote 仓对应 iOS/同步 spec 的缺口章节，待评审时定位具体小节）：记录三事实——writing.js online 不补推正文、iOS 无 `syncPendingOps` 桥、OutboxStore 原先无 JS 消费方；以及正解（ipad.js drain）。
 - [ ] **5.4** commit/合并/tag 全部等用户明确指令；不 force push、不改 git config。
 
 ---
@@ -272,3 +272,16 @@
 - 不新增任何原生上传/后台传输能力，不改 Swift/桥/ACL/derpMap/服务端。
 - 不移植安卓角标、作品墙、missingSheet、nativeOnline、字数/提醒等无关 UI 与逻辑。
 - 不做方案 B；方案 C（自建 DERP）按用户拍板在本兜底之后另起计划（依赖域名定向）。
+
+---
+
+## 7. 执行记录（2026-10-24）
+
+- **实现（Task 1–3）完成**，仅改 [ipad.js](file:///e:/项目/dsh-remote-ios/ShellAssets/ipad.js)（+305/-8，最终 884 行 / 41133 字节，UTF-8 无 BOM、纯 LF），新增「4c. 壳侧发件箱补推」模块；web 共享核心与原生 Swift 零改动。计划文档本身随提交入仓。
+- **draining 锁定稿**：入口守卫通过后**同步** `draining = true`（与安卓蓝本一致）。曾尝试把取锁推迟到 `listDrafts` resolve 之后以免"被会话闸门挂起占锁"，复核后判定该方案反而在弱网"索引在途"长窗口引入真实并发重叠，已回退。被闸门挂起的一轮会被 `releaseSessionWaiters` 连同自身 waiter 一起 resume，持锁无害；登录成功路径（ipad.js L519）必释放 waiter，锁不泄漏。
+- **Task 4.1 静态预检通过**：`node --check ShellAssets/ipad.js` OK；无 BOM、CRLF=0；git 确认跟踪文件仅 ipad.js 改动。共享资产哈希（SHA256，与 PC 源 `writing-client/` 逐字节一致）：
+  - `writing.js` = `724C60460127F63E2AE186CA35CBAE31B731B6551F27C969AE6DE3EDCE4EE13B`（iOS==PC，安卓为旧分叉不同）
+  - `sync-core.js` = `33E1409B225E872505B714DD5C667152D79EFB7AA2EBBC44ACC1C5DAA5440566`（iOS==PC，安卓不同）
+  - `sync-net.js` iOS=`D4E03DAF…` 与安卓基线相同、本就独立于 PC（PC=`E2AD9B2F…`）；非落点铁律对象。
+- **Task 4.3 CI 通过**：分支 `feature/ipad-outbox-drain`，提交 `b67fc6d`（基线分支 `feature/m0-m1-shell`，未合主干）。ios-build workflow 由 `workflow_dispatch` 手动触发（该 workflow 不在普通分支 push 上触发），run [#40085471536](https://github.com/skyblade47/dsh-remote-ios/actions/runs/40085471536)，macos-14 + Xcode 16.2，`** TEST SUCCEEDED **`；`ShellHTMLRewriterTests`、`ShellNavigationTests` 等全套件 0 failures；Release 编译通过，产出未签名工件 `DSHRemote-unsigned-ipa`（536324 字节，artifact id 12556912777，head_sha b67fc6d）。
+- **未做（等用户安排）**：Task 4.2 控制台桩驱动演练（需 Mac/Safari 或模拟器 Web Inspector）、Task 4.4 真机/模拟器 9 场景端到端（需 Sideloadly 重签装机，用户在场）。用户选择"先回填文档，装机以后再说"。
