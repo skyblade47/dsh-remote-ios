@@ -1,5 +1,5 @@
 /* ipad.js —— iOS 壳侧附加脚本（rewriter 在 sync-net.js 之后、内联 tab 脚本之前注入）
- * 本地优先壳的 iPad 适配，做四件事：
+ * 本地优先壳的 iPad 适配，做五件事：
  *   0. 默认落在[写作]页（本地程序与工作区）；未配网关时让 [DSH] iframe 不发无效请求，
  *      配了网关则恢复同源 /app#/（对话=网关虚拟同源）；
  *   1. visualViewport resize 时让光标行保持可见（interactive-widget=resizes-content
@@ -11,8 +11,13 @@
  *   4. 云端会话：本 host 会话探针 + 登录提示条/浮层（cookie 按 host 隔离，Funnel 域没有
  *      dsh_session 时网关对 clientZoneList 回 302 登录页，写作端静默不显示云端作品），
  *      并在 WCSyncNet.listDrafts 外包一层闸门，登录成功后挂起的清单请求自然兑现、云端卡出现。
- * 明确不做：online 回网补推（writing.js 核心已绑 online 钩子，不重复）、
- *           分栏 pointer 交互（核心已实现，CSS touch-action 即够）、横幅/主题/手机形态、
+ *   5. 壳侧发件箱补推（outbox drain）：离线/弱网期间 writeDoc 落盘成功即被原生 OutboxStore
+ *      入队，但经核实 writing.js 的 online 钩子只做 refreshToday/drainWritingQueue 与
+ *      archive/restore/purge 的 syncDrainPendingOps，并不补推正文，且 iOS 无 syncPendingOps 桥，
+ *      队列长期只进不出。这里移植安卓 drainOutbox（裁剪掉角标/作品墙/missingSheet/nativeOnline），
+ *      在回网/重启/重新登录/页面重新可见/持续弱网有界退避重试时把正文可靠补推，详见
+ *      plan 2026-10-24-ipad-outbox-drain。零原生、零共享核心改动。
+ * 明确不做：分栏 pointer 交互（核心已实现，CSS touch-action 即够）、横幅/主题/手机形态、
  *           左右栏收起（栏位一字不动）。
  */
 (function () {
@@ -512,7 +517,8 @@
         hostSessionState = true
         renderAuthBar()
         releaseSessionWaiters() // 挂起的清单请求放行 → 200 → 写作端重画侧栏显云端卡
-        // 回到联网态：writing.js 的 online 钩子会 refreshToday/drainWritingQueue（补推待发）。
+        // 合成 online：writing.js 核心钩子（refreshToday/字数队列）与壳侧发件箱补推
+        // （installOutboxDrain 绑定的 drainOutbox）都会据此回网补推。
         try { window.dispatchEvent(new Event('online')) } catch (e2) { /* 忽略 */ }
       }).catch(function () {
         fail('网络异常，请稍后再试')
@@ -544,6 +550,292 @@
     return true
   }
 
+  // ───────────────────── 4c. 壳侧发件箱补推（outbox drain）─────────────────────
+  //
+  // 缺口（plan 2026-10-24-ipad-outbox-drain §0.2）：原生 writeDoc 落盘成功即
+  // outbox.add，但全仓没有任何 JS 消费方；writing.js 的 online 钩子不补推正文；
+  // iOS 桥无 syncPendingOps。故离线/弱网正文在回网后无人重放。这里一比一移植安卓
+  // android-shell.js 的 drainOutbox/saveDraft 咽喉钩子/基线读写（spec 语义见 plan §3），
+  // 裁剪掉角标/作品墙/missingSheet/nativeOnline；iOS 在线判定一律用 navigator.onLine。
+  // 额外加一件安卓没有的事：持续弱网（onLine=true 但国际链路抖动、无 online 事件）下的
+  // 有界退避重试（15→30→60→120→300s 封顶）。零原生、零共享核心改动。
+  var draining = false
+  var baselineCache = null
+  var inflightSave = Object.create(null)
+  var retryTimer = 0
+  var retryStep = 0
+  var RETRY_DELAYS_MS = [15000, 30000, 60000, 120000, 300000]
+
+  function onlineNow() {
+    return navigator.onLine !== false
+  }
+
+  function clearDrainRetry() {
+    retryStep = 0
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = 0 }
+  }
+
+  // 到点仍不具备联网/会话条件则跳过本次（不联网不发包），但继续排下一档延时，
+  // 直到条件满足且仍有条目；成功出队重置回 15s，出空即清（finishDrainRound 统一收口）。
+  function scheduleDrainRetry() {
+    if (!gatewayConfigured()) return
+    if (retryTimer) return
+    var delay = RETRY_DELAYS_MS[Math.min(retryStep, RETRY_DELAYS_MS.length - 1)]
+    retryStep += 1
+    retryTimer = setTimeout(function () {
+      retryTimer = 0
+      if (gatewayConfigured() && onlineNow() && hostSessionState !== false) {
+        drainOutbox()
+      } else {
+        scheduleDrainRetry()
+      }
+    }, delay)
+  }
+
+  function latestBaseline() {
+    return api.syncBaseline().then(function (br) {
+      var base = (br && br.ok && br.baseline) ? br.baseline : baselineCache
+      baselineCache = base || null
+      return base
+    }).catch(function () { return baselineCache })
+  }
+
+  // 补推成功后把响应 version 并入同步基线（读—WCSync.updateBaseline—写）。
+  // 任一步失败只告警、不阻断 outbox 清理：基线丢失仅退化为内容哈希比对，不影响数据正确性。
+  function applySyncedBaseline(relPath, remoteVersion) {
+    if (!remoteVersion) return Promise.resolve()
+    return api.syncBaseline().then(function (br) {
+      var base = (br && br.ok && br.baseline) ? br.baseline : null
+      var next = window.WCSync.updateBaseline(base, relPath, remoteVersion, Date.now())
+      baselineCache = next
+      return api.syncBaselineSet(next)
+    }).then(function (wr) {
+      if (!wr || !wr.ok) console.warn('基线写入失败，不阻断补推', relPath, wr && wr.error)
+    }).catch(function (err) { console.warn('基线更新异常，不阻断补推', relPath, err) })
+  }
+
+  // spec §6.25/§6.44（同安卓）：saveDraft 是所有上行的唯一咽喉。
+  //   · 成功即 outboxRemove（writeDoc 落盘时已无条件入队，直推成功后无人移除）；
+  //   · single-flight：同 rel|base|长度|djb2 哈希 的在途调用复用同一个 Promise，
+  //     防回网瞬间内核直推与壳 drain 对同一文档各发一次、第二个 409 被误判冲突。
+  // djb2 长文按 step=ceil(len/2000) 采样，避免大正文每次按键全量算哈希。
+  function saveTextHash(text) {
+    var s = String(text == null ? '' : text)
+    var h = 5381
+    var step = s.length > 4000 ? Math.ceil(s.length / 2000) : 1
+    for (var i = 0; i < s.length; i += step) {
+      h = ((h << 5) + h + s.charCodeAt(i)) | 0
+    }
+    return String(h)
+  }
+  function saveRequestKey(relPath, text, opts) {
+    var o = opts || {}
+    var base = o.baseVersion != null ? String(o.baseVersion) : (o.force ? 'force' : '')
+    var s = String(text == null ? '' : text)
+    return String(relPath) + '|' + base + '|' + s.length + '|' + saveTextHash(s)
+  }
+  function installSaveHook() {
+    var net = window.WCSyncNet
+    if (!net || typeof net.saveDraft !== 'function' || net.__wciSaveHook) return false
+    var orig = net.saveDraft.bind(net)
+    net.saveDraft = function (relPath, text, opts) {
+      var key = saveRequestKey(relPath, text, opts)
+      var going = inflightSave[key]
+      if (going) return going
+      going = orig(relPath, text, opts).then(function (r) {
+        if (r && r.ok && relPath && api && typeof api.outboxRemove === 'function') {
+          // 出队失败不影响保存结果（与安卓一致）
+          return api.outboxRemove(relPath).then(function () { return r }).catch(function () { return r })
+        }
+        // 内核直推网络型失败（非 409 冲突）：兜底挂上退避重试，防止失败发生在两次
+        // drain 之间、又没有新事件触发（plan §3.8）。
+        if (r && !r.ok && !r.conflict && gatewayConfigured() &&
+            onlineNow() && hostSessionState !== false) {
+          scheduleDrainRetry()
+        }
+        return r
+      })
+      inflightSave[key] = going
+      going.then(function () { delete inflightSave[key] }, function () { delete inflightSave[key] })
+      return going
+    }
+    net.__wciSaveHook = true
+    return true
+  }
+
+  function drainOutbox() {
+    if (draining || !onlineNow()) return Promise.resolve()
+    // 已确认本 host 无会话 ⇒ 不做任何上行（saveDraft 只会被 302 到登录页），由登录成功后的
+    // 合成 online 事件驱动；探针未返回（null）不拦，listDrafts 闸门/索引自身 fail-closed。
+    if (hostSessionState === false) return Promise.resolve()
+    // 入口同步取锁（与安卓 drainOutbox 一致）。即使 listDrafts 被会话闸门挂起到登录成功，
+    // 持锁也无害：挂起的这一轮会在 releaseSessionWaiters 时连同自身 waiter 一起 resume 兑现，
+    // 登录合成 online 触发的并发轮被锁正确合并；而推迟取锁会在弱网"索引在途"的长窗口里
+    // 放任多轮重叠各拉一次索引。
+    draining = true
+    var hadTransientFailure = false
+    var pushedSomething = false
+
+    function finishDrainRound() {
+      draining = false
+      // 以队列实际残余为准决定是否继续重试（判定性留队也会留在 outbox）。
+      return api.outboxList().then(function (res) {
+        var remaining = (res && res.ok && res.entries) ? res.entries.length : 0
+        if (remaining > 0) {
+          if (pushedSomething) retryStep = 0 // 有进展：退避重置回 15s
+          if (hadTransientFailure) {
+            console.info('发件箱仍有 ' + remaining + ' 条，安排有界退避重试')
+            scheduleDrainRetry()
+          }
+        } else {
+          clearDrainRetry()
+        }
+      }).catch(function (err) {
+        console.warn('发件箱收尾读取异常', err)
+        hadTransientFailure = true
+        scheduleDrainRetry()
+      })
+    }
+
+    // 先取一次远端索引（含回收目录墓碑）。索引拉取失败/known:false ⇒ 远端未知，
+    // 整轮中止、outbox 原封不动（绝不凭单次 readDraft 404 猜删除）。
+    // 注意：listDrafts 外有会话闸门，无会话时这个 Promise 会被挂起直到登录成功；
+    // 本轮一直持着 draining 锁（见入口注释），放行后自然续跑。
+    return window.WCSyncNet.listDrafts().then(function (lr) {
+      if (!lr || !lr.ok || !lr.data) {
+        console.warn('远端索引未知，本轮不补推', lr && lr.error)
+        hadTransientFailure = true
+        return finishDrainRound()
+      }
+      var index = window.WCSync.indexList(lr.data)
+      if (!index.known) {
+        console.warn('远端索引 known:false，本轮不补推')
+        hadTransientFailure = true
+        return finishDrainRound()
+      }
+      return api.outboxList().then(function (res) {
+        var entries = (res && res.ok && res.entries) ? res.entries.slice() : []
+        function next() {
+          if (!entries.length) return finishDrainRound()
+          var e = entries.shift()
+          var rel = e.relPath
+          // ① 墓碑优先：云端真删（在回收目录）⇒ 出队、不补推、不复活。
+          if (index.tomb[rel]) {
+            console.info('云端已删（墓碑），出队不补推', rel)
+            return api.outboxRemove(rel).then(next).catch(function (err) {
+              console.warn('墓碑条目出队失败，跳过', rel, err); hadTransientFailure = true; return next()
+            })
+          }
+          return api.readDoc(rel).then(function (rd) {
+            if (!rd || !rd.ok) return next() // 本地读不到：不删队，下次再试
+            var hit = index.byRel[rel] || null
+            var content = rd.content
+            var localVersion = window.WCSync.versionOf(content)
+            var localBytes
+            try { localBytes = new TextEncoder().encode(content).length } catch (err) { localBytes = content.length }
+            return latestBaseline().then(function (baseDoc) {
+              var baselineVersion = window.WCSync.baselineVersionOf(baseDoc, rel)
+              var d = window.WCSync.decidePush({
+                localVersion: localVersion,
+                localBytes: localBytes,
+                baselineVersion: baselineVersion,
+                remoteKnown: true,
+                remoteExists: !!hit,
+                remoteVersion: hit ? (hit.version || '') : '',
+                remotelyDeleted: false,
+              })
+              // ② skip（内容未变/同源同内容）：更新基线后出队。
+              if (d.action === 'skip') {
+                return applySyncedBaseline(rel, hit ? (hit.version || '') : '').then(function () {
+                  return api.outboxRemove(rel)
+                }).then(next)
+              }
+              // ③ 远端已删（decidePush 口径）：出队、不复活。
+              if (d.action === 'remote-deleted') {
+                console.info('远端判定已删，出队不补推', rel)
+                return api.outboxRemove(rel).then(next)
+              }
+              // ④ remote-newer/conflict 等非 push：留队交用户在 writing.js 处理，绝不 force、不重试。
+              if (d.action !== 'push') {
+                console.warn('补推未通过判定，保留待用户处理', rel, d.action, d.reason)
+                return next()
+              }
+              // ⑤ 有基线却正文/墓碑双缺 = 服务端存储漂移：不是自动重建的授权，留队（不重试）。
+              if (!hit && d.reason === 'reupload') {
+                console.warn('疑似服务端存储漂移，保留不自动重建', rel)
+                return next()
+              }
+              // ⑥ 正常 push：先更新基线再出队，否则下次打开/比对被误判冲突（spec §5.2）。
+              var saveOpts = d.baseVersion ? { baseVersion: d.baseVersion } : null
+              return window.WCSyncNet.saveDraft(rel, content, saveOpts).then(function (sr) {
+                if (sr && sr.ok) {
+                  pushedSomething = true
+                  return applySyncedBaseline(rel, sr.version).then(function () {
+                    return api.outboxRemove(rel)
+                  }).then(next)
+                }
+                if (sr && sr.conflict) {
+                  // 409：留队交 writing.js 冲突横幅，绝不自动 force，且不计入网络重试。
+                  console.warn('补推冲突（409），保留待用户处理', rel)
+                  return next()
+                }
+                // 网络/5xx/status 0 等：留队，计入有界退避重试。
+                console.warn('补推失败（网络型），保留待重试', rel, sr && sr.error)
+                hadTransientFailure = true
+                return next()
+              })
+            })
+          }).catch(function (err) {
+            // 单条任何异常不阻断后续条目；桥调用抛错按网络型失败重试。
+            console.warn('补推失败，跳过本条', rel, err)
+            hadTransientFailure = true
+            return next()
+          })
+        }
+        return next()
+      }).catch(function (err) {
+        console.warn('发件箱读取异常，本轮不补推', err)
+        hadTransientFailure = true
+        return finishDrainRound()
+      })
+    }).catch(function (err) {
+      console.warn('补推流程异常', err)
+      hadTransientFailure = true
+      return finishDrainRound()
+    })
+  }
+
+  // 与 installCloudSession 同机安装（同一就绪轮询、listDrafts 闸门装好之后）。
+  // 未配网关 = 纯本地，无云端可推，直接幂等返回，不安装、不发任何云端请求。
+  function installOutboxDrain() {
+    var net = window.WCSyncNet
+    if (net && net.__wciOutboxDrain) return true
+    if (!gatewayConfigured()) { if (net) net.__wciOutboxDrain = true; return true }
+    if (!net || !window.WCSync || !api) return false
+    // 依赖的桥/核心方法必须齐备，缺任一就等下一次轮询，不在半就绪状态装钩子。
+    if (typeof net.listDrafts !== 'function' || typeof net.saveDraft !== 'function' ||
+        typeof api.outboxList !== 'function' || typeof api.outboxRemove !== 'function' ||
+        typeof api.readDoc !== 'function' || typeof api.syncBaseline !== 'function' ||
+        typeof api.syncBaselineSet !== 'function' ||
+        typeof window.WCSync.indexList !== 'function' ||
+        typeof window.WCSync.versionOf !== 'function' ||
+        typeof window.WCSync.decidePush !== 'function' ||
+        typeof window.WCSync.baselineVersionOf !== 'function' ||
+        typeof window.WCSync.updateBaseline !== 'function') return false
+    // 顺序铁律：先有 listDrafts 会话闸门（installCloudSession 已装），再包 saveDraft。
+    if (!net.__wciListGate) return false
+    if (!installSaveHook()) return false
+    net.__wciOutboxDrain = true
+    window.addEventListener('online', drainOutbox)
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && onlineNow()) drainOutbox()
+    })
+    // 安装即补推（无延时）：此时 WCSync/WCSyncNet/wcStorage 均已就绪；hostSessionState=null
+    // 时 listDrafts 被闸门挂起，探针/登录成功后自然兑现；false/离线则守卫直接返回不发包。
+    drainOutbox()
+    return true
+  }
+
   // BridgeJS 在 document-start 注入，wcStorage 已存在；轮询仅为防御未来注入顺序变化。
   if (!installSandboxWorkspace()) {
     var pickTries = 0
@@ -567,13 +859,18 @@
     }, 100)
   }
 
-  // 云端会话闸门：rewriter 把本脚本紧跟 sync-net.js 注入，WCSyncNet 应已存在；
-  // 轮询仅为防御注入顺序变化（必须赶在 writing.js init 异步拉清单之前装好）。
-  if (!installCloudSession()) {
+  // 云端会话闸门 + 发件箱补推：rewriter 把本脚本紧跟 sync-net.js 注入，WCSyncNet 应已存在；
+  // 轮询仅为防御注入顺序变化（必须赶在 writing.js init 异步拉清单之前装好）。同一个轮询里
+  // 先装云端会话（listDrafts 闸门）、成功后再装发件箱补推（saveDraft 钩子），不新增第二个定时器。
+  function bootstrapCloud() {
+    if (!installCloudSession()) return false
+    return installOutboxDrain()
+  }
+  if (!bootstrapCloud()) {
     var cloudTries = 0
     var cloudTimer = setInterval(function () {
       cloudTries += 1
-      if (installCloudSession() || cloudTries > 50) clearInterval(cloudTimer)
+      if (bootstrapCloud() || cloudTries > 50) clearInterval(cloudTimer)
     }, 100)
   }
 
