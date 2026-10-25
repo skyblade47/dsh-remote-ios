@@ -21,8 +21,9 @@ on:
       - main
 
 jobs:
-  # 方案 D 闸门 A：只回答「官方 TailscaleKit.xcframework 能否在当日工具链可复现构建、
-  # 切片是否齐全、能否压到 iOS 17.0」。暂不链接进 App（链接在 Phase 3.1）。
+  # 方案 D 闸门 A：回答「官方 TailscaleKit.xcframework 能否在当日工具链可复现构建、
+  # 切片是否齐全、能否压到 iOS 17.0」。产物 artifact 供 build job 下载链接
+  # （链接原为 Phase 3.1 的活，因 Phase 2.1 侧载可行性验证需要真包而提前为 spike 链接）。
   tailscalekit-gate:
     runs-on: macos-15
     steps:
@@ -109,12 +110,30 @@ jobs:
 
   build:
     needs: tailscalekit-gate
-    runs-on: macos-14
+    # macos-15（与 gate 同镜像）：TailscaleKit 的 swiftinterface 由 Xcode 26 / Swift 6.2.4
+    # 产出，macos-14 自带的 Xcode 16/Swift 6.1 消费不了（module 兼容性报错）。
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
+      - name: 下载 TailscaleKit.xcframework（复用 gate 产物，不重复跑 Go 构建）
+        # Phase 2.1 spike：app target 已依赖 Vendor/TailscaleKit.xcframework（gitignored），
+        # 必须在 xcodegen generate 之前就位，否则工程生成会因找不到 framework 失败。
+        uses: actions/download-artifact@v4
+        with:
+          name: TailscaleKit-xcframework
+          path: Vendor/
+
+      - name: 验收 xcframework 已就位（device + simulator 两个切片）
+        run: |
+          set -euo pipefail
+          test -f Vendor/TailscaleKit.xcframework/ios-arm64/TailscaleKit.framework/TailscaleKit
+          test -f Vendor/TailscaleKit.xcframework/ios-arm64_x86_64-simulator/TailscaleKit.framework/TailscaleKit
+          echo "--- device 切片体积（期望 ~20MB+，含 Go archive）---"
+          ls -lh Vendor/TailscaleKit.xcframework/ios-arm64/TailscaleKit.framework/TailscaleKit
+
       - name: 选最新的 Xcode（并打印版本，便于排查）
-        # 🔴 为什么必须选：macos-14 镜像默认 Xcode 是 **15.4**，而 XcodeGen 新版产出的 .xcodeproj
+        # 🔴 为什么必须选：旧镜像默认 Xcode 是 **15.4**，而 XcodeGen 新版产出的 .xcodeproj
         #    是 **objectVersion 77**（Xcode 16 格式）⇒ 15.4 直接读不了：
         #    「Unable to read project … future Xcode project file format (77)」（2026-09-30 实测两次踩到）。
         #    ⇒ 取镜像里版本号最高的 Xcode_*.app（新 Xcode 读旧格式没问题，反向才不行）。
@@ -162,6 +181,28 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tail -n 60
+
+      - name: Phase 2.1 spike 自检（Go archive 确实被链进主二进制）
+        # 链接前的主二进制只有 ~990KB；force_load 整个 TailscaleKit 后应涨到 20MB+，
+        # 且导出符号表里必须有 Go c-archive 暴露的 tailscale_* C 接口。
+        # 任一不满足就让 CI 红——否则产出的 ipa 无法代表「含 Go 静态库的包」，侧载结论无效。
+        run: |
+          set -euo pipefail
+          BIN="build/Build/Products/Release-iphoneos/DSHRemote.app/DSHRemote"
+          test -f "$BIN"
+          echo "--- 主二进制体积 ---"
+          ls -lh "$BIN"
+          SIZE=$(stat -f%z "$BIN")
+          echo "size bytes = $SIZE"
+          if [ "$SIZE" -lt 20000000 ]; then
+            echo "::error::主二进制 $SIZE 字节 < 20MB，Go archive 疑似被 dead-strip，spike 包无效"
+            exit 1
+          fi
+          echo "--- tailscale_* 导出符号（至少要看到 tailscale_dial / tailscale_new）---"
+          nm -gU "$BIN" | grep -E ' _tailscale_(dial|new|listen|up|close)$' | head -20
+          nm -gU "$BIN" | grep -q ' _tailscale_dial$'
+          nm -gU "$BIN" | grep -q ' _tailscale_new$'
+          echo "SPIKE_LINK_CHECK=PASS"
 
       - name: 打成未签名 .ipa
         run: |

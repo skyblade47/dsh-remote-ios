@@ -25,6 +25,12 @@ targets:
         group: ""
     info:
       path: Resources/Info.plist
+    # Phase 2.1 spike：正式把 TailscaleKit.xcframework 链进 app（原定 Phase 3.1，为验证
+    # 「免费 Apple ID 能否侧载含 ~21MB Go c-archive 的包」而提前）。framework 是 gitignored 的
+    # CI 产物，CI build job 从 tailscalekit-gate 的 artifact 下载到 Vendor/ 后才 xcodegen。
+    dependencies:
+      - framework: Vendor/TailscaleKit.xcframework
+        embed: false                      # 静态 framework：链接进主二进制，不做 Embed Frameworks
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.skyblade47.dshremote
@@ -34,6 +40,11 @@ targets:
         TARGETED_DEVICE_FAMILY: "2"       # 2 = iPad only（本仓只面向 iPad）
         CODE_SIGNING_ALLOWED: "NO"        # CI 里产出**未签名**包，签名留给本机 Sideloadly
         ENABLE_BITCODE: "NO"
+        # TailscaleKit 是单个含完整 Go archive 的静态 fat binary；普通链接只拉被引用的
+        # .o，cgo/Go 运行时符号会被裁掉（即便 Swift 侧引用了 API，跨语言引用链也不完整）。
+        # ⇒ 按 sdk 分切片 -force_load 整个归档（device/simulator 路径不同，不能用同一条）。
+        "OTHER_LDFLAGS[sdk=iphoneos*]": "-force_load $(SRCROOT)/Vendor/TailscaleKit.xcframework/ios-arm64/TailscaleKit.framework/TailscaleKit"
+        "OTHER_LDFLAGS[sdk=iphonesimulator*]": "-force_load $(SRCROOT)/Vendor/TailscaleKit.xcframework/ios-arm64_x86_64-simulator/TailscaleKit.framework/TailscaleKit"
   DSHRemoteTests:
     type: bundle.unit-test
     platform: iOS
