@@ -37,7 +37,7 @@ final class TailscaleSpikeManager: ObservableObject {
     static let stateDir: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("tailscale", isDirectory: true)
-    })()
+    }()
 
     /// 是否已有历史登录态（目录里有 Tailscale 写的状态文件）。仅做粗判，恢复仍以 up 成败为准。
     static var hasPersistedState: Bool {
