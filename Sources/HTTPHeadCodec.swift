@@ -24,7 +24,8 @@ enum HTTPHeadCodec {
     ]
 }
 
-struct HTTPRequestHead: Equatable {
+// 不声明 Equatable：headers 为 named-tuple 数组，Swift 不会为此类存储属性自动合成。
+struct HTTPRequestHead {
     var method: String
     /// 原始 target：origin-form（`/path?q=1`）或 authority-form；localhost 代理对客户端原样转发。
     var target: String
@@ -42,7 +43,7 @@ struct HTTPRequestHead: Equatable {
     }
 }
 
-struct HTTPResponseHead: Equatable {
+struct HTTPResponseHead {
     var status: Int
     var reason: String
     var headers: [(name: String, value: String)]
