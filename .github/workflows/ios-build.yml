@@ -79,12 +79,14 @@ jobs:
         run: |
           set -euo pipefail
           SRC=.tailscalekit-src
-          # libtailscale_ios.a 已由上一步 tools/build-tailscalekit.sh（make ios-fat）产出，
-          # 这里直接命令行覆盖部署目标重编 framework，不再重复 make。
+          # libtailscale_ios.a 已由上一步 tools/build-tailscalekit.sh（make ios-fat）产出。
+          # 注意：xcodeproj 在 swift/ 子目录，上游 swift/Makefile 也是 cd swift 后再
+          # xcodebuild -derivedDataPath build；这里必须在同一目录，否则 rc=66
+          # 「directory does not contain an Xcode project」。用独立 derivedData 不污染正式产物。
           set +e
-          ( cd "$SRC" && xcodebuild build \
+          ( cd "$SRC/swift" && xcodebuild build \
               -scheme "TailscaleKit (iOS)" \
-              -derivedDataPath swift/build-ios17 \
+              -derivedDataPath build-ios17 \
               -configuration Release \
               -destination 'generic/platform=iOS' \
               IPHONEOS_DEPLOYMENT_TARGET=17.0 \
