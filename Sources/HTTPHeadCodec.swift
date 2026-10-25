@@ -114,7 +114,10 @@ extension HTTPHeadCodec {
     /// 序列化转发给上游的请求：剥离 hop-by-hop，Host 重写为上游，WS 升级时显式带 Connection: Upgrade。
     static func serializeUpstreamRequest(_ head: HTTPRequestHead, upstreamHost: String) -> Data {
         var kept: [(String, String)] = []
-        for (name, value) in head.headers where !hopByHop.contains(name.lowercased()) {
+        for (name, value) in head.headers {
+            let lower = name.lowercased()
+            // hop-by-hop 剥离；原 Host（如 127.0.0.1:0）必须丢弃，下面重写为上游，避免重复 Host。
+            if hopByHop.contains(lower) || lower == "host" { continue }
             kept.append((name, value))
         }
         kept.append(("Host", upstreamHost))
