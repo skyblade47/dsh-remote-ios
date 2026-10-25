@@ -119,10 +119,12 @@ jobs:
       - name: 下载 TailscaleKit.xcframework（复用 gate 产物，不重复跑 Go 构建）
         # Phase 2.1 spike：app target 已依赖 Vendor/TailscaleKit.xcframework（gitignored），
         # 必须在 xcodegen generate 之前就位，否则工程生成会因找不到 framework 失败。
+        # 注意：upload-artifact 上传目录时，artifact 根就是该目录的*内容*（Info.plist 直接
+        # 在根，无外层包装，本地 gh run download 可证），所以这里要显式落到包装目录名里。
         uses: actions/download-artifact@v4
         with:
           name: TailscaleKit-xcframework
-          path: Vendor/
+          path: Vendor/TailscaleKit.xcframework
 
       - name: 验收 xcframework 已就位（device + simulator 两个切片）
         run: |
