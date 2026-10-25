@@ -90,7 +90,8 @@
       — 2026-10-25 落地：新增独立 job `tailscalekit-gate`（macos-15；选最高 Xcode；setup-go@v5 1.27.1 **cache: false**——源码由脚本运行时克隆，checkout 时无 go.sum；跑 `tools/build-tailscalekit.sh --force`；PlistBuddy+find 定位两切片，`lipo -archs` 断言 device=arm64、sim=arm64+x86_64；追加 **iOS 17.0 命令行覆盖探测**，非阻断只留证 IOS17_OVERRIDE=PASS/FAIL；上传 xcframework artifact，if-no-files-found: error）。原 `build` job 加 `needs: tailscalekit-gate`，其模拟器 test/未签名 ipa 流程不动。触发：push `feature/embedded-tsnet`、PR→main、手动、v* tag。Go 内置缓存按实况不适用（浅克隆单 commit），以脚本幂等复用 `.tailscalekit-src` 代替。
 - [x] **1.3** `[Win/macOS]` 改 `.gitignore` 忽略 `Vendor/TailscaleKit.xcframework/`；新增并提交 `Vendor/TAILSCALEKIT.VERSION`（纯文本，SHA/版本/构建说明）。
       — 2026-10-25：`.gitignore` 加 `Vendor/TailscaleKit.xcframework/` 与 `.tailscalekit-src/`；新增 `.gitattributes` 钉 `*.sh text eol=lf`（本机 autocrlf=true，已验脚本工作区 0 个 CRLF、check-attr eol=lf）。
-- [ ] **1.4 闸门 A 验收（go/no-go）**：CI 上 `TailscaleKit.xcframework` 成功产出，含 `iphoneos/arm64` 与 `iphonesimulator/arm64`（如需要可加 x86_64 sim）切片；部署目标可压到 17.0 无构建错误；产物体积记录（对照社区 device .a ≈ 23 MB）。**若官方 Makefile 在当日 main 无法产出或强制 iOS 18，停点回报，评估 pin 旧 commit / 自建 xcframework 包装。**
+- [x] **1.4 闸门 A 验收（go/no-go）**：CI 上 `TailscaleKit.xcframework` 成功产出，含 `iphoneos/arm64` 与 `iphonesimulator/arm64`（如需要可加 x86_64 sim）切片；部署目标可压到 17.0 无构建错误；产物体积记录（对照社区 device .a ≈ 23 MB）。**若官方 Makefile 在当日 main 无法产出或强制 iOS 18，停点回报，评估 pin 旧 commit / 自建 xcframework 包装。**
+      — 2026-10-25 CI run [40157605250](https://github.com/skyblade47/dsh-remote-ios/actions/runs/40157605250) 全绿（gate 2m11s，整链 3m40s，macos-15 / Xcode 26.3 / go1.27.1 darwin/arm64）：**SLICE_CHECK=PASS**（device=arm64、sim=x86_64+arm64）；**IOS17_OVERRIDE=PASS**（在 `swift/` 子目录 `xcodebuild build -scheme "TailscaleKit (iOS)" IPHONEOS_DEPLOYMENT_TARGET=17.0 CODE_SIGNING_ALLOWED=NO`，rc=0，无 iOS 18 only API 编译错误）；artifact `TailscaleKit-xcframework` 压缩后 24.6 MB，与社区 device .a ≈23 MB 同量级。正式产物 vtool minos 仍 18.1（脚本按上游原样构建），17.0 仅证明覆盖可行，**链接进 App 后的真实最低系统验证留待 3.1**。原 `build` job（macos-14 模拟器 test + 未签名 ipa）在 gate 之后同样通过，无回归。**闸门 A 结论：GO。**
 
 ### Phase 2 — 闸门 B：最小真机 spike（排两个最高风险，不做壳集成）
 
@@ -191,3 +192,6 @@
   - 1.2：CI 新增 `tailscalekit-gate` job（独立、先行，原 build job needs 它）：切片三断言 + iOS 17.0 覆盖探测（非阻断）+ artifact 上传；`feature/embedded-tsnet` push 即触发。
   - 1.3：`Vendor/TAILSCALEKIT.VERSION` 入 git；xcframework 与源码缓存 gitignore；新增 .gitattributes 钉 *.sh=LF（已验 0 CRLF）。
   - **下一步闸门**：1.4 必须在 macOS 实证——Windows 无法构建。需用户授权 push 本分支触发 CI（或自备 Mac 本地跑脚本）。1.4 过闸前不动 Phase 2/3 任何工程代码。Phase 0.2（专用 auth key + ACL）、0.3（Mac/真机/免费 Apple ID/侧载手段）仍待用户确认，是 Phase 2 的前置。
+  - 用户授权 push（仅 iOS 分支；dsh-remote 方案 C 提交继续留本地）；0.3 确认**无 Mac，只靠 CI macos-15 出包 + 侧载装机**；0.2 auth key 等闸门 A 结果再建。
+  - CI 三轮：①run 40156939141 构建步 18s `Permission denied`——Windows 提交的 .sh 无 +x 位（`04ab0a6` 改显式 `bash` 调用修复）；②run 40157200034 切片 PASS 但 17.0 探测 rc=66「directory does not contain an Xcode project」——探测误在源码根执行，xcodeproj 实际在 `swift/`（`a666f13` 改 `cd "$SRC/swift"`、derivedData 改 `build-ios17` 修复）；③run 40157605250 全绿。
+  - **1.4 闸门 A 结论 GO**（证据见 1.4 勾选注记）。下一步是 Phase 2 闸门 B 真机 spike；在「无 Mac」前提下，2.1（免费 Apple ID 自签链接 Go c-archive）无法用 Xcode 直接装机，需先确定 CI 产物的重签/侧载工具链（Sideloadly 等）对含 Go c-archive 的 .app 是否可行——这本身就是 2.1 要回答的问题，建议把「CI 出 spike ipa → 侧载工具重签 → 真机启动」作为 2.1 的执行形态。0.2 auth key 现在可以开建。
