@@ -115,13 +115,13 @@
 
 ### Phase 4 — localhost 反代（本方案最大改动，HTTP+WS+资产）
 
-- [ ] **4.1** `TailnetConnecter` 定稿：封装官方数据面 dial，GCD queue 接受/桥接，64KB 双向拷贝，处理 EINTR、对端半关闭、本地侧关闭联动、错误回收；单测用本地假 TCP 上游（不经 tailnet）验证字节无损与拆除。
-- [ ] **4.2** `ShellAssetRoutes`：18 件白名单（迁移 AssetManifest 映射）+ `/__shell__/shell.html` 本地应答，正确 content-type、`cache-control: no-store`、路径穿越防护（仅允许 manifest 内名字）。
-- [ ] **4.3** `ShellHTMLInjector`：仅承担把 `ipad.css`（在 writing.css 锚点后）、`ipad.js`（在 sync-net.js 锚点后）注入 shell.html（锚点与现 ShellHTMLRewriter 一致）；**不做** dsh-asset 改写、**不做**全量内联（真 http origin 下子资源由本反代正常服务，2026-10-12 的自定义 scheme 拦截事故不适用，但需在 Task 5.2 真机确认 `<script src>/<link href>` 正常加载）。
-- [ ] **4.4** `HttpBridge`：HTTP/1.1 解析与回写；路由分流（壳资产本地；其余全部桥到 `100.99.84.35:8080`）；转发 `Host`（按上游网关要求，参照 PC main.js createProxy 的 changeOrigin 处理）、`Cookie`/`Set-Cookie`、过滤 hop-by-hop 头；**WebSocket**：识别 `Connection: Upgrade` + `Upgrade: websocket`，回写 101 后进入裸 TCP 双向透传；**SSE/长响应**：不缓冲、流式回写、不设整体超时。
+- [ ] **4.1** `TailnetConnecter` 定稿：封装官方数据面 dial，GCD queue 接受/桥接，64KB 双向拷贝，处理 EINTR、对端半关闭、本地侧关闭联动、错误回收；单测用本地假 TCP 上游（不经 tailnet）验证字节无损与拆除。<!-- 2026-10-25 进度：纯逻辑层（DuplexChannel/UpstreamConnecter 协议 + ByteBridge 64KB 双向桥 + 单 FIN 拆除）与假上游字节无损单测已完成并 CI 跑绿；真机 NWConnection/tailscale_dial 实现留 2.4/3.1，本项待真机实现后勾选。 -->
+- [x] **4.2** `ShellAssetRoutes`：18 件白名单（迁移 AssetManifest 映射）+ `/__shell__/shell.html` 本地应答，正确 content-type、`cache-control: no-store`、路径穿越防护（仅允许 manifest 内名字）。<!-- 2026-10-25 完成：loadData 注入式，穿越/陌生名 7 用例 + 18 资产 + HEAD/405 单测全绿。 -->
+- [x] **4.3** `ShellHTMLInjector`：仅承担把 `ipad.css`（在 writing.css 锚点后）、`ipad.js`（在 sync-net.js 锚点后）注入 shell.html（锚点与现 ShellHTMLRewriter 一致）；**不做** dsh-asset 改写、**不做**全量内联（真 http origin 下子资源由本反代正常服务，2026-10-12 的自定义 scheme 拦截事故不适用，但需在 Task 5.2 真机确认 `<script src>/<link href>` 正常加载）。<!-- 2026-10-25 完成：两处注入 + 幂等 + 缺锚点原样，3 单测全绿。 -->
+- [x] **4.4** `HttpBridge`：HTTP/1.1 解析与回写；路由分流（壳资产本地；其余全部桥到 `100.99.84.35:8080`）；转发 `Host`（按上游网关要求，参照 PC main.js createProxy 的 changeOrigin 处理）、`Cookie`/`Set-Cookie`、过滤 hop-by-hop 头；**WebSocket**：识别 `Connection: Upgrade` + `Upgrade: websocket`，回写 101 后进入裸 TCP 双向透传；**SSE/长响应**：不缓冲、流式回写、不设整体超时。<!-- 2026-10-25 完成（逻辑层）：HTTPHeadCodec 编解码 + HttpBridge 分流/502；Host 重写修复（先弃原 Host 再重写，避免双 Host）；WS/大响应经内存桥端到端单测覆盖。NWListener 接入留 4.5。 -->
 - [ ] **4.5** `LoopbackProxy`：`NWListener` 绑 `127.0.0.1:0` 取动态端口，仅 loopback；启动后把实际 base 持久化 UserDefaults（供冷启动直达）；节点离线时返回友好 502/状态页（接失败浮层信号），不挂起。
 - [ ] **4.6** Info.plist：加 `NSAllowsLocalNetworking`；按 spike 结论核对 ATS（WKWebView 加载 loopback http；netstack 内到 100.x 的明文是否完全不经 ATS，以 2.3/2.4 实测为准）。
-- [ ] **4.7** 单测（模拟器，不经真 tailnet，用本地起的 HTTP/WS 假上游顶替 `100.x`）：18 资产 200/content-type/防穿越；shell.html 含两处注入且幂等；普通 API 往返与头透传；大响应流式；WS echo 双向；上游拒绝时 502。把 spike 的 fd 桥接以协议抽象注入，保证可测。
+- [x] **4.7** 单测（模拟器，不经真 tailnet，用本地起的 HTTP/WS 假上游顶替 `100.x`）：18 资产 200/content-type/防穿越；shell.html 含两处注入且幂等；普通 API 往返与头透传；大响应流式；WS echo 双向；上游拒绝时 502。把 spike 的 fd 桥接以协议抽象注入，保证可测。<!-- 2026-10-25 完成：DuplexChannel/UpstreamConnecter 协议注入 + InMemoryChannel/FakeConnecter（jsonEcho/largeResponse/webSocket 三模式）；run 40161659357 模拟器 228 测试 0 失败。 -->
 - [ ] **4.8 验收**：反代在模拟器对假上游全绿；真机对真节点（Phase 3）能加载 `/auth/login` 与一个 WS 场景。
 
 ### Phase 5 — 壳架构收敛到 localhost（删除旧三件套）
@@ -195,3 +195,7 @@
   - 用户授权 push（仅 iOS 分支；dsh-remote 方案 C 提交继续留本地）；0.3 确认**无 Mac，只靠 CI macos-15 出包 + 侧载装机**；0.2 auth key 等闸门 A 结果再建。
   - CI 三轮：①run 40156939141 构建步 18s `Permission denied`——Windows 提交的 .sh 无 +x 位（`04ab0a6` 改显式 `bash` 调用修复）；②run 40157200034 切片 PASS 但 17.0 探测 rc=66「directory does not contain an Xcode project」——探测误在源码根执行，xcodeproj 实际在 `swift/`（`a666f13` 改 `cd "$SRC/swift"`、derivedData 改 `build-ios17` 修复）；③run 40157605250 全绿。
   - **1.4 闸门 A 结论 GO**（证据见 1.4 勾选注记）。下一步是 Phase 2 闸门 B 真机 spike；在「无 Mac」前提下，2.1（免费 Apple ID 自签链接 Go c-archive）无法用 Xcode 直接装机，需先确定 CI 产物的重签/侧载工具链（Sideloadly 等）对含 Go c-archive 的 .app 是否可行——这本身就是 2.1 要回答的问题，建议把「CI 出 spike ipa → 侧载工具重签 → 真机启动」作为 2.1 的执行形态。0.2 auth key 现在可以开建。
+  - **Phase 4.7（反代纯逻辑层先行）**：用户授权「用户并行建 0.2 auth key，助手先做 4.7，真机窗口就绪再切 Phase 2」。落地 5 源文件（`DuplexChannel`/`UpstreamConnecter` 协议 + `ByteBridge` 64KB 双向桥（withTaskGroup：任一 pump 结束即 cancelAll+双向 close，单 FIN 不死锁）、`ShellAssetRoutes`、`ShellHTMLInjector`、`HTTPHeadCodec`、`HttpBridge`）+ 5 测试文件（`InMemoryChannel` 通道对、`FakeConnecter` 假上游三模式、7 端到端 + 资产/注入/编解码/字节桥用例），全部不经真 tailnet 闭环。
+  - CI 四轮（tailscalekit-gate 每轮全绿，未受影响）：①run 40160223356 rc=65——Swift 不为含 named-tuple 数组的 struct 合成 Equatable（`b6d2152` 移除两处 `: Equatable` 修复）；②run 40160714629 rc=65——测试 `out.range(...)` 缺 `of:` 标签（`a76e5e9` 修复）；③run 40160974956 编译通过、228 测试 3 断言失败——测试自身错误：headerEnd upperBound 期望 9 实为 8；含 Bool 的 JSON 误桥接为 `[String:String]`（`130a500` 修复）；④run 40161360550 余 1 失败暴露**生产 bug**：转发时原 Host 未丢弃导致双 Host 头、上游取到 `127.0.0.1:0`（`477435e` 改为先弃 Host 再重写）。
+  - **run 40161659357 全绿**：闸门 A + iPad 模拟器 228 测试 0 失败（6.963s）+ Release iphoneos 未签名编译 + ipa artifact 均通过。4.2/4.3/4.4/4.7 勾选；4.1 仅纯逻辑桥完成（注记保留，真机 dial 实现待 2.4/3.1）；4.5/4.6 待真机阶段。
+  - **下一步**：等用户 0.2 auth key 状态与 iPad/侧载窗口，进入 Phase 2（2.1 侧载可行性为最高优先未知）。期间不做真机/服务端改动；dsh-remote `0b1503c` 继续留本地。
