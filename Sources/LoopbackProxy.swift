@@ -29,12 +29,12 @@ final class LoopbackProxy {
 
     /// 启动监听，阻塞到 ready 后返回实际 base URL（同时写入 UserDefaults）。
     func start() async throws -> URL {
-        let listener = try NWListener(
-            using: .tcp,
-            // requiredLocalEndpoint 锁死 loopback，杜绝局域网/公网侧访问。
-            requiredLocalEndpoint: .hostPort(
-                host: NWEndpoint.Host("127.0.0.1"),
-                port: NWEndpoint.Port(rawValue: 0)!))
+        // requiredLocalEndpoint 锁死 loopback，杜绝局域网/公网侧访问；端口 .any 由内核分配。
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: NWEndpoint.Port(rawValue: 0)!)
+        let listener = try NWListener(using: parameters, on: .any)
         self.listener = listener
 
         let port = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
