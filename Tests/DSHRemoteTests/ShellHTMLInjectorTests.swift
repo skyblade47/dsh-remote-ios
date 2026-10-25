@@ -21,7 +21,7 @@ final class ShellHTMLInjectorTests: XCTestCase {
               let styleRange = out.range(of: "<style>"),
               let jsRange = out.range(of: ShellHTMLInjector.jsAnchor),
               let jsInjRange = out.range(of: ShellHTMLInjector.jsInsertion),
-              let inlineRange = out.range(#"<script>console"#) else {
+              let inlineRange = out.range(of: #"<script>console"#) else {
             return XCTFail("注入点或锚点缺失")
         }
         // CSS：锚点 < 注入 < <style>
