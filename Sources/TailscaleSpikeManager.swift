@@ -18,6 +18,8 @@ import TailscaleKit
 /// 把 TailscaleKit 的 Go 侧日志回灌到 SwiftUI 面板（真机取证用）。
 struct SpikeLogSink: LogSink {
     let onLog: @Sendable (String) -> Void
+    // 协议要求（Xcode 26 工具链下为必需见证）：不提供文件句柄，日志只经 log(_:) 回灌面板。
+    let logFileHandle: Int32? = nil
     func log(_ message: String) {
         // TailscaleKit 从内部线程回调；统一切回主循环再改 @Published。
         DispatchQueue.main.async { onLog(message) }
