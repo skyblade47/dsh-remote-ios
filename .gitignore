@@ -7,6 +7,11 @@ DerivedData/
 *.app
 Payload/
 
+# TailscaleKit.xcframework 由 tools/build-tailscalekit.sh 按
+# Vendor/TAILSCALEKIT.VERSION（入 git）可复现重建，不入库
+Vendor/TailscaleKit.xcframework/
+.tailscalekit-src/
+
 # 观测产物（ios-observ.ps1 输出；含设备信息，不入库）
 shots/
 crash/

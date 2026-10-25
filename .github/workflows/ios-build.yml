@@ -14,9 +14,98 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - 'feature/embedded-tsnet'   # 方案 D 闸门 A：分支推送即验证 TailscaleKit 可构建
+  pull_request:
+    branches:
+      - main
 
 jobs:
+  # 方案 D 闸门 A：只回答「官方 TailscaleKit.xcframework 能否在当日工具链可复现构建、
+  # 切片是否齐全、能否压到 iOS 17.0」。暂不链接进 App（链接在 Phase 3.1）。
+  tailscalekit-gate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 选 Xcode 16.1+（并打印版本）
+        run: |
+          set -euo pipefail
+          echo "--- 镜像里可用的 Xcode ---"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          BEST="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$BEST" ]; then sudo xcode-select -s "$BEST"; fi
+          echo "--- 选定 ---"
+          xcode-select -p
+          xcodebuild -version
+
+      - name: 装 Go（版本以 Vendor/TAILSCALEKIT.VERSION 的 go.mod 要求为准）
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          # libtailscale 由构建脚本在运行时克隆到 .tailscalekit-src（gitignore），
+          # checkout 阶段没有 go.sum，不能用 setup-go 内置依赖缓存
+          cache: false
+
+      - name: 构建 TailscaleKit.xcframework（ios-fat，钉 commit）
+        run: tools/build-tailscalekit.sh --force
+
+      - name: 闸门 A 切片验收（device arm64 + simulator arm64/x86_64）
+        run: |
+          set -euo pipefail
+          FW=Vendor/TailscaleKit.xcframework
+          test -d "$FW"
+          echo "--- Info.plist 可用库 ---"
+          /usr/libexec/PlistBuddy -c 'Print AvailableLibraries' "$FW/Info.plist" || true
+          DEV_BIN="$FW/ios-arm64/TailscaleKit.framework/TailscaleKit"
+          SIM_BIN="$FW/ios-arm64_x86_64-simulator/TailscaleKit.framework/TailscaleKit"
+          # 切片目录名若随上游变动，退回按标识符定位
+          if [ ! -f "$DEV_BIN" ]; then DEV_BIN="$(find "$FW" -path '*iphoneos*/*/TailscaleKit' -o -path '*ios-arm64/*/TailscaleKit' | head -1)"; fi
+          if [ ! -f "$SIM_BIN" ]; then SIM_BIN="$(find "$FW" -path '*simulator*/*/TailscaleKit' -o -path '*ios-*simulator/*/TailscaleKit' | head -1)"; fi
+          echo "dev bin = $DEV_BIN"; echo "sim bin = $SIM_BIN"
+          test -f "$DEV_BIN"; test -f "$SIM_BIN"
+          echo "--- device 切片（期望 arm64）---"; lipo -archs "$DEV_BIN"
+          echo "--- simulator 切片（期望 arm64 x86_64）---"; lipo -archs "$SIM_BIN"
+          lipo -archs "$DEV_BIN" | grep -qw arm64
+          lipo -archs "$SIM_BIN" | grep -qw arm64
+          lipo -archs "$SIM_BIN" | grep -qw x86_64
+          echo "SLICE_CHECK=PASS"
+
+      - name: 闸门 A iOS 17.0 覆盖探测（上游 pbxproj 写死 18.1）
+        # 不改上游源码，仅用命令行覆盖部署目标重新 archive 一次 framework，
+        # 验证 Swift 层没有 iOS 18 only API 硬依赖。失败只告警、不阻断（留证评审），
+        # 因为真正的链接验证在 Phase 3.1；但这一步的输出是 17.0 决策的关键证据。
+        run: |
+          set -euo pipefail
+          SRC=.tailscalekit-src
+          # libtailscale_ios.a 已由上一步 tools/build-tailscalekit.sh（make ios-fat）产出，
+          # 这里直接命令行覆盖部署目标重编 framework，不再重复 make。
+          set +e
+          ( cd "$SRC" && xcodebuild build \
+              -scheme "TailscaleKit (iOS)" \
+              -derivedDataPath swift/build-ios17 \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+              CODE_SIGNING_ALLOWED=NO ) > /tmp/ios17-build.log 2>&1
+          RC=$?
+          set -e
+          echo "xcodebuild rc=$RC"
+          if [ $RC -eq 0 ]; then
+            echo "IOS17_OVERRIDE=PASS（命令行覆盖到 17.0 可构建）"
+          else
+            echo "IOS17_OVERRIDE=FAIL（以下为错误上下文，需评审是否 pin 旧 commit / 另做包装）"
+            grep -nE 'error:|has been renamed|requires iOS|was deprecated|is only available' /tmp/ios17-build.log | head -40 || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TailscaleKit-xcframework
+          path: Vendor/TailscaleKit.xcframework
+          if-no-files-found: error
+
   build:
+    needs: tailscalekit-gate
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4

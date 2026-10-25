@@ -1,0 +1,35 @@
+# TailscaleKit / libtailscale 版本唯一真源（入 git）
+#
+# tools/build-tailscalekit.sh 读本文件，钉版本、可复现地构建
+# Vendor/TailscaleKit.xcframework（该产物被 gitignore，不入库）。
+# 更新本文件 = 明确的依赖升级动作，需在 plan 执行记录里留痕。
+
+# 上游仓库
+LIBTAILSCALE_REPO=https://github.com/tailscale/libtailscale.git
+# 钉死的 commit（不追 main 浮动 tag）
+# 2026-10-24 核对：main HEAD，binding 0.2.0（含 listener fd-passing 定长记录安全修复 258321b）
+LIBTAILSCALE_COMMIT=d1dc45d039edb7759ecbee6ba2aea0c4bca884b8
+# 上游自报版本（供构建后核验，构建脚本不依赖此值取代码）
+LIBTAILSCALE_BINDING_VERSION=0.2.0
+# 该 commit 的 go.mod 钉的 tailscale 内核版本
+TAILSCALE_VERSION=v1.104.1
+# 该 commit 的 go.mod 要求的 Go 版本（setup-go 必须以此为准，
+# 不要照抄上游 .github/workflows/swift.yml —— 那里仍写 1.24，已过时）
+GO_VERSION=1.27.1
+
+# 构建环境
+# 官方 swift CI runner；Xcode 16.1+（pbxproj LastUpgradeCheck=1610）
+BUILD_RUNNER=macos-15
+# 构建命令（在 checkout 的 libtailscale 内）
+BUILD_COMMAND=cd swift && make ios-fat
+# 产物相对路径（swift/Makefile ios-fat 输出）
+BUILD_ARTIFACT=swift/build/Build/Products/Release-iphonefat/TailscaleKit.xcframework
+
+# 部署目标
+# 上游 pbxproj 两个 iOS target 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1；
+# Swift 源码未见 @available gating。需以命令行/xcconfig 覆盖压到本工程的 17.0，
+# 此项能否在无编译错误下成立，是 Phase 1 闸门 A 的 go/no-go 验证点之一。
+IOS_DEPLOYMENT_TARGET=17.0
+
+# 切片（device arm64；simulator 为 arm64+x86_64 lipo）
+EXPECTED_SLICES=iphoneos/arm64 iphonesimulator/arm64 iphonesimulator/x86_64
