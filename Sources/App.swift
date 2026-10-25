@@ -57,25 +57,37 @@ struct RootView: View {
     @State private var titleTaps = 0
     @State private var showS1 = false
     @State private var showS1Alert = false
+    @State private var showTS = false   // Phase 2.2 spike：Tailscale 入网调试面板
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("DSH Remote")
-                .font(.headline)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    titleTaps += 1
-                    if titleTaps >= 5 {
-                        if (try? GatewayURL.normalize(Cfg.gateway)) != nil {
-                            showS1 = true
-                            titleTaps = 0
-                        } else {
-                            showS1Alert = true
+            ZStack {
+                Text("DSH Remote")
+                    .font(.headline)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        titleTaps += 1
+                        if titleTaps >= 5 {
+                            if (try? GatewayURL.normalize(Cfg.gateway)) != nil {
+                                showS1 = true
+                                titleTaps = 0
+                            } else {
+                                showS1Alert = true
+                            }
                         }
                     }
+                HStack {
+                    Spacer()
+                    // Phase 2.2 spike 入口（非产品 UI，闸门 B 后删除）
+                    Button { showTS = true } label: {
+                        Text("TS").font(.caption.bold()).padding(.horizontal, 8).padding(.vertical, 3)
+                            .overlay(Capsule().stroke(.secondary))
+                    }
+                    .padding(.trailing, 12)
                 }
+            }
 
             Divider()
 
@@ -102,6 +114,10 @@ struct RootView: View {
             UIViewControllerBridge {
                 S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway)) ?? "")
             }
+        }
+        // Phase 2.2 spike：Tailscale 非交互入网面板
+        .sheet(isPresented: $showTS) {
+            TailscaleSpikeView()
         }
     }
 }
