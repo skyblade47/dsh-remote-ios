@@ -48,7 +48,8 @@ jobs:
           cache: false
 
       - name: 构建 TailscaleKit.xcframework（ios-fat，钉 commit）
-        run: tools/build-tailscalekit.sh --force
+        # 显式 bash：脚本从 Windows 侧提交，不保证带可执行位
+        run: bash tools/build-tailscalekit.sh --force
 
       - name: 闸门 A 切片验收（device arm64 + simulator arm64/x86_64）
         run: |
