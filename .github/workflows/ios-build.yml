@@ -184,26 +184,38 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tail -n 60
 
-      - name: Phase 2.1 spike 自检（Go archive 确实被链进主二进制）
-        # 链接前的主二进制只有 ~990KB；force_load 整个 TailscaleKit 后应涨到 20MB+，
-        # 且导出符号表里必须有 Go c-archive 暴露的 tailscale_* C 接口。
-        # 任一不满足就让 CI 红——否则产出的 ipa 无法代表「含 Go 静态库的包」，侧载结论无效。
+      - name: Phase 2.1 spike 自检（TailscaleKit 动态 framework 确实 embed 进包）
+        # 🔴 magic bytes 取证：TailscaleKit.framework/TailscaleKit 是 MH_DYLIB（动态框架），
+        #    21MB Go 在 dylib 内，主二进制仍 ~1MB、只含 LC_LOAD_DYLIB（run 40167137252 实证）。
+        #    所以自检口径不是「主二进制 >20MB」，而是：
+        #      1) .app/Frameworks/TailscaleKit.framework/TailscaleKit 存在且 ≥20MB（embed 成功）
+        #      2) otool -L 主二进制含 TailscaleKit 的 LC_LOAD_DYLIB（链接成功）
+        #      3) dylib 自身导出 tailscale_* C 接口（Go c-archive 确在其中）
+        #    任一不满足就让 CI 红——否则产出的 ipa 无法代表「含 Go dylib 的包」，侧载结论无效。
         run: |
           set -euo pipefail
-          BIN="build/Build/Products/Release-iphoneos/DSHRemote.app/DSHRemote"
+          APP="build/Build/Products/Release-iphoneos/DSHRemote.app"
+          BIN="$APP/DSHRemote"
+          FW="$APP/Frameworks/TailscaleKit.framework/TailscaleKit"
           test -f "$BIN"
-          echo "--- 主二进制体积 ---"
+          echo "--- 主二进制体积（动态链接，预期仍 ~1MB）---"
           ls -lh "$BIN"
-          SIZE=$(stat -f%z "$BIN")
-          echo "size bytes = $SIZE"
+          echo "--- .app/Frameworks 内容（期望 TailscaleKit.framework）---"
+          ls -lhR "$APP/Frameworks" || { echo "::error::.app/Frameworks 不存在，embed 未生效"; exit 1; }
+          test -f "$FW"
+          SIZE=$(stat -f%z "$FW")
+          echo "embedded dylib size bytes = $SIZE"
           if [ "$SIZE" -lt 20000000 ]; then
-            echo "::error::主二进制 $SIZE 字节 < 20MB，Go archive 疑似被 dead-strip，spike 包无效"
+            echo "::error::embed 的 TailscaleKit $SIZE 字节 < 20MB，Go dylib 疑似不对，spike 包无效"
             exit 1
           fi
-          echo "--- tailscale_* 导出符号（至少要看到 tailscale_dial / tailscale_new）---"
-          nm -gU "$BIN" | grep -E ' _tailscale_(dial|new|listen|up|close)$' | head -20
-          nm -gU "$BIN" | grep -q ' _tailscale_dial$'
-          nm -gU "$BIN" | grep -q ' _tailscale_new$'
+          echo "--- 主二进制 LC_LOAD_DYLIB（必须引用 @rpath/TailscaleKit）---"
+          otool -L "$BIN" | grep -i TailscaleKit
+          otool -L "$BIN" | grep -qi TailscaleKit
+          echo "--- dylib 导出 tailscale_*（至少 tailscale_dial / tailscale_new）---"
+          nm -gU "$FW" | grep -E ' _tailscale_(dial|new|listen|up|close)$' | head -20
+          nm -gU "$FW" | grep -q ' _tailscale_dial$'
+          nm -gU "$FW" | grep -q ' _tailscale_new$'
           echo "SPIKE_LINK_CHECK=PASS"
 
       - name: 打成未签名 .ipa
