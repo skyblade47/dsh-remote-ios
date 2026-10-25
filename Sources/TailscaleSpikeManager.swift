@@ -56,10 +56,16 @@ final class TailscaleSpikeManager: ObservableObject {
 
     private var node: TailscaleNode?
 
-    private func appendLog(_ line: String) {
-        // 限制缓冲，避免 Go 日志无限增长撑爆面板。
-        logs.append(String(line.prefix(500)))
-        if logs.count > 300 { logs.removeFirst(logs.count - 300) }
+    /// nonisolated：LogSink 的 @Sendable 回调在 Go 内部线程触发，
+    /// 这里统一派主队列后再碰 @Published，调用点无需处于 MainActor 隔离上下文。
+    nonisolated private func appendLog(_ line: String) {
+        let clipped = String(line.prefix(500))
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.logs.append(clipped)
+            // 限制缓冲，避免 Go 日志无限增长撑爆面板。
+            if self.logs.count > 300 { self.logs.removeFirst(self.logs.count - 300) }
+        }
     }
 
     /// 首次入网（带 auth key）或杀进程后恢复（authKey 传 nil）。
