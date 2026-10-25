@@ -19,10 +19,11 @@ final class HttpBridgeTests: XCTestCase {
         XCTAssertEqual(resp.status, 200)
         XCTAssertEqual(resp.head.header("set-cookie"), "dsh=1; Path=/")
         XCTAssertEqual(resp.head.header("x-test-upstream"), "fake")
-        let json = try JSONSerialization.jsonObject(with: resp.body) as? [String: String]
-        XCTAssertEqual(json?["method"], "GET")
-        XCTAssertEqual(json?["target"], "/writing-studio/api/clientZone?id=42")
-        XCTAssertEqual(json?["cookie"], "sid=abc")
+        // JSON 值含 Bool，字典须按 [String: Any] 桥接。
+        let json = try JSONSerialization.jsonObject(with: resp.body) as? [String: Any]
+        XCTAssertEqual(json?["method"] as? String, "GET")
+        XCTAssertEqual(json?["target"] as? String, "/writing-studio/api/clientZone?id=42")
+        XCTAssertEqual(json?["cookie"] as? String, "sid=abc")
 
         let rec = await connecter.recorder.calls
         XCTAssertEqual(rec.count, 1)

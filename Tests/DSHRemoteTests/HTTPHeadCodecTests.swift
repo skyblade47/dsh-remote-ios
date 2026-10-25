@@ -26,8 +26,9 @@ final class HTTPHeadCodecTests: XCTestCase {
     }
 
     func testHeaderEndIndex() {
+        // "a\r\nb\r\n\r\n" 共 8 字节，upperBound 指向下一字节（TAIL 的 T）。
         let data = Data("a\r\nb\r\n\r\nTAIL".utf8)
-        XCTAssertEqual(HTTPHeadCodec.headerEndIndex(in: data), 9)
+        XCTAssertEqual(HTTPHeadCodec.headerEndIndex(in: data), 8)
         XCTAssertNil(HTTPHeadCodec.headerEndIndex(in: Data("no head end".utf8)))
     }
 
