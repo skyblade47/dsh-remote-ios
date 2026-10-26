@@ -53,23 +53,35 @@ final class SpikeWebModel: NSObject, ObservableObject {
     }
 
     /// 在页面 JS 上下文里连 /api/remote.mux（同源，自动带 cookie）。
-    /// 8s 内：onopen=101（登录态正常）；onclose 带 code=401 即未登录但 upgrade 已透传到网关。
+    /// 8s 内：onopen=101（登录态正常）；onclose 1006 多为未登录 401，但 upgrade 已透传到网关。
     func probeWebSocket() {
         guard let wv = webView else { wsReport = "WebView 未就绪"; return }
+        // 前置拦截：主框架不是 http 页面（about:blank/未加载/加载中）时，JS 的 location.origin
+        // 为 "null"，new URL 会同步抛异常并让整个 Promise reject（evaluateJavaScript 直接报错）。
+        guard let pageURL = wv.url, pageURL.scheme == "http", wv.isLoading == false else {
+            wsReport = "页面未就绪：请先点「WKWebView 加载 /auth/login」，等导航轨迹出现「完成」后再探测（当前 \(wv.url?.absoluteString ?? "about:blank")）"
+            return
+        }
         busy = true
         wsReport = "探测中（最多 8s）…"
+        // 注意：整个 executor 体必须在 try 内——任何同步抛错都会让 Promise reject，
+        // 表现为 evaluateJavaScript 失败而非我们想要的字符串回传。
         let js = """
         new Promise((resolve) => {
-          const u = new URL('/api/remote.mux', location.origin);
-          u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
           let done = false;
-          const finish = (m) => { if (!done) { done = true; resolve(m); } };
+          const finish = (m) => { if (!done) { done = true; resolve(String(m)); } };
           const timer = setTimeout(() => finish('TIMEOUT 8s（无 open/close）'), 8000);
           try {
-            const ws = new WebSocket(u);
+            if (!location.protocol.startsWith('http')) {
+              clearTimeout(timer); finish('页面未加载（location=' + location.href + '），请先加载 /auth/login'); return;
+            }
+            const u = new URL('/api/remote.mux', location.origin);
+            u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(u.toString());
             ws.onopen = () => { clearTimeout(timer); finish('OPEN 101 ✅（登录态，双向通道建立）'); };
+            // onerror 在 WebKit 里必被随后的 onclose 跟随；以 onclose 的 code 为准，避免吞掉判定码。
             ws.onclose = (e) => { clearTimeout(timer); finish('CLOSE code=' + e.code + ' reason=' + (e.reason || '-') + (e.code === 1006 ? '（未登录多为网关 401 拒升级，仍证明 upgrade 字节已透传）' : '')); };
-            ws.onerror = () => { clearTimeout(timer); finish('ERROR（看随后的 CLOSE code 判定 401/其他）'); };
+            ws.onerror = () => { /* 等 onclose 给 code；若仅 error 不 close 由 8s 超时兜底 */ };
           } catch (ex) { clearTimeout(timer); finish('JS 异常: ' + ex); }
         });
         """
