@@ -10,9 +10,25 @@ struct TailscaleSpikeView: View {
     @StateObject private var vm = TailscaleSpikeManager()
     @StateObject private var web = SpikeWebModel()
     @Environment(\.dismiss) private var dismiss
+    // 2.6：记录进后台时刻，回前台算挂起时长；≥30s 自动触发复查。
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var backgroundDate: Date?
+    @State private var lastSuspendedSeconds: Int?
 
     // auth key 只活在这个 @State：点「入网」后立刻置空，不落盘、不进日志。
     @State private var authKeyInput: String = ""
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    private static func clock(_ d: Date) -> String { clockFormatter.string(from: d) }
+    private static func bytes(_ n: Int64) -> String {
+        n >= 1_048_576 ? String(format: "%.1fMB", Double(n) / 1_048_576.0)
+        : n >= 1024 ? "\(n / 1024)KB" : "\(n)B"
+    }
 
     var body: some View {
         NavigationStack {
@@ -77,6 +93,74 @@ struct TailscaleSpikeView: View {
                     }
                 }
 
+                // MARK: 2.5 弱网线路观测
+                Section("2.5 弱网线路（tailscale_status_json）") {
+                    HStack {
+                        Button {
+                            Task { await vm.refreshPath() }
+                        } label: {
+                            Label("刷新线路快照", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(vm.phase != .up)
+                        Spacer()
+                        Button {
+                            Task { await vm.togglePathWatch() }
+                        } label: {
+                            Label(vm.pathWatching ? "停止连续记录" : "连续记录 30s",
+                                  systemImage: vm.pathWatching ? "stop.circle" : "record.circle")
+                        }
+                        .disabled(vm.phase != .up)
+                    }
+                    if vm.pathSnapshots.isEmpty {
+                        Text("尚无快照。刷新后看 CurAddr 非空=P2P、为空+Relay=DERP。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        ForEach(vm.pathSnapshots.reversed()) { snap in
+                            pathRow(snap)
+                        }
+                    }
+                    Text("三档取证：①正常 WiFi 期望 P2P(CurAddr 对端公网)；②路由器/防火墙封 UDP 41641，点「连续记录 30s」后封，看 P2P→DERP(relay=sha) 自动回落与耗时；③关网关节点或登出，看 offline/missing 失败态。Rx/Tx 持续增长证明数据在流。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                // MARK: 2.6 后台挂起往返
+                Section("2.6 后台挂起 ≥30s 回前台（自动复查）") {
+                    HStack {
+                        Text("scenePhase").foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(String(describing: scenePhase))")
+                            .font(.system(.footnote, design: .monospaced))
+                    }
+                    if let secs = lastSuspendedSeconds {
+                        Text("上次挂起 \(secs)s\(secs >= 30 ? "（达标，已自动复查）" : "（<30s 不触发）")")
+                            .font(.footnote)
+                            .foregroundStyle(secs >= 30 ? .green : .secondary)
+                    }
+                    Button {
+                        let secs = lastSuspendedSeconds ?? 0
+                        Task { await vm.handleResume(suspendedSeconds: secs) }
+                    } label: {
+                        Label("手动触发一次回前台复查", systemImage: "power.sleep")
+                    }
+                    .disabled(vm.phase != .up)
+                    if vm.resumeReports.isEmpty {
+                        Text("切后台 ≥30s 再切回本页，自动跑四项：①C 内存 LocalAPI ②自建桥端口 TCP（失效自动重建）③tailscale_dial GET ④Swift loopback LocalAPI 对照。").font(.caption2).foregroundStyle(.secondary)
+                    } else {
+                        ForEach(vm.resumeReports.reversed()) { r in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(Self.clock(r.date)) · 挂起 \(r.suspendedSeconds)s").font(.caption2.bold())
+                                Text("① 内存status: \(r.memStatus)")
+                                Text("② 桥端口: \(r.bridgeProbe)")
+                                Text("③ dial GET: \(r.dialProbe)")
+                                Text("④ Swift statusJSON: \(r.swiftStatus)")
+                            }
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+
                 Section("Tailscale 日志（最近 300 行）") {
                     ScrollView {
                         Text(vm.logs.joined(separator: "\n"))
@@ -86,12 +170,65 @@ struct TailscaleSpikeView: View {
                     .frame(height: 260)
                 }
             }
-            .navigationTitle("Tailscale spike 2.4")
+            .navigationTitle("Tailscale spike 2.5/2.6")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
+            .onChange(of: scenePhase) { _, newPhase in
+                switch newPhase {
+                case .background:
+                    backgroundDate = Date()
+                case .active:
+                    guard let bg = backgroundDate else { return }
+                    backgroundDate = nil
+                    let secs = Int(Date().timeIntervalSince(bg))
+                    lastSuspendedSeconds = secs
+                    // ≥30s 才跑复查（短按电源/通知不打扰）；节点未 up 时 handleResume 内部会早退。
+                    if secs >= 30 && vm.phase == .up {
+                        Task { await vm.handleResume(suspendedSeconds: secs) }
+                    }
+                default:
+                    break
+                }
+            }
         }
+    }
+
+    // MARK: - 2.5 线路行
+
+    @ViewBuilder
+    private func pathRow(_ s: TailscaleSpikeManager.NetPathSnapshot) -> some View {
+        let kindColor: Color = {
+            switch s.kind {
+            case .p2p: return .green
+            case .derp: return .orange
+            case .idle: return .secondary
+            case .offline, .missing, .errored: return .red
+            }
+        }()
+        let hs = s.handshakeAgeSeconds < 0 ? "—" : "\(s.handshakeAgeSeconds)s"
+        let detail = s.kind == .errored ? s.note
+            : "backend=\(s.backendState) self=\(s.selfOnline ? "on" : "off") gw=\(s.gatewayOnline ? "on" : "off") peers=\(s.onlinePeers)"
+              + (s.kind == .p2p ? " · cur=\(s.curAddr)" : "")
+              + (s.kind == .derp ? " · relay=\(s.relay)" : "")
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(Self.clock(s.date)).font(.system(.caption2, design: .monospaced))
+                Text(s.kind.rawValue.uppercased())
+                    .font(.caption2.bold())
+                    .foregroundStyle(kindColor)
+                Spacer()
+                Text("握手 \(hs) · ↓\(Self.bytes(s.rxBytes)) ↑\(Self.bytes(s.txBytes))")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Text(detail)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(.vertical, 1)
     }
 
     // MARK: - 2.4 视图
