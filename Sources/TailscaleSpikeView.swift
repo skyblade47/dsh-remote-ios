@@ -8,6 +8,7 @@ import SwiftUI
 
 struct TailscaleSpikeView: View {
     @StateObject private var vm = TailscaleSpikeManager()
+    @StateObject private var web = SpikeWebModel()
     @Environment(\.dismiss) private var dismiss
 
     // auth key 只活在这个 @State：点「入网」后立刻置空，不落盘、不进日志。
@@ -68,6 +69,14 @@ struct TailscaleSpikeView: View {
                     dialResultView
                 }
 
+                // MARK: 2.4 WKWebView 经本地桥访问 tailnet（最高风险项）
+                Section("2.4 本地桥 → WKWebView（页面/Cookie/WS）") {
+                    bridgeControl
+                    if case .running(let base) = vm.bridge {
+                        bridgeProbeContent(base: base)
+                    }
+                }
+
                 Section("Tailscale 日志（最近 300 行）") {
                     ScrollView {
                         Text(vm.logs.joined(separator: "\n"))
@@ -77,12 +86,99 @@ struct TailscaleSpikeView: View {
                     .frame(height: 260)
                 }
             }
-            .navigationTitle("Tailscale spike 2.3")
+            .navigationTitle("Tailscale spike 2.4")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
         }
+    }
+
+    // MARK: - 2.4 视图
+
+    @ViewBuilder
+    private var bridgeControl: some View {
+        switch vm.bridge {
+        case .stopped:
+            Button {
+                Task { await vm.startBridge() }
+            } label: {
+                Label("启动本地桥（127.0.0.1 → tailnet）", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+            .disabled(vm.phase != .up)
+            if vm.phase != .up {
+                Text("先在上方完成入网，再起桥。").font(.footnote).foregroundStyle(.secondary)
+            }
+        case .starting:
+            Label("起桥中…", systemImage: "hourglass").foregroundStyle(.orange)
+        case .running(let base):
+            HStack {
+                Text("桥地址").foregroundStyle(.secondary)
+                Spacer()
+                Text(base.absoluteString).font(.system(.footnote, design: .monospaced))
+            }
+            Button(role: .destructive) {
+                vm.stopBridge()
+            } label: {
+                Label("停止本地桥", systemImage: "stop.circle")
+            }
+        case .failed(let reason):
+            Text(reason).font(.footnote).foregroundStyle(.red)
+            Button {
+                Task { await vm.startBridge() }
+            } label: {
+                Label("重试起桥", systemImage: "arrow.clockwise")
+            }
+            .disabled(vm.phase != .up)
+        }
+    }
+
+    @ViewBuilder
+    private func bridgeProbeContent(base: URL) -> some View {
+        // ① 页面取证：经本地桥加载真实登录页
+        Button {
+            web.load(base.appendingPathComponent("auth/login"))
+        } label: {
+            Label("WKWebView 加载 /auth/login", systemImage: "safari")
+        }
+
+        SpikeWebView(model: web)
+            .frame(height: 380)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.secondary.opacity(0.3)))
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text("导航轨迹").font(.footnote.bold())
+            Text(web.navLog.isEmpty ? "（无）" : web.navLog.joined(separator: "\n"))
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+
+        // ② Cookie 取证：登录后应看到 dsh_session
+        Button {
+            web.refreshCookies()
+        } label: {
+            Label("读取 127.0.0.1 下 Cookie", systemImage: "key")
+        }
+        Text(web.cookieReport)
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(web.cookieReport.contains("有 ✅") ? .green : .secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+        // ③ WS Upgrade 取证：未登录多为 401 CLOSE，登录后应 OPEN 101
+        Button {
+            web.probeWebSocket()
+        } label: {
+            Label("探测 WS /api/remote.mux（Upgrade 透传）", systemImage: "antenna.radiowaves.left.and.right")
+        }
+        .disabled(web.busy)
+        Text(web.wsReport)
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(web.wsReport.contains("101") || web.wsReport.contains("401") ? .green : .orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+        Text("取证顺序：先加载页面看渲染 → 未登录先探一次 WS（预期 401 close，证 Upgrade 已逐字节透传到网关）→ 在 WebView 内完成登录 → 再读 Cookie（dsh_session 有）→ 再探 WS（预期 101 open）。")
+            .font(.caption2).foregroundStyle(.secondary)
     }
 
     @ViewBuilder

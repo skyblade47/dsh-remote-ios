@@ -61,14 +61,24 @@ final class TailscaleSpikeManager: ObservableObject {
         case failed(String)
     }
 
+    /// 2.4 本地桥状态（up 后手动起桥；down 时自动停）。
+    enum BridgeState: Equatable {
+        case stopped
+        case starting
+        case running(URL)
+        case failed(String)
+    }
+
     @Published var phase: Phase = .idle
     @Published var ip4: String = "—"
     @Published var ip6: String = "—"
     @Published var logs: [String] = []
     @Published var hasState: Bool = TailscaleSpikeManager.hasPersistedState
     @Published var dialResult: DialResult = .idle
+    @Published var bridge: BridgeState = .stopped
 
     private var node: TailscaleNode?
+    private var loopback: LoopbackProxy?
 
     /// dsh-cloud 网关 tailnet 明文口（ACL 仅允许 tag:ipad 访问）。
     static let probeTarget = "100.99.84.35:8080"
@@ -130,6 +140,7 @@ final class TailscaleSpikeManager: ObservableObject {
     }
 
     func down() {
+        stopBridge()
         guard let node else { return }
         // down() 是 actor 上的非 async throws 方法，跨 actor 隔离调用仍需 await。
         Task {
@@ -139,6 +150,53 @@ final class TailscaleSpikeManager: ObservableObject {
             ip4 = "—"; ip6 = "—"
             appendLog("■ down（本地下线，状态目录保留）")
         }
+    }
+
+    // MARK: - Phase 2.4 localhost 本地桥（WKWebView → 127.0.0.1 → tailscale_dial）
+
+    /// up 成功后起桥：HttpBridge 复用 4.1–4.5 全部设备无关逻辑，唯一真机件是
+    /// TailscaleDialConnecter（每连接 tailscale_dial 到 100.99.84.35:8080）。
+    func startBridge() async {
+        guard phase == .up, let node else {
+            bridge = .failed("节点未入网，先 up")
+            return
+        }
+        // starting/running 不重复起；stopped/failed 都允许起（failed 即重试入口）。
+        if case .starting = bridge { return }
+        if case .running = bridge { return }
+        bridge = .starting
+        appendLog("▶ 2.4 起本地桥：127.0.0.1 → tailscale_dial → \(Self.probeTarget) …")
+
+        guard let handle = await node.tailscale else {
+            bridge = .failed("node.tailscale 为 nil（拿不到 C handle）")
+            appendLog("❌ 2.4 起桥失败：node.tailscale 为 nil")
+            return
+        }
+
+        let routes = ShellAssetRoutes { name in
+            guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
+            return try? Data(contentsOf: url)
+        }
+        let httpBridge = HttpBridge(routes: routes, connecter: TailscaleDialConnecter(handle: handle))
+        let proxy = LoopbackProxy(bridge: httpBridge)
+        loopback = proxy
+        do {
+            let base = try await proxy.start()
+            bridge = .running(base)
+            appendLog("✅ 2.4 本地桥就绪：\(base.absoluteString)（已写 UserDefaults DSHLoopbackBaseURL）")
+        } catch {
+            bridge = .failed("\(error)")
+            loopback = nil
+            appendLog("❌ 2.4 起桥失败：\(error)")
+        }
+    }
+
+    func stopBridge() {
+        loopback?.stop()
+        loopback = nil
+        if case .stopped = bridge { return }
+        bridge = .stopped
+        appendLog("■ 2.4 本地桥已停")
     }
 
     // MARK: - Phase 2.3 进程内 tailnet dial 探针
