@@ -12,13 +12,15 @@
 #   tools/build-tailscalekit.sh            # 正常构建（已存在且 commit 一致则复用）
 #   tools/build-tailscalekit.sh --force    # 删缓存与产物重新构建
 #
-# 注意：上游 pbxproj 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1。闸门 A 已用命令行
-#       覆盖实测 Swift 层无 iOS 18 only API 硬依赖（IOS17_OVERRIDE=PASS）。
-#       Phase 3.1 起改为在构建时以环境变量 IPHONEOS_DEPLOYMENT_TARGET
-#       （取自 VERSION 的 IOS_DEPLOYMENT_TARGET=17.0）覆盖上游设置，
-#       使正式 xcframework 产物的 minos 就是本工程的 17.0，消除链接 warning。
-#       xcodebuild 把同名环境变量当作优先级低于命令行的 build setting，
-#       上游 Makefile 的命令未显式设置该项，故环境变量可覆盖 pbxproj。
+# 注意：上游 pbxproj 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1（6 处 iOS 配置）。
+#       闸门 A 已用命令行覆盖实测 Swift 层无 iOS 18 only API 硬依赖（IOS17_OVERRIDE=PASS）。
+#       Phase 3.1 起在 checkout 后、make 前用 sed 把 pbxproj 6 处 18.1 批量改成
+#       VERSION 的 IOS_DEPLOYMENT_TARGET=17.0，使正式 xcframework 产物的 minos
+#       就是本工程的 17.0，消除链接 warning。
+#       【run 40345456800 证伪】export IPHONEOS_DEPLOYMENT_TARGET 环境变量无效：
+#       xcodebuild build setting 优先级为「命令行 > pbxproj 工程值 > 环境变量」，
+#       pbxproj 的显式 18.1 压制环境变量（vtool 仍见 minos 18.1）；上游 Makefile
+#       钉死在 libtailscale 仓内、命令行不可注入，故只能构建期 patch pbxproj。
 
 set -euo pipefail
 
@@ -101,11 +103,27 @@ else
 fi
 
 # --- 构建 ---
-# 覆盖上游写死的 18.1（见文件头注释）；export 后经 make 透传给两次 xcodebuild
-# （ios device + simulator），使两个 framework 切片的 minos 都是 17.0。
+# 覆盖上游写死的 18.1（见文件头注释）。run 40345456800 实测：**export
+# IPHONEOS_DEPLOYMENT_TARGET 环境变量无效**——xcodebuild 的 build setting
+# 优先级是「命令行 > pbxproj 工程值 > 环境变量」，上游 Makefile 未在命令行设该项，
+# 环境变量被 pbxproj 的显式 18.1 压制（vtool 仍见 minos 18.1）。
+# 上游 Makefile 又钉死在 libtailscale 仓内、命令行不可注入，故唯一不改上游命令
+# 的做法是构建前直接 patch pbxproj。Go c-archive（libtailscale_ios*.a）由
+# clangwrap-ios*.sh 以 -mios-version-min=12.0 编译（minos 12.0），不冲突。
 : "${CONF_IOS_DEPLOYMENT_TARGET:?VERSION 缺 IOS_DEPLOYMENT_TARGET}"
-export IPHONEOS_DEPLOYMENT_TARGET="${CONF_IOS_DEPLOYMENT_TARGET}"
-echo "== ${CONF_BUILD_COMMAND}（IPHONEOS_DEPLOYMENT_TARGET=${IPHONEOS_DEPLOYMENT_TARGET}） =="
+PBXPROJ="${SRC_DIR}/swift/TailscaleKit.xcodeproj/project.pbxproj"
+echo "== patch pbxproj：IPHONEOS_DEPLOYMENT_TARGET 18.1 -> ${CONF_IOS_DEPLOYMENT_TARGET} =="
+BEFORE=$(grep -c 'IPHONEOS_DEPLOYMENT_TARGET = 18.1' "${PBXPROJ}")
+# macOS 自带 BSD sed，用 -i ''；只动 iOS 一项，MACOSX/XROS 部署目标不碰。
+sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 18\.1;/IPHONEOS_DEPLOYMENT_TARGET = ${CONF_IOS_DEPLOYMENT_TARGET};/g" "${PBXPROJ}"
+AFTER=$(grep -c "IPHONEOS_DEPLOYMENT_TARGET = ${CONF_IOS_DEPLOYMENT_TARGET}" "${PBXPROJ}")
+echo "  替换前 18.1 行数=${BEFORE}，替换后 ${CONF_IOS_DEPLOYMENT_TARGET} 行数=${AFTER}"
+if [ "${BEFORE}" -eq 0 ] || [ "${AFTER}" -lt "${BEFORE}" ]; then
+  echo "ERROR: pbxproj patch 未命中（上游是否改了部署目标写法？）" >&2
+  grep -n 'IPHONEOS_DEPLOYMENT_TARGET' "${PBXPROJ}" >&2 || true
+  exit 1
+fi
+echo "== ${CONF_BUILD_COMMAND} =="
 ( cd "${SRC_DIR}" && eval "${CONF_BUILD_COMMAND}" )
 
 BUILT="${SRC_DIR}/${CONF_BUILD_ARTIFACT}"
@@ -132,7 +150,7 @@ for fw in "${OUT_FRAMEWORK}"/ios-*/TailscaleKit.framework; do
   bin="${fw}/TailscaleKit"
   echo "  --- ${fw} ---"
   lipo -info "${bin}" 2>/dev/null | sed 's/^/    /'
-  # 该二进制编译时的最低 iOS 版本（必须为环境变量覆盖后的 17.0）
+  # 该二进制编译时的最低 iOS 版本（必须为 pbxproj patch 后的 17.0）
   vtool -show-build "${bin}" 2>/dev/null | grep -E 'platform|minos' | sed 's/^/    /' || true
 done
 

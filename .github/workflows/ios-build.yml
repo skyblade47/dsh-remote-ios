@@ -22,8 +22,9 @@ on:
 
 jobs:
   # 方案 D 闸门 A：官方 TailscaleKit.xcframework 在当日工具链可复现构建、切片齐全、
-  # minos 压到 iOS 17.0（Phase 3.1 起构建脚本以 IPHONEOS_DEPLOYMENT_TARGET=17.0
-  # 覆盖上游 pbxproj 写死的 18.1）。产物 artifact 供 build job 下载链接。
+  # minos 压到 iOS 17.0（Phase 3.1 起构建脚本在 make 前 sed patch 上游 pbxproj
+  # 写死的 6 处 18.1 → 17.0；环境变量方案已被 run 40345456800 证伪）。
+  # 产物 artifact 供 build job 下载链接。
   tailscalekit-gate:
     runs-on: macos-15
     steps:
@@ -72,7 +73,7 @@ jobs:
           lipo -archs "$SIM_BIN" | grep -qw arm64
           lipo -archs "$SIM_BIN" | grep -qw x86_64
           echo "SLICE_CHECK=PASS"
-          # Phase 3.1：正式产物 minos 必须就是 17.0（构建脚本环境变量覆盖生效），
+          # Phase 3.1：正式产物 minos 必须就是 17.0（构建脚本 sed patch pbxproj 生效），
           # 不再接受 18.1——否则链接 App 时出 minos 18.1 > target 17.0 warning。
           for b in "$DEV_BIN" "$SIM_BIN"; do
             echo "--- $b vtool build ---"

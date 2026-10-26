@@ -26,10 +26,11 @@ BUILD_COMMAND=cd swift && make ios-fat
 BUILD_ARTIFACT=swift/build/Build/Products/Release-iphonefat/TailscaleKit.xcframework
 
 # 部署目标
-# 上游 pbxproj 两个 iOS target 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1；
+# 上游 pbxproj 6 处 iOS 配置写死 IPHONEOS_DEPLOYMENT_TARGET=18.1；
 # 闸门 A 已实测 Swift 源码无 iOS 18 only 硬依赖。Phase 3.1 起 build-tailscalekit.sh
-# 构建时 export 本值（xcodebuild 环境变量覆盖 pbxproj），正式产物 minos=17.0，
-# CI gate 以 vtool 断言两个切片均为 minos 17.0。
+# 在 checkout 后、make 前用 sed 把 6 处 18.1 批量 patch 成本值（run 40345456800
+# 已证伪 export 环境变量方案：pbxproj 显式值优先级高于环境变量），正式产物
+# minos=17.0，CI gate 以 vtool 断言两个切片均为 minos 17.0。
 IOS_DEPLOYMENT_TARGET=17.0
 
 # 切片（device arm64；simulator 为 arm64+x86_64 lipo）
