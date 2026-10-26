@@ -51,6 +51,23 @@ struct TailscaleSpikeView: View {
                     .disabled(vm.phase != .up)
                 }
 
+                Section("2.3 数据面探针（进程内 tailscale_dial）") {
+                    Text("GET \(TailscaleSpikeManager.probeTarget)\(TailscaleSpikeManager.probePath) · 经 tsnet 数据面，绕过 URLSession/ATS")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button {
+                        Task { await vm.runDialProbe() }
+                    } label: {
+                        if case .running = vm.dialResult {
+                            Label("探测中（最多 20s）…", systemImage: "antenna.radiowaves.left.and.right")
+                        } else {
+                            Label("发起 GET /auth/login", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+                    }
+                    .disabled(vm.phase != .up || (vm.dialResult == .running))
+
+                    dialResultView
+                }
+
                 Section("Tailscale 日志（最近 300 行）") {
                     ScrollView {
                         Text(vm.logs.joined(separator: "\n"))
@@ -60,11 +77,30 @@ struct TailscaleSpikeView: View {
                     .frame(height: 260)
                 }
             }
-            .navigationTitle("Tailscale spike 2.2")
+            .navigationTitle("Tailscale spike 2.3")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var dialResultView: some View {
+        switch vm.dialResult {
+        case .idle:
+            Text("尚未探测。WiFi 与蜂窝下各跑一次。").font(.footnote).foregroundStyle(.secondary)
+        case .running:
+            Text("数据面建连/收包中…").font(.footnote).foregroundStyle(.orange)
+        case .ok(let status, let ms, let bytes, let preview):
+            VStack(alignment: .leading, spacing: 4) {
+                Text("HTTP \(status)").font(.system(.footnote, design: .monospaced)).foregroundStyle(status.contains("200") && !status.contains("非 200") ? .green : .orange)
+                Text("耗时 \(ms) ms · 收到 \(bytes) 字节").font(.footnote).foregroundStyle(.secondary)
+                Text(preview).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .failed(let reason):
+            Text(reason).font(.footnote).foregroundStyle(.red)
         }
     }
 
