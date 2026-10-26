@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import Network
 import Darwin
 import TailscaleKit
@@ -32,6 +33,11 @@ struct SpikeLogSink: LogSink {
 
 @MainActor
 final class TailscaleSpikeManager: ObservableObject {
+    /// 全局单例：spike 阶段模拟产品里「节点生命周期独立于任何页面」。
+    /// 不能由 TS 调试窗口 @StateObject 持有——窗口关闭会释放 manager、连带释放
+    /// tsnet 节点与 127.0.0.1 桥（真机已复现「关窗口即断联」）。
+    static let shared = TailscaleSpikeManager()
+
     enum Phase: Equatable {
         case idle
         case starting
@@ -122,6 +128,40 @@ final class TailscaleSpikeManager: ObservableObject {
     @Published var pathSnapshots: [NetPathSnapshot] = []
     @Published var pathWatching: Bool = false
     @Published var resumeReports: [ResumeReport] = []
+
+    /// 进程代际诊断：冷启动时若发现上一进程留下的「进后台时刻」，说明锁屏/切后台后
+    /// 本 App 进程被 iOS 冻结/回收（不是热解冻）——in-app tsnet 无后台常驻，
+    /// 这是方案 D 闸门 B 的关键证据。仅 UserDefaults 时间戳，无任何敏感信息。
+    @Published var coldStartAfterBackground: (backgroundDate: Date, elapsed: TimeInterval)?
+
+    private static let backgroundDateKey = "DSHSpikeLastBackgroundDate"
+
+    private init() {
+        let defaults = UserDefaults.standard
+        if let last = defaults.object(forKey: Self.backgroundDateKey) as? Date {
+            // 上次进后台后没有热回前台（热回前台会主动清掉），本进程是冷启动。
+            coldStartAfterBackground = (last, Date().timeIntervalSince(last))
+            defaults.removeObject(forKey: Self.backgroundDateKey)
+        }
+        // 生命周期打点放在 manager 自身，不依赖 TS 调试窗口是否打开（窗口关着锁屏也要能抓到）。
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.markBackgrounded()
+        }
+        nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.clearBackgroundMarker()
+        }
+    }
+
+    /// 进入后台时打点（View 的 scenePhase onChange 调用）。
+    func markBackgrounded() {
+        UserDefaults.standard.set(Date(), forKey: Self.backgroundDateKey)
+    }
+
+    /// 热解冻回前台：进程没被杀，清掉打点，正常走四项复查。
+    func clearBackgroundMarker() {
+        UserDefaults.standard.removeObject(forKey: Self.backgroundDateKey)
+    }
 
     private var node: TailscaleNode?
     private var loopback: LoopbackProxy?
@@ -404,6 +444,27 @@ final class TailscaleSpikeManager: ObservableObject {
     }
 
     // MARK: - Phase 2.6 后台挂起 → 回前台复查/重建
+
+    /// 冷启动恢复：进程被 iOS 杀掉后，用已存登录态重新 up 并重建本地桥。
+    /// 同时量「回前台到可再次经桥访问」的总恢复耗时——产品化恢复策略的核心指标。
+    func recoverAfterColdStart() async {
+        let elapsedPrev = coldStartAfterBackground.map { $0.elapsed }
+        appendLog("▶ 冷启动恢复：距上次进后台 \(elapsedPrev.map { String(format: "%.0f", $0) } ?? "?")s，重新 up + 起桥")
+        coldStartAfterBackground = nil
+        let t0 = Date()
+        await bringUp(authKey: nil)
+        guard phase == .up else {
+            appendLog("❌ 冷启动恢复：up 失败")
+            return
+        }
+        await startBridge()
+        let total = Int(Date().timeIntervalSince(t0) * 1000)
+        if case .running = bridge {
+            appendLog("✅ 冷启动恢复完成：up + 起桥共 \(total)ms")
+        } else {
+            appendLog("⚠ 冷启动恢复：up 成功但起桥失败（\(total)ms）")
+        }
+    }
 
     /// 回前台复查：①C 内存 LocalAPI status ②自建 127.0.0.1 桥端口 TCP 探活（失败则重建）
     /// ③tailscale_dial 重跑 GET ④Swift node.statusJSON()（走 loopback HTTP，挂起后预期可能失败，对照组）。

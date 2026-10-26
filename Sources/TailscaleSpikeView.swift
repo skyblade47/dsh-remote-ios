@@ -7,7 +7,8 @@ import SwiftUI
 // ============================================================================
 
 struct TailscaleSpikeView: View {
-    @StateObject private var vm = TailscaleSpikeManager()
+    // 全局共享：节点/桥的生命周期必须独立于此调试窗口（窗口关闭不应释放节点）。
+    @ObservedObject private var vm = TailscaleSpikeManager.shared
     @StateObject private var web = SpikeWebModel()
     @Environment(\.dismiss) private var dismiss
     // 2.6：记录进后台时刻，回前台算挂起时长；≥30s 自动触发复查。
@@ -131,6 +132,21 @@ struct TailscaleSpikeView: View {
                         Text("\(String(describing: scenePhase))")
                             .font(.system(.footnote, design: .monospaced))
                     }
+                    // 冷启动证据：上一进程进后台后没有热回来 → 进程被 iOS 冻结/回收。
+                    if let cold = vm.coldStartAfterBackground {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("进程被杀冷启动（距上次进后台 \(Int(cold.elapsed))s）", systemImage: "snowflake")
+                                .font(.footnote.bold()).foregroundStyle(.red)
+                            Text("in-app tsnet 无后台常驻：锁屏/切后台后节点与桥随进程被回收，热回前台的四项复查不会出现。点下方按钮量「重新 up + 起桥」恢复耗时。")
+                                .font(.caption2).foregroundStyle(.secondary)
+                            Button {
+                                Task { await vm.recoverAfterColdStart() }
+                            } label: {
+                                Label("用已存登录态恢复并重建桥", systemImage: "arrow.clockwise.circle")
+                            }
+                            .disabled(vm.phase == .starting)
+                        }
+                    }
                     if let secs = lastSuspendedSeconds {
                         Text("上次挂起 \(secs)s\(secs >= 30 ? "（达标，已自动复查）" : "（<30s 不触发）")")
                             .font(.footnote)
@@ -180,6 +196,7 @@ struct TailscaleSpikeView: View {
                 case .background:
                     backgroundDate = Date()
                 case .active:
+                    // 进程存活打点由 manager 经 UIApplication 通知自行维护；这里只管热解冻四项复查。
                     guard let bg = backgroundDate else { return }
                     backgroundDate = nil
                     let secs = Int(Date().timeIntervalSince(bg))
