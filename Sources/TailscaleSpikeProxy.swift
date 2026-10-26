@@ -47,7 +47,7 @@ final class TailscaleFDChannel: DuplexChannel {
     func read() async throws -> Data? {
         iteratorLock.lock()
         if iterator == nil { iterator = inbound.makeAsyncIterator() }
-        let iter = iterator!
+        var iter = iterator!
         iteratorLock.unlock()
         return await iter.next() ?? nil
     }
