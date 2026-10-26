@@ -137,7 +137,8 @@ struct TailscaleSpikeView: View {
     private func bridgeProbeContent(base: URL) -> some View {
         // ① 页面取证：经本地桥加载真实登录页
         Button {
-            web.load(base.appendingPathComponent("auth/login"))
+            // 不用 appendingPathComponent：它会追加尾斜杠（/auth/login/）触发网关重定向。
+            web.load(URL(string: "auth/login", relativeTo: base)!.absoluteURL)
         } label: {
             Label("WKWebView 加载 /auth/login", systemImage: "safari")
         }
