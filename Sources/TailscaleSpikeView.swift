@@ -13,8 +13,6 @@ struct TailscaleSpikeView: View {
     @Environment(\.dismiss) private var dismiss
     // 2.6：记录进后台时刻，回前台算挂起时长；≥30s 自动触发复查。
     @Environment(\.scenePhase) private var scenePhase
-    @State private var backgroundDate: Date?
-    @State private var lastSuspendedSeconds: Int?
 
     // auth key 只活在这个 @State：点「入网」后立刻置空，不落盘、不进日志。
     @State private var authKeyInput: String = ""
@@ -147,13 +145,13 @@ struct TailscaleSpikeView: View {
                             .disabled(vm.phase == .starting)
                         }
                     }
-                    if let secs = lastSuspendedSeconds {
+                    if let secs = vm.lastSuspendedSeconds {
                         Text("上次挂起 \(secs)s\(secs >= 30 ? "（达标，已自动复查）" : "（<30s 不触发）")")
                             .font(.footnote)
                             .foregroundStyle(secs >= 30 ? .green : .secondary)
                     }
                     Button {
-                        let secs = lastSuspendedSeconds ?? 0
+                        let secs = vm.lastSuspendedSeconds ?? 0
                         Task { await vm.handleResume(suspendedSeconds: secs) }
                     } label: {
                         Label("手动触发一次回前台复查", systemImage: "power.sleep")
@@ -191,24 +189,7 @@ struct TailscaleSpikeView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
-            .onChange(of: scenePhase) { _, newPhase in
-                switch newPhase {
-                case .background:
-                    backgroundDate = Date()
-                case .active:
-                    // 进程存活打点由 manager 经 UIApplication 通知自行维护；这里只管热解冻四项复查。
-                    guard let bg = backgroundDate else { return }
-                    backgroundDate = nil
-                    let secs = Int(Date().timeIntervalSince(bg))
-                    lastSuspendedSeconds = secs
-                    // ≥30s 才跑复查（短按电源/通知不打扰）；节点未 up 时 handleResume 内部会早退。
-                    if secs >= 30 && vm.phase == .up {
-                        Task { await vm.handleResume(suspendedSeconds: secs) }
-                    }
-                default:
-                    break
-                }
-            }
+            // 挂起/解冻与自动复查由 manager 经 UIApplication 通知统一处理（TS 窗口关着也要能触发）。
         }
     }
 

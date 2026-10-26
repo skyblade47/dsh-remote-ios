@@ -134,7 +134,13 @@ final class TailscaleSpikeManager: ObservableObject {
     /// 这是方案 D 闸门 B 的关键证据。仅 UserDefaults 时间戳，无任何敏感信息。
     @Published var coldStartAfterBackground: (backgroundDate: Date, elapsed: TimeInterval)?
 
+    /// 最近一次（本进程内）挂起时长（秒）；<30 不触发复查。
+    @Published var lastSuspendedSeconds: Int?
+
     private static let backgroundDateKey = "DSHSpikeLastBackgroundDate"
+
+    /// 内存中的进后台时刻：热解冻时用来算挂起时长；进程被杀则随内存一起消失。
+    private var inMemoryBackgroundDate: Date?
 
     private init() {
         let defaults = UserDefaults.standard
@@ -143,24 +149,33 @@ final class TailscaleSpikeManager: ObservableObject {
             coldStartAfterBackground = (last, Date().timeIntervalSince(last))
             defaults.removeObject(forKey: Self.backgroundDateKey)
         }
-        // 生命周期打点放在 manager 自身，不依赖 TS 调试窗口是否打开（窗口关着锁屏也要能抓到）。
+        // 生命周期放在 manager 自身：无论 TS 调试窗口开没开，锁屏 ≥30s 解冻都能自动复查
+        //（产品形态下调试窗口不会常驻，复查触发不能绑在窗口 scenePhase 上）。
         let nc = NotificationCenter.default
         nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.markBackgrounded()
         }
         nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.clearBackgroundMarker()
+            self?.handleDidBecomeActive()
         }
     }
 
-    /// 进入后台时打点（View 的 scenePhase onChange 调用）。
-    func markBackgrounded() {
-        UserDefaults.standard.set(Date(), forKey: Self.backgroundDateKey)
+    /// 进入后台时打点（持久 + 内存各一份）。
+    private func markBackgrounded() {
+        let now = Date()
+        inMemoryBackgroundDate = now
+        UserDefaults.standard.set(now, forKey: Self.backgroundDateKey)
     }
 
-    /// 热解冻回前台：进程没被杀，清掉打点，正常走四项复查。
-    func clearBackgroundMarker() {
+    /// 回前台：进程存活则按内存打点算挂起时长并（≥30s 且已 up）自动复查；清持久打点。
+    private func handleDidBecomeActive() {
         UserDefaults.standard.removeObject(forKey: Self.backgroundDateKey)
+        guard let bg = inMemoryBackgroundDate else { return }
+        inMemoryBackgroundDate = nil
+        let secs = Int(Date().timeIntervalSince(bg))
+        lastSuspendedSeconds = secs
+        guard secs >= 30, phase == .up else { return }
+        Task { await handleResume(suspendedSeconds: secs) }
     }
 
     private var node: TailscaleNode?
