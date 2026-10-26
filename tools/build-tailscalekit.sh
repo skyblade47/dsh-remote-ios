@@ -12,11 +12,13 @@
 #   tools/build-tailscalekit.sh            # 正常构建（已存在且 commit 一致则复用）
 #   tools/build-tailscalekit.sh --force    # 删缓存与产物重新构建
 #
-# 注意：上游 pbxproj 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1，本脚本先按上游原样
-#       构建（产物最低目标 18.1）。能否把它压到本工程的 17.0，由 CI 闸门 A
-#       （.github/workflows/ios-build.yml 的 tailscalekit-gate job）在构建后
-#       用命令行 IPHONEOS_DEPLOYMENT_TARGET=17.0 重编 framework 单独探测，
-#       不在本脚本内改上游。
+# 注意：上游 pbxproj 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1。闸门 A 已用命令行
+#       覆盖实测 Swift 层无 iOS 18 only API 硬依赖（IOS17_OVERRIDE=PASS）。
+#       Phase 3.1 起改为在构建时以环境变量 IPHONEOS_DEPLOYMENT_TARGET
+#       （取自 VERSION 的 IOS_DEPLOYMENT_TARGET=17.0）覆盖上游设置，
+#       使正式 xcframework 产物的 minos 就是本工程的 17.0，消除链接 warning。
+#       xcodebuild 把同名环境变量当作优先级低于命令行的 build setting，
+#       上游 Makefile 的命令未显式设置该项，故环境变量可覆盖 pbxproj。
 
 set -euo pipefail
 
@@ -99,7 +101,11 @@ else
 fi
 
 # --- 构建 ---
-echo "== ${CONF_BUILD_COMMAND} =="
+# 覆盖上游写死的 18.1（见文件头注释）；export 后经 make 透传给两次 xcodebuild
+# （ios device + simulator），使两个 framework 切片的 minos 都是 17.0。
+: "${CONF_IOS_DEPLOYMENT_TARGET:?VERSION 缺 IOS_DEPLOYMENT_TARGET}"
+export IPHONEOS_DEPLOYMENT_TARGET="${CONF_IOS_DEPLOYMENT_TARGET}"
+echo "== ${CONF_BUILD_COMMAND}（IPHONEOS_DEPLOYMENT_TARGET=${IPHONEOS_DEPLOYMENT_TARGET}） =="
 ( cd "${SRC_DIR}" && eval "${CONF_BUILD_COMMAND}" )
 
 BUILT="${SRC_DIR}/${CONF_BUILD_ARTIFACT}"
@@ -126,7 +132,7 @@ for fw in "${OUT_FRAMEWORK}"/ios-*/TailscaleKit.framework; do
   bin="${fw}/TailscaleKit"
   echo "  --- ${fw} ---"
   lipo -info "${bin}" 2>/dev/null | sed 's/^/    /'
-  # 该二进制编译时的最低 iOS 版本（确认 18.1 / 或覆盖后的 17.0）
+  # 该二进制编译时的最低 iOS 版本（必须为环境变量覆盖后的 17.0）
   vtool -show-build "${bin}" 2>/dev/null | grep -E 'platform|minos' | sed 's/^/    /' || true
 done
 

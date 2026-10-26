@@ -21,9 +21,9 @@ on:
       - main
 
 jobs:
-  # 方案 D 闸门 A：回答「官方 TailscaleKit.xcframework 能否在当日工具链可复现构建、
-  # 切片是否齐全、能否压到 iOS 17.0」。产物 artifact 供 build job 下载链接
-  # （链接原为 Phase 3.1 的活，因 Phase 2.1 侧载可行性验证需要真包而提前为 spike 链接）。
+  # 方案 D 闸门 A：官方 TailscaleKit.xcframework 在当日工具链可复现构建、切片齐全、
+  # minos 压到 iOS 17.0（Phase 3.1 起构建脚本以 IPHONEOS_DEPLOYMENT_TARGET=17.0
+  # 覆盖上游 pbxproj 写死的 18.1）。产物 artifact 供 build job 下载链接。
   tailscalekit-gate:
     runs-on: macos-15
     steps:
@@ -52,7 +52,7 @@ jobs:
         # 显式 bash：脚本从 Windows 侧提交，不保证带可执行位
         run: bash tools/build-tailscalekit.sh --force
 
-      - name: 闸门 A 切片验收（device arm64 + simulator arm64/x86_64）
+      - name: 闸门 A 切片 + minos 17.0 验收（device arm64 + simulator arm64/x86_64）
         run: |
           set -euo pipefail
           FW=Vendor/TailscaleKit.xcframework
@@ -72,35 +72,14 @@ jobs:
           lipo -archs "$SIM_BIN" | grep -qw arm64
           lipo -archs "$SIM_BIN" | grep -qw x86_64
           echo "SLICE_CHECK=PASS"
-
-      - name: 闸门 A iOS 17.0 覆盖探测（上游 pbxproj 写死 18.1）
-        # 不改上游源码，仅用命令行覆盖部署目标重新 archive 一次 framework，
-        # 验证 Swift 层没有 iOS 18 only API 硬依赖。失败只告警、不阻断（留证评审），
-        # 因为真正的链接验证在 Phase 3.1；但这一步的输出是 17.0 决策的关键证据。
-        run: |
-          set -euo pipefail
-          SRC=.tailscalekit-src
-          # libtailscale_ios.a 已由上一步 tools/build-tailscalekit.sh（make ios-fat）产出。
-          # 注意：xcodeproj 在 swift/ 子目录，上游 swift/Makefile 也是 cd swift 后再
-          # xcodebuild -derivedDataPath build；这里必须在同一目录，否则 rc=66
-          # 「directory does not contain an Xcode project」。用独立 derivedData 不污染正式产物。
-          set +e
-          ( cd "$SRC/swift" && xcodebuild build \
-              -scheme "TailscaleKit (iOS)" \
-              -derivedDataPath build-ios17 \
-              -configuration Release \
-              -destination 'generic/platform=iOS' \
-              IPHONEOS_DEPLOYMENT_TARGET=17.0 \
-              CODE_SIGNING_ALLOWED=NO ) > /tmp/ios17-build.log 2>&1
-          RC=$?
-          set -e
-          echo "xcodebuild rc=$RC"
-          if [ $RC -eq 0 ]; then
-            echo "IOS17_OVERRIDE=PASS（命令行覆盖到 17.0 可构建）"
-          else
-            echo "IOS17_OVERRIDE=FAIL（以下为错误上下文，需评审是否 pin 旧 commit / 另做包装）"
-            grep -nE 'error:|has been renamed|requires iOS|was deprecated|is only available' /tmp/ios17-build.log | head -40 || true
-          fi
+          # Phase 3.1：正式产物 minos 必须就是 17.0（构建脚本环境变量覆盖生效），
+          # 不再接受 18.1——否则链接 App 时出 minos 18.1 > target 17.0 warning。
+          for b in "$DEV_BIN" "$SIM_BIN"; do
+            echo "--- $b vtool build ---"
+            vtool -show-build "$b" | grep -E 'platform|minos'
+            vtool -show-build "$b" | grep -q 'minos 17.0'
+          done
+          echo "MINOS17_CHECK=PASS"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -117,7 +96,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 下载 TailscaleKit.xcframework（复用 gate 产物，不重复跑 Go 构建）
-        # Phase 2.1 spike：app target 已依赖 Vendor/TailscaleKit.xcframework（gitignored），
+        # app target 正式依赖 Vendor/TailscaleKit.xcframework（gitignored），
         # 必须在 xcodegen generate 之前就位，否则工程生成会因找不到 framework 失败。
         # 注意：upload-artifact 上传目录时，artifact 根就是该目录的*内容*（Info.plist 直接
         # 在根，无外层包装，本地 gh run download 可证），所以这里要显式落到包装目录名里。
@@ -184,14 +163,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tail -n 60
 
-      - name: Phase 2.1 spike 自检（TailscaleKit 动态 framework 确实 embed 进包）
-        # 🔴 magic bytes 取证：TailscaleKit.framework/TailscaleKit 是 MH_DYLIB（动态框架），
-        #    21MB Go 在 dylib 内，主二进制仍 ~1MB、只含 LC_LOAD_DYLIB（run 40167137252 实证）。
-        #    所以自检口径不是「主二进制 >20MB」，而是：
+      - name: TailscaleKit 正式链接自检（动态 framework 确实 embed 进包）
+        # TailscaleKit.framework/TailscaleKit 是 MH_DYLIB（动态框架）：22MB Go 在 dylib 内，
+        # 主二进制仍 ~2MB、只含 LC_LOAD_DYLIB（magic bytes 取证于 Phase 2.1）。自检口径：
         #      1) .app/Frameworks/TailscaleKit.framework/TailscaleKit 存在且 ≥20MB（embed 成功）
         #      2) otool -L 主二进制含 TailscaleKit 的 LC_LOAD_DYLIB（链接成功）
         #      3) dylib 自身导出 tailscale_* C 接口（Go c-archive 确在其中）
-        #    任一不满足就让 CI 红——否则产出的 ipa 无法代表「含 Go dylib 的包」，侧载结论无效。
+        #    任一不满足就让 CI 红——防止产出看似成功但没链 Go 的假包。
         run: |
           set -euo pipefail
           APP="build/Build/Products/Release-iphoneos/DSHRemote.app"
@@ -206,7 +184,7 @@ jobs:
           SIZE=$(stat -f%z "$FW")
           echo "embedded dylib size bytes = $SIZE"
           if [ "$SIZE" -lt 20000000 ]; then
-            echo "::error::embed 的 TailscaleKit $SIZE 字节 < 20MB，Go dylib 疑似不对，spike 包无效"
+            echo "::error::embed 的 TailscaleKit $SIZE 字节 < 20MB，Go dylib 疑似不对，包无效"
             exit 1
           fi
           echo "--- 主二进制 LC_LOAD_DYLIB（必须引用 @rpath/TailscaleKit）---"
@@ -216,7 +194,7 @@ jobs:
           nm -gU "$FW" | grep -E ' _tailscale_(dial|new|listen|up|close)$' | head -20
           nm -gU "$FW" | grep -q ' _tailscale_dial$'
           nm -gU "$FW" | grep -q ' _tailscale_new$'
-          echo "SPIKE_LINK_CHECK=PASS"
+          echo "LINK_CHECK=PASS"
 
       - name: 打成未签名 .ipa
         run: |

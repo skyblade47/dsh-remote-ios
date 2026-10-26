@@ -27,8 +27,9 @@ BUILD_ARTIFACT=swift/build/Build/Products/Release-iphonefat/TailscaleKit.xcframe
 
 # 部署目标
 # 上游 pbxproj 两个 iOS target 写死 IPHONEOS_DEPLOYMENT_TARGET=18.1；
-# Swift 源码未见 @available gating。需以命令行/xcconfig 覆盖压到本工程的 17.0，
-# 此项能否在无编译错误下成立，是 Phase 1 闸门 A 的 go/no-go 验证点之一。
+# 闸门 A 已实测 Swift 源码无 iOS 18 only 硬依赖。Phase 3.1 起 build-tailscalekit.sh
+# 构建时 export 本值（xcodebuild 环境变量覆盖 pbxproj），正式产物 minos=17.0，
+# CI gate 以 vtool 断言两个切片均为 minos 17.0。
 IOS_DEPLOYMENT_TARGET=17.0
 
 # 切片（device arm64；simulator 为 arm64+x86_64 lipo）

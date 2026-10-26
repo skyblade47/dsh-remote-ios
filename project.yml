@@ -25,9 +25,9 @@ targets:
         group: ""
     info:
       path: Resources/Info.plist
-    # Phase 2.1 spike：正式把 TailscaleKit.xcframework 链进 app（原定 Phase 3.1，为验证
-    # 「免费 Apple ID 能否侧载含 ~21MB Go c-archive 的包」而提前）。framework 是 gitignored 的
-    # CI 产物，CI build job 从 tailscalekit-gate 的 artifact 下载到 Vendor/ 后才 xcodegen。
+    # 正式链接 TailscaleKit.xcframework（Phase 2.1 已提前验证「免费 Apple ID 能侧载
+    # 含 ~22MB Go dylib 的包」，Phase 3.1 转正）。framework 是 gitignored 的 CI 产物，
+    # CI build job 从 tailscalekit-gate 的 artifact 下载到 Vendor/ 后才 xcodegen。
     #
     # 🔴 2026-10-25 magic bytes 取证（ios-arm64/TailscaleKit.framework/TailscaleKit）：
     #    CF FA ED FE = Mach-O 64 thin arm64，offset 12 filetype=06 = **MH_DYLIB**。
