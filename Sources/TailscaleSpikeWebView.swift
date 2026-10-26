@@ -86,7 +86,7 @@ final class SpikeWebModel: NSObject, ObservableObject {
           } catch (ex) { clearTimeout(timer); finish('JS 异常: ' + ex); }
         });
         """
-        wv.callAsyncJavaScript(body, arguments: nil, in: nil, in: .page) { [weak self] result in
+        wv.callAsyncJavaScript(body, arguments: [:], in: nil, in: .page) { [weak self] result in
             DispatchQueue.main.async {
                 self?.busy = false
                 switch result {
