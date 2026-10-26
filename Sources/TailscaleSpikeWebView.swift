@@ -64,10 +64,11 @@ final class SpikeWebModel: NSObject, ObservableObject {
         }
         busy = true
         wsReport = "探测中（最多 8s）…"
-        // 注意：整个 executor 体必须在 try 内——任何同步抛错都会让 Promise reject，
-        // 表现为 evaluateJavaScript 失败而非我们想要的字符串回传。
-        let js = """
-        new Promise((resolve) => {
+        // 用 callAsyncJavaScript（iOS14+）：函数体被包成 async function 并被原生 await，
+        // 能可靠拿到跨 runloop（WebSocket 事件回调）才 resolve 的字符串。
+        // evaluateJavaScript 对这种 Promise 会回 Code=5（result type unsupported）。
+        let body = """
+        return await new Promise((resolve) => {
           let done = false;
           const finish = (m) => { if (!done) { done = true; resolve(String(m)); } };
           const timer = setTimeout(() => finish('TIMEOUT 8s（无 open/close）'), 8000);
@@ -85,12 +86,16 @@ final class SpikeWebModel: NSObject, ObservableObject {
           } catch (ex) { clearTimeout(timer); finish('JS 异常: ' + ex); }
         });
         """
-        wv.evaluateJavaScript(js) { [weak self] result, error in
+        wv.callAsyncJavaScript(body, arguments: nil, in: nil, in: .page) { [weak self] result in
             DispatchQueue.main.async {
                 self?.busy = false
-                if let error { self?.wsReport = "evaluateJavaScript 失败：\(error)" }
-                else if let s = result as? String { self?.wsReport = s }
-                else { self?.wsReport = "无返回：\(String(describing: result))" }
+                switch result {
+                case .success(let value):
+                    if let s = value as? String { self?.wsReport = s }
+                    else { self?.wsReport = "无返回：\(String(describing: value))" }
+                case .failure(let error):
+                    self?.wsReport = "WS 探测失败：\(error)"
+                }
             }
         }
     }
