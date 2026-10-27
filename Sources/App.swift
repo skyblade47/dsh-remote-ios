@@ -62,7 +62,7 @@ struct RootView: View {
     @State private var titleTaps = 0
     @State private var showS1 = false
     @State private var showS1Alert = false
-    @State private var showTS = false   // Phase 2.2 spike：Tailscale 入网调试面板
+    @State private var showTS = false   // Phase 3.3：Tailscale 产品设置页（认证/状态/登出）
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,7 +85,7 @@ struct RootView: View {
                     }
                 HStack {
                     Spacer()
-                    // Phase 2.2 spike 入口（非产品 UI，闸门 B 后删除）
+                    // Phase 3.3 产品入口：Tailscale 认证/节点状态设置页
                     Button { showTS = true } label: {
                         Text("TS").font(.caption.bold()).padding(.horizontal, 8).padding(.vertical, 3)
                             .overlay(Capsule().stroke(.secondary))
@@ -120,9 +120,9 @@ struct RootView: View {
                 S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway)) ?? "")
             }
         }
-        // Phase 2.2 spike：Tailscale 非交互入网面板
+        // Phase 3.3：Tailscale 认证产品设置页（观察 App 级单例，不持有节点）
         .sheet(isPresented: $showTS) {
-            TailscaleSpikeView()
+            TailnetSettingsView()
         }
     }
 }
