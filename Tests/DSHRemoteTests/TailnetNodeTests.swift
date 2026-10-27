@@ -133,8 +133,8 @@ private final class BackendQueue: @unchecked Sendable {
 @MainActor
 final class TailnetNodeTests: XCTestCase {
 
-    var tempDir: URL!
-    var auth: InMemoryAuthStore!
+    private var tempDir: URL!
+    private var auth: InMemoryAuthStore!
 
     override func setUp() async throws {
         try await super.setUp()
