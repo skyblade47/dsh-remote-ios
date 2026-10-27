@@ -63,8 +63,8 @@ private final class FakeKeychain: KeychainBackending {
 
 final class TailnetAuthStoreTests: XCTestCase {
 
-    var keychain: FakeKeychain!
-    var store: TailnetAuthStore!
+    private var keychain: FakeKeychain!
+    private var store: TailnetAuthStore!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
