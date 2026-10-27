@@ -34,8 +34,8 @@ protocol TailnetBackending: AnyObject {
     func shutdown() async
 }
 
-/// 日志 sink：TailscaleKit 从 Go 内部线程回调，统一切主队列。产品侧不落文件，
-/// 转发给 os_log + 内存环形缓冲（recentLogs，设置页可看，真机无 Mac 也不盲飞）。
+/// 日志 sink：TailscaleKit 从 Go 内部线程回调，统一切主队列后交给构造时注入的
+/// onLog（生产即「创建本 backend 的那个节点实例」的实例日志入口）。不落文件。
 /// 同样需要 logFileHandle 见证（Xcode 26 工具链）。
 private struct TailnetLogSink: LogSink {
     let onLog: @Sendable (String) -> Void
@@ -50,6 +50,14 @@ private struct TailnetLogSink: LogSink {
 actor TailnetBackend: TailnetBackending {
     private var node: TailscaleKit.TailscaleNode?
 
+    /// Go 侧日志回灌：由创建 backend 的 TailnetNode 实例注入，绑到该实例的
+    /// 内存缓冲（不再写死单例，注入实例的测试/多实例也能收到自己的日志）。
+    private let onLog: @Sendable (String) -> Void
+
+    init(onLog: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.onLog = onLog
+    }
+
     func bringUp(stateDir: URL, hostName: String, controlURL: String,
                  authKey: String?) async throws -> (ip4: String?, ip6: String?) {
         try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
@@ -61,9 +69,8 @@ actor TailnetBackend: TailnetBackending {
             ephemeral: false
         )
         // 初始化本身不阻塞（spike 实证）；up/addrs 才是阻塞跨 actor 调用，丢 detached。
-        let sink = TailnetLogSink { line in
-            TailnetNode.logNode(line)
-        }
+        // sink 已 hop 到主队列，onLog 直连节点实例的 MainActor 日志入口。
+        let sink = TailnetLogSink { [onLog] line in onLog(line) }
         let node = try TailscaleKit.TailscaleNode(config: config, logger: sink)
         self.node = node
         try await Task.detached(priority: .userInitiated) {
@@ -145,11 +152,16 @@ final class TailnetNode: ObservableObject {
     init(authStore: AuthKeyStoring = TailnetAuthStore(),
          stateDirectory: URL = TailnetNode.stateDir,
          bringUpTimeout: TimeInterval = 45,
-         backendFactory: @escaping () -> TailnetBackending = { TailnetBackend() }) {
+         backendFactory: (() -> TailnetBackending)? = nil) {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
         self.bringUpTimeout = bringUpTimeout
-        self.makeBackend = backendFactory
+        // 默认工厂把 Go 日志回灌绑到本节点实例；注入工厂（测试）的 Fake 后端不产生 Go 日志。
+        self.makeBackend = backendFactory ?? { [weak self] in
+            TailnetBackend { line in
+                Task { @MainActor in self?.log(line) }
+            }
+        }
     }
 
     // MARK: - 冷启动自动恢复
@@ -196,7 +208,7 @@ final class TailnetNode: ObservableObject {
         backend = nil
         authStore.deleteAuthKey()
         state = .unauthenticated
-        TailnetNode.log("signOut：节点已下线，Keychain 凭据已删")
+        log("signOut：节点已下线，Keychain 凭据已删")
     }
 
     /// 3.3「彻底清除」：登出后连 Documents/tailscale 历史态一起删（删完回到未认证）。
@@ -205,7 +217,7 @@ final class TailnetNode: ObservableObject {
         if FileManager.default.fileExists(atPath: stateDirectory.path) {
             try? FileManager.default.removeItem(at: stateDirectory)
         }
-        TailnetNode.log("wipeState：已删除节点状态目录")
+        log("wipeState：已删除节点状态目录")
     }
 
     // MARK: - up 内核
@@ -215,9 +227,9 @@ final class TailnetNode: ObservableObject {
         let gen = generation
         timedOutGenerations.remove(gen)
         state = .starting
-        TailnetNode.log(authKey == nil
-                        ? "▶ 用已存登录态恢复节点…"
-                        : "▶ 用 auth key 入网（key 不记录）…")
+        log(authKey == nil
+            ? "▶ 用已存登录态恢复节点…"
+            : "▶ 用 auth key 入网（key 不记录）…")
 
         let backend = makeBackend()
         self.backend = backend
@@ -233,7 +245,7 @@ final class TailnetNode: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard gen == self.generation, case .starting = self.state else { return }
             self.timedOutGenerations.insert(gen)
-            TailnetNode.log("⏱ 入网 \(Int(timeout))s 未完成，判定超时，中断 up…")
+            self.log("⏱ 入网 \(Int(timeout))s 未完成，判定超时，中断 up…")
             await backend.shutdown()
         }
 
@@ -250,12 +262,12 @@ final class TailnetNode: ObservableObject {
                     // up 未抛但轮询窗口内地址没就绪：判失败、释放后端。
                     self.backend = nil
                     state = .failed("节点已启动但未取得 tailnet 地址（检查网络/DERP）")
-                    TailnetNode.log("❌ up 后无地址")
+                    self.log("❌ up 后无地址")
                     return
                 }
                 state = .online(ip4: ip4.isEmpty ? "—" : ip4,
                                 ip6: ip6.isEmpty ? "—" : ip6)
-                TailnetNode.log("✅ 节点在线：ip4=\(ip4.isEmpty ? "—" : ip4) ip6=\(ip6.isEmpty ? "—" : ip6)")
+                self.log("✅ 节点在线：ip4=\(ip4.isEmpty ? "—" : ip4) ip6=\(ip6.isEmpty ? "—" : ip6)")
             } catch {
                 guard gen == self.generation else { return }
                 let wasTimedOut = timedOutGenerations.contains(gen)
@@ -264,10 +276,10 @@ final class TailnetNode: ObservableObject {
                 // 坏 key/吊销/网络原因都在 error 文本里；error 由 TailscaleKit 产生，不含入参 key。
                 if wasTimedOut {
                     state = .failed("入网超时（\(Int(timeout))s）：国际网络/DERP 不可达，检查网络后重试")
-                    TailnetNode.log("❌ 入网超时（弱网/控制面不可达）")
+                    self.log("❌ 入网超时（弱网/控制面不可达）")
                 } else {
                     state = .failed("\(error)")
-                    TailnetNode.log("❌ 入网失败：\(error)")
+                    self.log("❌ 入网失败：\(error)")
                 }
             }
         }
@@ -282,7 +294,7 @@ final class TailnetNode: ObservableObject {
         await backend?.shutdown()
         backend = nil
         state = .unauthenticated
-        TailnetNode.log("已取消入网")
+        log("已取消入网")
     }
 
     /// 带关联值的 .online 不能直接用 `== .starting` 比较；统一走模式匹配。
@@ -307,31 +319,19 @@ final class TailnetNode: ObservableObject {
 
     // MARK: - 日志（os_log + 内存环形；节点 Go 日志与状态迁移，绝不含 key）
 
-    // nonisolated：LogSink 回调在 Go 线程经主队列异步调用这些静态入口，
-    // 不能要求 MainActor 隔离；Logger 自身 Sendable，日志内容也绝不含 key。
+    // nonisolated：Logger 是 Sendable 值类型、let 初始化无 MainActor 状态；
+    // 供实例 log(_:) 与默认 backend 工厂注入的 Go 日志回调共用。
     private nonisolated static let logger = Logger(subsystem: "dsh.tailnet", category: "node")
 
-    fileprivate nonisolated static func log(_ message: String) {
-        logger.log("\(message, privacy: .public)")
-        appendLog(message)
-    }
-
-    /// TailscaleKit Go 侧日志回灌：进 os_log + 内存缓冲。
-    fileprivate nonisolated static func logNode(_ line: String) {
-        logger.log("\(line, privacy: .public)")
-        appendLog(line)
-    }
-
-    /// 统一切主队列进 shared 的 @Published 环形缓冲（真机设置页可见，不落盘）。
-    private nonisolated static func appendLog(_ message: String) {
+    /// 唯一日志入口（MainActor）：状态迁移日志与 backend 回灌的 Go 日志都走这里，
+    /// 同进 os_log 与**本实例**的 @Published 环形缓冲（真机设置页可见，不落盘、绝不含 key）。
+    private func log(_ message: String) {
         let clipped = String(message.prefix(500))
-        DispatchQueue.main.async {
-            let stamp = Date.now.formatted(date: .omitted, time: .shortened)
-            TailnetNode.shared.recentLogs.append("[\(stamp)] \(clipped)")
-            if TailnetNode.shared.recentLogs.count > TailnetNode.shared.recentLogLimit {
-                TailnetNode.shared.recentLogs.removeFirst(
-                    TailnetNode.shared.recentLogs.count - TailnetNode.shared.recentLogLimit)
-            }
+        Self.logger.log("\(clipped, privacy: .public)")
+        let stamp = Date.now.formatted(date: .omitted, time: .shortened)
+        recentLogs.append("[\(stamp)] \(clipped)")
+        if recentLogs.count > recentLogLimit {
+            recentLogs.removeFirst(recentLogs.count - recentLogLimit)
         }
     }
 }
