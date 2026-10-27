@@ -156,8 +156,7 @@ final class TailnetNode: ObservableObject {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
         self.bringUpTimeout = bringUpTimeout
-        // 先占位满足两阶段初始化（默认工厂闭包要捕获 self，不能在 self 可用前赋值）。
-        self.makeBackend = { TailnetBackend() }
+        // 其余存储属性均有默认值，phase 1 至此完成；末尾才可把 self 捕获进逃逸工厂闭包。
         if let backendFactory {
             // 注入工厂（3.4 单测）：Fake 后端不产生 Go 日志，直接用。
             self.makeBackend = backendFactory
