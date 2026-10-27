@@ -156,10 +156,17 @@ final class TailnetNode: ObservableObject {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
         self.bringUpTimeout = bringUpTimeout
-        // 默认工厂把 Go 日志回灌绑到本节点实例；注入工厂（测试）的 Fake 后端不产生 Go 日志。
-        self.makeBackend = backendFactory ?? { [weak self] in
-            TailnetBackend { line in
-                Task { @MainActor in self?.log(line) }
+        // 先占位满足两阶段初始化（默认工厂闭包要捕获 self，不能在 self 可用前赋值）。
+        self.makeBackend = { TailnetBackend() }
+        if let backendFactory {
+            // 注入工厂（3.4 单测）：Fake 后端不产生 Go 日志，直接用。
+            self.makeBackend = backendFactory
+        } else {
+            // 默认工厂把 Go 日志回灌绑到本节点实例；[weak self] 避免 backend→闭包→node 环。
+            self.makeBackend = { [weak self] in
+                TailnetBackend { line in
+                    Task { @MainActor in self?.log(line) }
+                }
             }
         }
     }
