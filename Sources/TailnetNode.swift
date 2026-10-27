@@ -132,7 +132,10 @@ final class TailnetNode: ObservableObject {
     @Published private(set) var recentLogs: [String] = []
 
     private let authStore: AuthKeyStoring
-    private let makeBackend: () -> TailnetBackending
+    /// 3.4 单测注入的假后端工厂；nil 时运行期建生产 TailnetBackend（见 makeBackendInstance）。
+    /// 不直接在 init 里建默认工厂：逃逸闭包在 init 内捕获 self 会触发 DI「used before
+    /// being initialized」，故把「创建 backend 并绑实例日志」延迟到 self 完整后的实例方法。
+    private let injectedBackendFactory: (() -> TailnetBackending)?
     private var backend: TailnetBackending?
 
     /// 本实例使用的状态目录（生产固定 Documents/tailscale；3.4 注入临时目录保证测试隔离）。
@@ -156,17 +159,15 @@ final class TailnetNode: ObservableObject {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
         self.bringUpTimeout = bringUpTimeout
-        // 其余存储属性均有默认值，phase 1 至此完成；末尾才可把 self 捕获进逃逸工厂闭包。
-        if let backendFactory {
-            // 注入工厂（3.4 单测）：Fake 后端不产生 Go 日志，直接用。
-            self.makeBackend = backendFactory
-        } else {
-            // 默认工厂把 Go 日志回灌绑到本节点实例；[weak self] 避免 backend→闭包→node 环。
-            self.makeBackend = { [weak self] in
-                TailnetBackend { line in
-                    Task { @MainActor in self?.log(line) }
-                }
-            }
+        self.injectedBackendFactory = backendFactory
+    }
+
+    /// 运行期建本次入网的 backend：测试用注入工厂；生产建 TailnetBackend 并把 Go 日志
+    /// 回灌到本节点实例的日志入口（[weak self] 避免 backend→闭包→node 环）。
+    private func makeBackendInstance() -> TailnetBackending {
+        if let injectedBackendFactory { return injectedBackendFactory() }
+        return TailnetBackend { [weak self] line in
+            Task { @MainActor in self?.log(line) }
         }
     }
 
@@ -237,7 +238,7 @@ final class TailnetNode: ObservableObject {
             ? "▶ 用已存登录态恢复节点…"
             : "▶ 用 auth key 入网（key 不记录）…")
 
-        let backend = makeBackend()
+        let backend = makeBackendInstance()
         self.backend = backend
         let dir = stateDirectory
         let host = hostName
