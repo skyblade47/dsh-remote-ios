@@ -118,10 +118,15 @@ final class TailnetNode: ObservableObject {
     private let makeBackend: () -> TailnetBackending
     private var backend: TailnetBackending?
 
-    /// 3.4 测试入口：注入假 auth store / 假后端；生产用默认 init。
+    /// 本实例使用的状态目录（生产固定 Documents/tailscale；3.4 注入临时目录保证测试隔离）。
+    private let stateDirectory: URL
+
+    /// 3.4 测试入口：注入假 auth store / 临时状态目录 / 假后端；生产用默认 init。
     init(authStore: AuthKeyStoring = TailnetAuthStore(),
+         stateDirectory: URL = TailnetNode.stateDir,
          backendFactory: @escaping () -> TailnetBackending = { TailnetBackend() }) {
         self.authStore = authStore
+        self.stateDirectory = stateDirectory
         self.makeBackend = backendFactory
     }
 
@@ -130,10 +135,10 @@ final class TailnetNode: ObservableObject {
     /// App 启动时调用一次：有历史态（或 Keychain 有残留 key）就尝试 up，否则停在未认证。
     func autoStart() {
         guard state == .idle else { return }
-        if Self.hasPersistedState || authStore.hasAuthKey() {
+        if hasPersistedState || authStore.hasAuthKey() {
             // 有目录态：恢复优先（authKey 传 nil，凭据在状态目录里）。
             // 目录态缺失但 Keychain 有 key 的极端情况（目录被外部清过）：带 key 重入网。
-            bringUp(authKey: Self.hasPersistedState ? nil : authStore.loadAuthKey())
+            bringUp(authKey: hasPersistedState ? nil : authStore.loadAuthKey())
         } else {
             state = .unauthenticated
         }
@@ -157,7 +162,7 @@ final class TailnetNode: ObservableObject {
     /// failed 后重试：优先历史态恢复，否则用 Keychain 里的 key。
     func retry() async {
         guard !isStarting else { return }
-        bringUp(authKey: Self.hasPersistedState ? nil : authStore.loadAuthKey())
+        bringUp(authKey: hasPersistedState ? nil : authStore.loadAuthKey())
         await settle()
     }
 
@@ -173,8 +178,8 @@ final class TailnetNode: ObservableObject {
     /// 3.3「彻底清除」：登出后连 Documents/tailscale 历史态一起删（删完回到未认证）。
     func wipeState() async {
         await signOut()
-        if FileManager.default.fileExists(atPath: Self.stateDir.path) {
-            try? FileManager.default.removeItem(at: Self.stateDir)
+        if FileManager.default.fileExists(atPath: stateDirectory.path) {
+            try? FileManager.default.removeItem(at: stateDirectory)
         }
         TailnetNode.log("wipeState：已删除节点状态目录")
     }
@@ -189,7 +194,7 @@ final class TailnetNode: ObservableObject {
 
         let backend = makeBackend()
         self.backend = backend
-        let dir = Self.stateDir
+        let dir = stateDirectory
         let host = hostName
         let ctl = controlURL
 
@@ -232,9 +237,9 @@ final class TailnetNode: ObservableObject {
         }
     }
 
-    private static var hasPersistedState: Bool {
+    private var hasPersistedState: Bool {
         guard let entries = try? FileManager.default
-            .contentsOfDirectory(atPath: stateDir.path) else { return false }
+            .contentsOfDirectory(atPath: stateDirectory.path) else { return false }
         return !entries.isEmpty
     }
 
