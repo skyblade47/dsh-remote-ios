@@ -130,10 +130,10 @@ final class TailnetNode: ObservableObject {
     /// App 启动时调用一次：有历史态（或 Keychain 有残留 key）就尝试 up，否则停在未认证。
     func autoStart() {
         guard state == .idle else { return }
-        if hasPersistedState || authStore.hasAuthKey() {
+        if Self.hasPersistedState || authStore.hasAuthKey() {
             // 有目录态：恢复优先（authKey 传 nil，凭据在状态目录里）。
             // 目录态缺失但 Keychain 有 key 的极端情况（目录被外部清过）：带 key 重入网。
-            bringUp(authKey: hasPersistedState ? nil : authStore.loadAuthKey())
+            bringUp(authKey: Self.hasPersistedState ? nil : authStore.loadAuthKey())
         } else {
             state = .unauthenticated
         }
@@ -157,7 +157,7 @@ final class TailnetNode: ObservableObject {
     /// failed 后重试：优先历史态恢复，否则用 Keychain 里的 key。
     func retry() async {
         guard state != .starting else { return }
-        bringUp(authKey: hasPersistedState ? nil : authStore.loadAuthKey())
+        bringUp(authKey: Self.hasPersistedState ? nil : authStore.loadAuthKey())
         await settle()
     }
 
