@@ -148,7 +148,7 @@ final class TailnetNode: ObservableObject {
             state = .failed("auth key 为空")
             return
         }
-        guard state != .starting else { return }
+        guard !isStarting else { return }
         authStore.saveAuthKey(key)
         bringUp(authKey: key)
         await settle()
@@ -156,7 +156,7 @@ final class TailnetNode: ObservableObject {
 
     /// failed 后重试：优先历史态恢复，否则用 Keychain 里的 key。
     func retry() async {
-        guard state != .starting else { return }
+        guard !isStarting else { return }
         bringUp(authKey: Self.hasPersistedState ? nil : authStore.loadAuthKey())
         await settle()
     }
@@ -218,10 +218,16 @@ final class TailnetNode: ObservableObject {
         }
     }
 
+    /// 带关联值的 .online 不能直接用 `== .starting` 比较；统一走模式匹配。
+    private var isStarting: Bool {
+        if case .starting = state { return true }
+        return false
+    }
+
     /// 等到离开 starting（signIn/retry 的 UI 用）；最多 10s 避免死等。
     private func settle() async {
         for _ in 0..<200 {
-            if state != .starting { return }
+            if !isStarting { return }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }

@@ -66,7 +66,7 @@ struct TailnetSettingsView: View {
                     } label: {
                         Label("提交并入网", systemImage: "arrow.up.circle")
                     }
-                    .disabled(node.state == .starting || trimmedInput.isEmpty)
+                    .disabled(isStarting || trimmedInput.isEmpty)
                 } header: {
                     Text("Tailscale 认证")
                 }
@@ -77,21 +77,21 @@ struct TailnetSettingsView: View {
                     } label: {
                         Label("重试连接", systemImage: "arrow.clockwise")
                     }
-                    .disabled(node.state == .starting || node.state == .online)
+                    .disabled(isStarting || isOnline)
 
                     Button(role: .destructive) {
                         Task { await node.signOut() }
                     } label: {
                         Label("登出（下线并删除 Keychain 凭据）", systemImage: "arrow.down.circle")
                     }
-                    .disabled(node.state == .starting || node.state == .idle)
+                    .disabled(isStarting || node.state == .idle)
 
                     Button(role: .destructive) {
                         showWipeConfirm = true
                     } label: {
                         Label("彻底清除本机节点状态", systemImage: "trash")
                     }
-                    .disabled(node.state == .starting || node.state == .idle)
+                    .disabled(isStarting || node.state == .idle)
                 }
             }
             .navigationTitle("Tailscale 内网")
@@ -118,6 +118,17 @@ struct TailnetSettingsView: View {
 
     private var trimmedInput: String {
         authKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // State 带关联值（online/failed），与无关联值成员比较统一走模式匹配。
+    private var isStarting: Bool {
+        if case .starting = node.state { return true }
+        return false
+    }
+
+    private var isOnline: Bool {
+        if case .online = node.state { return true }
+        return false
     }
 
     private var stateText: String {
