@@ -50,6 +50,17 @@ struct TailnetSettingsView: View {
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
                     }
+                    if isStarting {
+                        // 弱网逃生口：starting 不再锁死，可随时取消（看门狗也会在约 45s 自动打断）。
+                        Button(role: .destructive) {
+                            Task { await node.cancelBringUp() }
+                        } label: {
+                            Label("取消入网", systemImage: "xmark.circle")
+                        }
+                        Text("弱网到控制面不通时最多等待约 45 秒，超时会自动中断并提示；也可随时取消后重试。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section {
@@ -92,6 +103,21 @@ struct TailnetSettingsView: View {
                         Label("彻底清除本机节点状态", systemImage: "trash")
                     }
                     .disabled(isStarting || node.state == .idle)
+                }
+
+                // 真机无 Mac 看不到 os_log：最近节点日志直接上屏，弱网卡死时可据此排查（可复制）。
+                Section("节点日志（最近 50 条）") {
+                    if node.recentLogs.isEmpty {
+                        Text("暂无日志")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(node.recentLogs.enumerated().reversed()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(.caption2, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
             }
             .navigationTitle("Tailscale 内网")

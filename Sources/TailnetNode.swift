@@ -14,9 +14,13 @@ import TailscaleKit
 //   - 冷启动：Documents/tailscale 有历史态 ⇒ 无 key 直接恢复 up（非 ephemeral 凭据在目录里）；
 //             无历史态 ⇒ 停在 unauthenticated，等 3.3 设置页喂 key。
 //   - online/failed 后可 signIn(新 key) 或 retry()；signOut 下节点并清凭据（3.3）。
+//   - starting 可被取消（cancelBringUp）或被弱网看门狗超时打断（3.5 真机：弱网到
+//     控制面不通时 up() 无限阻塞，曾导致 starting 锁死全部按钮）；每次入网带代际
+//     令牌 generation，被作废的旧回调一律丢弃，不得覆盖新状态。
 //
 // 阻塞纪律：TailscaleNode.up()/addrs() 是跨 actor 的 Go 阻塞调用，一律丢
-// Task.detached(userInitiated)，不阻塞主队列（与 spike 实证一致）。
+// Task.detached(userInitiated)，不阻塞主队列（与 spike 实证一致）。up() 本身无
+// 超时，由本类的看门狗在 bringUpTimeout 后 down() 打断，弱网不死等。
 //
 // 密钥纪律：authKey 仅作 bringUp 入参穿过，不写日志、不经 @Published 暴露。
 // ============================================================================
@@ -31,7 +35,8 @@ protocol TailnetBackending: AnyObject {
 }
 
 /// 日志 sink：TailscaleKit 从 Go 内部线程回调，统一切主队列。产品侧不落文件，
-/// 转发给 os_log（不进任何 UI 缓冲）。同样需要 logFileHandle 见证（Xcode 26 工具链）。
+/// 转发给 os_log + 内存环形缓冲（recentLogs，设置页可看，真机无 Mac 也不盲飞）。
+/// 同样需要 logFileHandle 见证（Xcode 26 工具链）。
 private struct TailnetLogSink: LogSink {
     let onLog: @Sendable (String) -> Void
     let logFileHandle: Int32? = nil
@@ -115,6 +120,10 @@ final class TailnetNode: ObservableObject {
 
     @Published private(set) var state: State = .idle
 
+    /// 最近节点日志（内存环形，最多 recentLogLimit 条；只含状态迁移/Go 日志，绝不含 key）。
+    /// 真机无 Mac 看不到 os_log，设置页靠它排查弱网卡死。
+    @Published private(set) var recentLogs: [String] = []
+
     private let authStore: AuthKeyStoring
     private let makeBackend: () -> TailnetBackending
     private var backend: TailnetBackending?
@@ -122,12 +131,24 @@ final class TailnetNode: ObservableObject {
     /// 本实例使用的状态目录（生产固定 Documents/tailscale；3.4 注入临时目录保证测试隔离）。
     private let stateDirectory: URL
 
-    /// 3.4 测试入口：注入假 auth store / 临时状态目录 / 假后端；生产用默认 init。
+    /// 入网看门狗超时：弱网到控制面不通时，up() 多久还没回来就 down() 打断并上屏失败。
+    private let bringUpTimeout: TimeInterval
+    private let recentLogLimit = 50
+
+    /// 代际令牌：每次 bringUp/cancel/signOut 自增；旧 bringUp Task 的迟到回调只认自己
+    /// 那一版，作废后不得写 state（取消后旧结果迟到覆盖新入网是典型竞态）。
+    private var generation = 0
+    /// 已被看门狗判定超时的代际：旧回调 catch 到时据此给「超时」而非泛化错误文案。
+    private var timedOutGenerations = Set<Int>()
+
+    /// 3.4 测试入口：注入假 auth store / 临时状态目录 / 假后端 / 短超时；生产用默认 init。
     init(authStore: AuthKeyStoring = TailnetAuthStore(),
          stateDirectory: URL = TailnetNode.stateDir,
+         bringUpTimeout: TimeInterval = 45,
          backendFactory: @escaping () -> TailnetBackending = { TailnetBackend() }) {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
+        self.bringUpTimeout = bringUpTimeout
         self.makeBackend = backendFactory
     }
 
@@ -169,6 +190,8 @@ final class TailnetNode: ObservableObject {
 
     /// 登出：下节点、删 Keychain item；状态目录默认保留（彻底清理由 wipeState 显式做）。
     func signOut() async {
+        generation &+= 1
+        timedOutGenerations.removeAll()
         await backend?.shutdown()
         backend = nil
         authStore.deleteAuthKey()
@@ -188,6 +211,9 @@ final class TailnetNode: ObservableObject {
     // MARK: - up 内核
 
     private func bringUp(authKey: String?) {
+        generation &+= 1
+        let gen = generation
+        timedOutGenerations.remove(gen)
         state = .starting
         TailnetNode.log(authKey == nil
                         ? "▶ 用已存登录态恢复节点…"
@@ -198,15 +224,30 @@ final class TailnetNode: ObservableObject {
         let dir = stateDirectory
         let host = hostName
         let ctl = controlURL
+        let timeout = bringUpTimeout
+
+        // 弱网看门狗（3.5 真机缺陷）：up() 无超时，控制面不通时会无限挂起。到点仍未
+        // 回来就 down() 打断（actor 可重入：up 跑在 detached 里，shutdown 能进去），
+        // 旧 bringUp 因此抛错，被下面 catch 按「超时」上屏。只认自己这一版 generation。
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard gen == self.generation, case .starting = self.state else { return }
+            self.timedOutGenerations.insert(gen)
+            TailnetNode.log("⏱ 入网 \(Int(timeout))s 未完成，判定超时，中断 up…")
+            await backend.shutdown()
+        }
 
         Task { @MainActor in
             do {
                 let addrs = try await backend.bringUp(
                     stateDir: dir, hostName: host, controlURL: ctl, authKey: authKey)
+                // 期间已被取消/登出/新一次入网取代：迟到结果一律丢弃。
+                guard gen == self.generation else { return }
+                timedOutGenerations.remove(gen)
                 let ip4 = addrs.ip4 ?? ""
                 let ip6 = addrs.ip6 ?? ""
                 if ip4.isEmpty && ip6.isEmpty {
-                    // up 未抛但 5s 内地址没就绪：判失败、释放后端。
+                    // up 未抛但轮询窗口内地址没就绪：判失败、释放后端。
                     self.backend = nil
                     state = .failed("节点已启动但未取得 tailnet 地址（检查网络/DERP）")
                     TailnetNode.log("❌ up 后无地址")
@@ -216,12 +257,32 @@ final class TailnetNode: ObservableObject {
                                 ip6: ip6.isEmpty ? "—" : ip6)
                 TailnetNode.log("✅ 节点在线：ip4=\(ip4.isEmpty ? "—" : ip4) ip6=\(ip6.isEmpty ? "—" : ip6)")
             } catch {
-                // 坏 key/吊销/网络原因都在 error 文本里；error 由 TailscaleKit 产生，不含入参 key。
+                guard gen == self.generation else { return }
+                let wasTimedOut = timedOutGenerations.contains(gen)
+                timedOutGenerations.remove(gen)
                 self.backend = nil
-                state = .failed("\(error)")
-                TailnetNode.log("❌ 入网失败：\(error)")
+                // 坏 key/吊销/网络原因都在 error 文本里；error 由 TailscaleKit 产生，不含入参 key。
+                if wasTimedOut {
+                    state = .failed("入网超时（\(Int(timeout))s）：国际网络/DERP 不可达，检查网络后重试")
+                    TailnetNode.log("❌ 入网超时（弱网/控制面不可达）")
+                } else {
+                    state = .failed("\(error)")
+                    TailnetNode.log("❌ 入网失败：\(error)")
+                }
             }
         }
+    }
+
+    /// starting 中用户主动取消：作废旧代际、down() 打断阻塞中的 up，回未认证态
+    /// （Keychain key 保留；覆盖安装残留的旧状态目录可用「彻底清除」删掉）。
+    func cancelBringUp() async {
+        guard isStarting else { return }
+        generation &+= 1
+        timedOutGenerations.removeAll()
+        await backend?.shutdown()
+        backend = nil
+        state = .unauthenticated
+        TailnetNode.log("已取消入网")
     }
 
     /// 带关联值的 .online 不能直接用 `== .starting` 比较；统一走模式匹配。
@@ -244,7 +305,7 @@ final class TailnetNode: ObservableObject {
         return !entries.isEmpty
     }
 
-    // MARK: - 日志（os_log；节点 Go 日志与状态迁移，绝不含 key）
+    // MARK: - 日志（os_log + 内存环形；节点 Go 日志与状态迁移，绝不含 key）
 
     // nonisolated：LogSink 回调在 Go 线程经主队列异步调用这些静态入口，
     // 不能要求 MainActor 隔离；Logger 自身 Sendable，日志内容也绝不含 key。
@@ -252,10 +313,25 @@ final class TailnetNode: ObservableObject {
 
     fileprivate nonisolated static func log(_ message: String) {
         logger.log("\(message, privacy: .public)")
+        appendLog(message)
     }
 
-    /// TailscaleKit Go 侧日志回灌；只进 os_log。
+    /// TailscaleKit Go 侧日志回灌：进 os_log + 内存缓冲。
     fileprivate nonisolated static func logNode(_ line: String) {
         logger.log("\(line, privacy: .public)")
+        appendLog(line)
+    }
+
+    /// 统一切主队列进 shared 的 @Published 环形缓冲（真机设置页可见，不落盘）。
+    private nonisolated static func appendLog(_ message: String) {
+        let clipped = String(message.prefix(500))
+        DispatchQueue.main.async {
+            let stamp = Date.now.formatted(date: .omitted, time: .medium)
+            TailnetNode.shared.recentLogs.append("[\(stamp)] \(clipped)")
+            if TailnetNode.shared.recentLogs.count > TailnetNode.shared.recentLogLimit {
+                TailnetNode.shared.recentLogs.removeFirst(
+                    TailnetNode.shared.recentLogs.count - TailnetNode.shared.recentLogLimit)
+            }
+        }
     }
 }

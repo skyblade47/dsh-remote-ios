@@ -168,6 +168,20 @@ final class TailnetNodeTests: XCTestCase {
         TailnetNode(authStore: auth, stateDirectory: tempDir) { queue.make() }
     }
 
+    /// 3.5：注入短看门狗超时（生产 45s，用例不能真等）。
+    private func makeNode(_ backend: TailnetBackending, bringUpTimeout: TimeInterval) -> TailnetNode {
+        TailnetNode(authStore: auth, stateDirectory: tempDir,
+                    bringUpTimeout: bringUpTimeout) { backend }
+    }
+
+    /// 等到状态进入 failed（fire-and-forget 超时回调有调度延迟）。
+    private func waitForFailed(_ node: TailnetNode) async {
+        for _ in 0..<300 {
+            if case .failed = node.state { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
     /// 等状态离开 starting；signIn/retry 内部 settle 已 await，这里只防调度抖动。
     private func waitForSettle(_ node: TailnetNode) async {
         for _ in 0..<200 {
@@ -432,6 +446,61 @@ final class TailnetNodeTests: XCTestCase {
 
         await backend.releaseHang(outcome: .online(ip4: "100.64.0.31", ip6: nil))
         await waitForSettle(node)
+        await node.signOut()
+    }
+
+    // MARK: 3.5 弱网看门狗 / 取消（真机 starting 锁死缺陷的回归测试）
+
+    func testWatchdogTimesOutHangAndShowsTimeoutFailure() async throws {
+        try seedState()
+        let backend = FakeTailnetBackend(outcome: .hang)
+        let node = makeNode(backend, bringUpTimeout: 0.3)
+
+        node.autoStart()
+        await waitForStarting(node)
+        await waitForFailed(node)
+
+        if case .failed(let reason) = node.state {
+            XCTAssertTrue(reason.contains("超时"), "弱网挂起必须上屏超时原因，实际：\(reason)")
+        } else {
+            return XCTFail("看门狗到期期望 failed，实际 \(node.state)")
+        }
+        let calls = await backend.callCount()
+        XCTAssertEqual(calls, 1, "超时不得重试点燃第二次 bringUp")
+        let shutdowns = await backend.shutdowns()
+        XCTAssertEqual(shutdowns, 1, "看门狗必须 down() 打断阻塞中的 up")
+        XCTAssertFalse(node.recentLogs.isEmpty, "超时过程应写入内存日志，供设置页排查")
+    }
+
+    func testCancelBringUpReturnsToUnauthenticatedAndAllowsResignIn() async throws {
+        let queue = BackendQueue()
+        queue.append(FakeTailnetBackend(outcome: .hang))
+        queue.append(FakeTailnetBackend(outcome: .online(ip4: "100.64.0.40", ip6: nil)))
+        let node = makeNodeQueue(queue)
+
+        Task { await node.signIn(authKey: "tskey-a") }
+        await waitForStarting(node)
+
+        await node.cancelBringUp()
+        XCTAssertEqual(node.state, .unauthenticated, "取消后应回未认证态，不再死锁在 starting")
+        let firstShutdowns = await queue.backend(at: 0).shutdowns()
+        XCTAssertEqual(firstShutdowns, 1, "取消必须 down() 打断第一次挂起的 up")
+
+        // 旧回调以 CancellationError 落地，但 generation 已作废：不得覆盖状态。
+        await waitForSettle(node)
+        XCTAssertEqual(node.state, .unauthenticated, "旧 bringUp 的迟到结果必须被丢弃")
+
+        // 取消后可立即用新 key 重入网，走第二个后端。
+        await node.signIn(authKey: "tskey-b")
+        await waitForSettle(node)
+        if case .online(let ip4, _) = node.state {
+            XCTAssertEqual(ip4, "100.64.0.40")
+        } else {
+            return XCTFail("取消后重入期望 online，实际 \(node.state)")
+        }
+        let secondCall = await queue.backend(at: 1).lastCall()
+        XCTAssertEqual(secondCall?.authKey, "tskey-b")
+
         await node.signOut()
     }
 }
