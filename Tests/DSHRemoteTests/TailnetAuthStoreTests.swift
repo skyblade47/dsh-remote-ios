@@ -15,11 +15,11 @@ final class TailnetAuthStoreTests: XCTestCase {
         try super.setUpWithError()
         service = "test.\(UUID().uuidString)"
         store = TailnetAuthStore(service: service, account: "tsnet-auth-key")
-        store.deleteAuthKey() // 兜底：同名残留（理论不会有）
+        _ = store.deleteAuthKey() // 兜底：同名残留（理论不会有）
     }
 
     override func tearDownWithError() throws {
-        store.deleteAuthKey()
+        _ = store.deleteAuthKey()
         store = nil
         service = nil
         try super.tearDownWithError()
@@ -54,7 +54,7 @@ final class TailnetAuthStoreTests: XCTestCase {
     }
 
     func testDeleteRemovesItemAndIsIdempotent() {
-        store.saveAuthKey("tskey-auth-del")
+        XCTAssertTrue(store.saveAuthKey("tskey-auth-del"))
         XCTAssertTrue(store.deleteAuthKey())
         XCTAssertFalse(store.hasAuthKey())
         XCTAssertNil(store.loadAuthKey())
@@ -64,8 +64,8 @@ final class TailnetAuthStoreTests: XCTestCase {
 
     func testIndependentServicesDoNotLeak() {
         let other = TailnetAuthStore(service: "test.\(UUID().uuidString)", account: "tsnet-auth-key")
-        defer { other.deleteAuthKey() }
-        other.saveAuthKey("tskey-auth-other")
+        defer { _ = other.deleteAuthKey() }
+        XCTAssertTrue(other.saveAuthKey("tskey-auth-other"))
         XCTAssertNil(store.loadAuthKey(), "不同 service 的 item 不得串读")
     }
 }

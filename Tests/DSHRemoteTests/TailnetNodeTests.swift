@@ -194,7 +194,8 @@ final class TailnetNodeTests: XCTestCase {
         let node = makeNode(backend)
         node.autoStart()
         XCTAssertEqual(node.state, .unauthenticated)
-        XCTAssertEqual(await backend.callCount(), 0)
+        let calls = await backend.callCount()
+        XCTAssertEqual(calls, 0)
     }
 
     func testAutoStartWithPersistedStateRecoversWithoutKey() async throws {
@@ -255,7 +256,8 @@ final class TailnetNodeTests: XCTestCase {
             return XCTFail("期望 failed，实际 \(node.state)")
         }
         XCTAssertNil(auth.key, "空 key 不得写入 Keychain")
-        XCTAssertEqual(await backend.callCount(), 0, "空 key 不得拉起后端")
+        let calls = await backend.callCount()
+        XCTAssertEqual(calls, 0, "空 key 不得拉起后端")
     }
 
     func testSignInTrimsSavesKeyAndGoesOnlineWithBothIPs() async {
@@ -375,7 +377,8 @@ final class TailnetNodeTests: XCTestCase {
         await node.signOut()
         XCTAssertEqual(node.state, .unauthenticated)
         XCTAssertNil(auth.key)
-        XCTAssertEqual(await backend.shutdowns(), 1)
+        let shutdowns = await backend.shutdowns()
+        XCTAssertEqual(shutdowns, 1)
     }
 
     func testWipeStateDeletesStateDirectory() async throws {
@@ -405,7 +408,8 @@ final class TailnetNodeTests: XCTestCase {
         // starting 中第二次提交：直接被守卫忽略，不新建后端、不替换凭据。
         await node.signIn(authKey: "tskey-b")
         XCTAssertEqual(auth.key, "tskey-a", "守卫命中时第二个 key 不得覆盖已存凭据")
-        XCTAssertEqual(await backend.callCount(), 1)
+        let calls = await backend.callCount()
+        XCTAssertEqual(calls, 1)
         if case .starting = node.state {} else {
             return XCTFail("期望仍在 starting，实际 \(node.state)")
         }
@@ -423,7 +427,8 @@ final class TailnetNodeTests: XCTestCase {
         Task { await node.signIn(authKey: "tskey-a") }
         await waitForStarting(node)
         await node.retry()
-        XCTAssertEqual(await backend.callCount(), 1)
+        let calls = await backend.callCount()
+        XCTAssertEqual(calls, 1)
 
         await backend.releaseHang(outcome: .online(ip4: "100.64.0.31", ip6: nil))
         await waitForSettle(node)

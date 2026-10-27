@@ -103,7 +103,8 @@ final class TailnetNode: ObservableObject {
     }
 
     /// 节点状态目录：App 沙盒 Documents/tailscale（Tailscale 在这持久化节点凭据）。
-    static let stateDir: URL = {
+    /// nonisolated：initializer 只碰 FileManager，且要能作 init 默认参数在 nonisolated 上下文求值。
+    nonisolated static let stateDir: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("tailscale", isDirectory: true)
     }()
