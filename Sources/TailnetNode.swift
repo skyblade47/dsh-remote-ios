@@ -326,7 +326,7 @@ final class TailnetNode: ObservableObject {
     private nonisolated static func appendLog(_ message: String) {
         let clipped = String(message.prefix(500))
         DispatchQueue.main.async {
-            let stamp = Date.now.formatted(date: .omitted, time: .medium)
+            let stamp = Date.now.formatted(date: .omitted, time: .shortened)
             TailnetNode.shared.recentLogs.append("[\(stamp)] \(clipped)")
             if TailnetNode.shared.recentLogs.count > TailnetNode.shared.recentLogLimit {
                 TailnetNode.shared.recentLogs.removeFirst(
