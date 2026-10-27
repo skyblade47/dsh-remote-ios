@@ -40,6 +40,11 @@ struct DSHRemoteApp: App {
                 NotificationCenter.default.post(name: .dshGatewayChanged, object: nil)
             }
         }
+
+        // Phase 3.2：App 级触碰 tsnet 单例保活（节点生命周期独立于任何页面），
+        // 有历史态/Keychain 凭据则冷启动自动恢复，否则停在未认证等 3.3 设置页喂 key。
+        // autoStart 本身只做本地探测并 fire-and-forget，up 阻塞全在后端 detached 任务里。
+        TailnetNode.shared.autoStart()
     }
 
     var body: some Scene {
