@@ -22,7 +22,7 @@ enum S1ProbePage {
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
         <h2>S1 五探针报告（localhost 主线）</h2>
-        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-B ／ 探针④=异步/同步 × diag/ipad.js 矩阵</div>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-C ／ baseURL 改 origin 根，探针④仍跑 A/B/C/D 矩阵</div>
         <div id="out"></div>
         <script>
         const EXPECT = \(expect);

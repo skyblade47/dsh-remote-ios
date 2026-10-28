@@ -81,10 +81,12 @@ final class S1ViewController: UIViewController {
     }
 
     @objc private func runProbes() {
-        guard let baseURL = URL(string: loopbackBase),
-              let shellURL = URL(string: "__shell__/shell.html", relativeTo: baseURL) else { return }
-        // 探针页以反代 shell URL 为 base ⇒ origin = http://127.0.0.1:<port>（与产品壳一致）。
-        web.loadHTMLString(S1ProbePage.html(loopbackOrigin: loopbackBase), baseURL: shellURL)
+        guard let baseURL = URL(string: loopbackBase) else { return }
+        // DIAG-C：baseURL 直接用 origin 根（不拼 /__shell__/shell.html）。
+        // loadHTMLString 文档内，与 baseURL 同路径前缀（/__shell__/*）的子资源会被 WebKit
+        // 当本地资源拦截、合成空 404（不进网络进程）；改用根 base 后所有同源绝对路径均走网络。
+        // origin 仍是 http://127.0.0.1:<port>（探针①②③⑤不依赖 baseURL 路径）。
+        web.loadHTMLString(S1ProbePage.html(loopbackOrigin: loopbackBase), baseURL: baseURL)
     }
 }
 
