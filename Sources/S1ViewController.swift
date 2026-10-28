@@ -1,10 +1,16 @@
 import UIKit
 import WebKit
 
+/// S1 自检页（标题连点 5 次进入；仅调试/验收用）。
+///
+/// Phase 5 起全程走 localhost 反代（`loopbackBase` = http://127.0.0.1:<port>）：
+///   1) 先加载反代的 /auth/login 真实登录种 dsh_session cookie（与产品壳同一数据存储）；
+///   2) 点按钮后以反代 shell URL 为 base 装载五探针页（http loopback origin）。
+/// 探针⑤注册**真实的** BridgeSyncSchemeHandler（共用 BridgeDispatcher 内核），
+/// 用于 Task 5.6 在 http loopback origin 下实测自定义 scheme 同步 XHR 是否仍可用。
 final class S1ViewController: UIViewController {
-    private let gatewayOrigin: String
+    private let loopbackBase: String
     private var web: WKWebView!
-    private var loggedIn = false
 
     private let startButton: UIButton = {
         let b = UIButton(type: .system)
@@ -16,8 +22,8 @@ final class S1ViewController: UIViewController {
         return b
     }()
 
-    init(gatewayOrigin: String) {
-        self.gatewayOrigin = gatewayOrigin
+    init(loopbackBase: String?) {
+        self.loopbackBase = loopbackBase ?? ""
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -28,12 +34,19 @@ final class S1ViewController: UIViewController {
         title = "S1 验证"
 
         let cfg = WKWebViewConfiguration()
-        cfg.setURLSchemeHandler(ShellSchemeHandler(loadData: { name in
-            guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
-            return try? Data(contentsOf: url)
-        }), forURLScheme: "dsh-asset")
-        cfg.setURLSchemeHandler(S1BridgePingHandler(), forURLScheme: "dsh-bridge")
         cfg.websiteDataStore = .default()
+
+        // 探针⑤：http loopback origin 下的 dsh-bridge:// 同步 XHR（5.6 真机实测对象）。
+        // 用真实 dispatcher，与产品壳同一同步写盘内核（非假应答）。
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let container = docs.appendingPathComponent("workspace", isDirectory: true)
+        if let dispatcher = try? BridgeDispatcher(
+            dataDir: docs, workspaceRoot: container,
+            multiWorkspace: true, appVersion: "0.1.0") {
+            cfg.setURLSchemeHandler(BridgeSyncSchemeHandler(dispatcher: dispatcher),
+                                    forURLScheme: "dsh-bridge")
+        }
+
         web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = self
         cfg.userContentController.add(LeaklessProxy(self), name: "s1Report")
@@ -55,12 +68,23 @@ final class S1ViewController: UIViewController {
         ])
         startButton.addTarget(self, action: #selector(runProbes), for: .touchUpInside)
 
-        web.load(URLRequest(url: URL(string: gatewayOrigin + "/auth/login")!))
+        // ① 经反代真实登录种 cookie（base 无尾斜杠，URL(relativeTo:) 防重定向）
+        if let baseURL = URL(string: loopbackBase),
+           let login = URL(string: "auth/login", relativeTo: baseURL) {
+            var request = URLRequest(url: login)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            web.load(request)
+        } else {
+            web.loadHTMLString("<meta charset=utf-8><body style='padding:24px'>反代未就绪，无法自检。</body>",
+                               baseURL: URL(string: "about:blank")!)
+        }
     }
 
     @objc private func runProbes() {
-        web.loadHTMLString(S1ProbePage.html(gatewayOrigin: gatewayOrigin),
-                           baseURL: URL(string: gatewayOrigin + "/__shell__/shell.html")!)
+        guard let baseURL = URL(string: loopbackBase),
+              let shellURL = URL(string: "__shell__/shell.html", relativeTo: baseURL) else { return }
+        // 探针页以反代 shell URL 为 base ⇒ origin = http://127.0.0.1:<port>（与产品壳一致）。
+        web.loadHTMLString(S1ProbePage.html(loopbackOrigin: loopbackBase), baseURL: shellURL)
     }
 }
 
@@ -86,32 +110,4 @@ private final class LeaklessProxy: NSObject, WKScriptMessageHandler {
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         target?.userContentController(c, didReceive: m)
     }
-}
-
-final class S1BridgePingHandler: NSObject, WKURLSchemeHandler {
-    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        let req = urlSchemeTask.request
-        let fallback = URL(string: "dsh-bridge://sync")!
-        let m = URLComponents(url: req.url ?? fallback, resolvingAgainstBaseURL: false)?
-            .queryItems?.first(where: { $0.name == "m" })?.value ?? ""
-        let payload: [String: Any] = m == "__ping__"
-            ? ["ok": true, "echo": "bridge-pong"]
-            : ["ok": false, "error": "s1-only-ping"]
-        let out = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
-        let headers: [String: String] = [
-            "Content-Type": "application/json; charset=utf-8",
-            "Content-Length": String(out.count),
-            "Access-Control-Allow-Origin": "*"
-        ]
-        guard let resp = HTTPURLResponse(url: req.url ?? fallback,
-                                        statusCode: 200, httpVersion: "HTTP/1.1",
-                                        headerFields: headers) else {
-            urlSchemeTask.didFailWithError(NSError(domain: "dsh-bridge", code: -1))
-            return
-        }
-        urlSchemeTask.didReceive(resp)
-        urlSchemeTask.didReceive(out)
-        urlSchemeTask.didFinish()
-    }
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }

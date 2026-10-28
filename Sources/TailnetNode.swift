@@ -132,6 +132,12 @@ final class TailnetNode: ObservableObject {
         case starting
         case running(String) // http://127.0.0.1:<port>
         case failed(String)
+
+        /// running 时取出反代 base（无尾斜杠），其余状态为 nil。
+        var runningBase: String? {
+            if case .running(let base) = self { return base }
+            return nil
+        }
     }
 
     /// 节点状态目录：App 沙盒 Documents/tailscale（Tailscale 在这持久化节点凭据）。

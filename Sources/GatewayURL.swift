@@ -13,9 +13,12 @@ enum GatewayURLError: LocalizedError {
 }
 
 enum GatewayURL {
-    /// 校验并归一化网关地址，返回其 origin（无尾斜杠；保留可能的子路径前缀与端口）。
-    /// 本地优先架构下壳不再做网络首发，故只产出 origin —— 它作为壳文档 baseURL 使用
-    /// （见 ShellOrigin）。
+    /// 校验并归一化**用户手输的应急 Funnel 网关**（三档通道的线路③），返回其 origin
+    /// （无尾斜杠；保留可能的子路径前缀与端口）。
+    ///
+    /// Phase 5 契约：壳的主线 base 固定为内嵌节点的 localhost 反代
+    /// `http://127.0.0.1:<动态端口>`，由 TailnetNode/LoopbackProxy 程序生成，
+    /// **不是用户输入、不经本函数**。本函数只校验 Funnel 应急地址，故仍强制 https。
     static func normalize(_ raw: String) throws -> String {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw GatewayURLError.empty }

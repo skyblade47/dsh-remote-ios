@@ -5,7 +5,8 @@ import Foundation
 /// 只做两处外链注入：
 /// - ipad.css 插到 writing.css 锚点之后；
 /// - ipad.js 插到 sync-net.js 锚点之后。
-/// 不做 viewport 改写、dsh-asset 改写与全量内联——那些属于 Phase 5 将删除的 ShellHTMLRewriter。
+/// 不做 viewport 改写、自定义 scheme 改写与全量内联——Phase 5 起壳固定走
+/// http://127.0.0.1:<port>/__shell__/shell.html，资产本就是普通 http 同源相对路径，无需改写。
 enum ShellHTMLInjector {
     static let cssAnchor = #"<link rel="stylesheet" href="/__shell__/writing.css" />"#
     static let cssInsertion = #"<link rel="stylesheet" href="/__shell__/ipad.css" />"#

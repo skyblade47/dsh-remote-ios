@@ -192,6 +192,19 @@ final class AppDataStoreTests: XCTestCase {
         XCTAssertEqual(dict(dict(data.getState(), "settings"), "remote")["gateway"] as? String, "")
     }
 
+    func testSaveGatewayHttpRejectedAndNotPersisted() {
+        // Phase 5：应急 Funnel 地址只收 https（主线 localhost 反代不经此配置）
+        let before = (try? String(contentsOf: dir.appendingPathComponent("config.json"),
+                                  encoding: .utf8)) ?? ""
+        let r = data.saveConfig(["remote": ["gateway": "http://plain.example"]])
+        XCTAssertFalse((r["ok"] as? Bool) == true)
+        XCTAssertTrue((r["error"] as? String ?? "").contains("gateway"))
+        let after = (try? String(contentsOf: dir.appendingPathComponent("config.json"),
+                                 encoding: .utf8)) ?? ""
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(dict(dict(data.getState(), "settings"), "remote")["gateway"] as? String, "")
+    }
+
     // MARK: - saveConfig：网关保存钩子（壳以新 origin 重建的触发点）
 
     func testSaveGatewayFiresHookWithTrimmedValue() {

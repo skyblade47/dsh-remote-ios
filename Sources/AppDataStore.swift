@@ -13,8 +13,10 @@ final class AppDataStore {
         try! NSRegularExpression(pattern: "^([01]\\d|2[0-3]):[0-5]\\d$")
     private static let sessionPattern =
         try! NSRegularExpression(pattern: "^session-[A-Za-z0-9._-]{6,}$")
+    // Phase 5：用户手输的是应急 Funnel https 网关（主线走 localhost 反代，不经此配置）；
+    // 正则与 GatewayURL.normalize 同口径，只收 https，消除「正则放行 http / 归一化拒绝 http」的不一致。
     private static let gatewayPattern =
-        try! NSRegularExpression(pattern: "^https?://[^\\s/]+.*")
+        try! NSRegularExpression(pattern: "^https://[^\\s/]+.*")
 
     private let dataDir: URL
     private let lock = NSLock()
@@ -153,7 +155,7 @@ final class AppDataStore {
             if pr["gateway"] != nil {
                 let gw = Self.stringOf(pr["gateway"]).trimmingJava()
                 if !Self.gatewayPattern.hasMatch(gw) {
-                    return fail("BadRequest: gateway 必须是 http(s):// 地址")
+                    return fail("BadRequest: gateway 必须是 https:// 地址（主线走内网节点，无需手输）")
                 }
                 remote["gateway"] = gw
                 savedGateway = gw
@@ -194,7 +196,7 @@ final class AppDataStore {
 
     /// 老版本经顶部原生条配置的网关只在 UserDefaults，config.json 里没有 ⇒ 回填一次，
     /// 让设置弹层的「网关地址」显示当前生效值。config 已有值时不动（以 config 为准）。
-    /// 与壳 origin 同一口径归一化（GatewayURL）；归一化失败（如 http）不回填。
+    /// 回填的是用户手输 Funnel 应急地址：按 GatewayURL 归一化（仅 https），失败不回填。
     func seedGatewayIfEmpty(_ gatewayRaw: String) {
         let gw = gatewayRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !gw.isEmpty, let origin = try? GatewayURL.normalize(gw) else { return }

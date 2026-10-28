@@ -18,7 +18,8 @@ enum Cfg {
 }
 
 extension Notification.Name {
-    /// 设置弹层保存了新网关 ⇒ 壳需以新 origin 重建（baseURL 只能在 loadHTMLString 时定下）。
+    /// 设置弹层保存了新网关（Funnel 应急地址）。Phase 5 起 localhost 壳 origin 恒定，
+    /// 不再据此重建 WebView；通知保留给三档通道（Task 6.2）应急切换使用。
     static let dshGatewayChanged = Notification.Name("dsh.gatewayChanged")
 }
 
@@ -56,9 +57,10 @@ struct DSHRemoteApp: App {
 
 struct RootView: View {
     @StateObject private var session = ShellSession()
+    // Phase 5：壳固定走 localhost 反代，观察节点桥状态驱动装载（只观察、不持有节点）。
+    @ObservedObject private var node = TailnetNode.shared
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var shellToken = 0
     @State private var titleTaps = 0
     @State private var showS1 = false
     @State private var showS1Alert = false
@@ -75,7 +77,7 @@ struct RootView: View {
                     .onTapGesture {
                         titleTaps += 1
                         if titleTaps >= 5 {
-                            if (try? GatewayURL.normalize(Cfg.gateway)) != nil {
+                            if case .running = node.bridge {
                                 showS1 = true
                                 titleTaps = 0
                             } else {
@@ -96,28 +98,23 @@ struct RootView: View {
 
             Divider()
 
-            // 本地壳永远创建：未配网关走占位 origin，本地写作页离线可用；
-            // .id 随 shellToken 变化，使网关变更后以新 origin 重建（换 baseURL/Cookie 同源）。
-            // 网关配置入口在壳内「⚙ 设置 → 远程 → 网关地址」（saveConfig 钩子见 App init）。
-            ShellWebView(session: session, gatewayRaw: Cfg.gateway)
-                .id(shellToken)
+            // Phase 5：localhost origin 恒定，壳不再因网关配置变化重建；
+            // 桥状态（starting/running/failed）由 ShellWebView 内部驱动装载与状态页。
+            ShellWebView(session: session, bridge: node.bridge)
                 .ignoresSafeArea(edges: .bottom)
         }
         .onChange(of: scenePhase) { _, phase in
             // iOS 切后台不触发 pagehide；主动驱动 writing.js 的 session-end 同步落盘
             if phase == .background { session.flusher.flush() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .dshGatewayChanged)) { _ in
-            shellToken += 1
-        }
-        .alert("请先填写 https 网关", isPresented: $showS1Alert) {
+        .alert("内网通道未就绪", isPresented: $showS1Alert) {
             Button("好", role: .cancel) {}
         } message: {
-            Text("请先在「⚙ 设置 → 远程 → 网关地址」填写已开启 HTTPS 的网关地址。")
+            Text("请先点右上角「TS」完成入网，本地通道就绪后再打开自检。")
         }
         .sheet(isPresented: $showS1) {
             UIViewControllerBridge {
-                S1ViewController(gatewayOrigin: (try? GatewayURL.normalize(Cfg.gateway)) ?? "")
+                S1ViewController(loopbackBase: node.bridge.runningBase)
             }
         }
         // Phase 3.3：Tailscale 认证产品设置页（观察 App 级单例，不持有节点）

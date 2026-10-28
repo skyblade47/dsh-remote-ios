@@ -1,9 +1,10 @@
-/* ipad.js —— iOS 壳侧附加脚本（rewriter 在 sync-net.js 之后、内联 tab 脚本之前注入）
+/* ipad.js —— iOS 壳侧附加脚本（ShellHTMLInjector 在服务 shell.html 时把它插在
+ * sync-net.js 之后、内联 tab 脚本之前）
  * 本地优先壳的 iPad 适配，做五件事：
- *   0. 默认落在[写作]页（本地程序与工作区）；未配网关时让 [DSH] iframe 不发无效请求，
- *      配了网关则恢复同源 /app#/（对话=网关虚拟同源）；
- *   1. visualViewport resize 时让光标行保持可见（interactive-widget=resizes-content
- *      已由 rewriter 写进 viewport meta，此为 WebKit 支持不全时的兜底）；
+ *   0. 默认落在[写作]页（本地程序与工作区）；内网不可用时让 [DSH] iframe 不发无效请求，
+ *      信号恢复后恢复同源 /app#/（对话=localhost 反代同源）；
+ *   1. visualViewport resize 时让光标行保持可见（shell.html 的 viewport meta 不含
+ *      interactive-widget，此为软键盘顶起视口时的兜底）；
  *   2. 点编辑区/输入框之外的空白主动 blur 收键盘，并暴露 window.__wciPadDismissKeyboard；
  *   3. 沙盒多工作区：覆盖 pickRoot/pickDir —— iOS 无系统选目录能力，改为枚举
  *      Documents/workspace 容器内的子工作区（listRoots/switchRoot/createRoot），
@@ -25,16 +26,18 @@
   if (window.__wciPadShell) return
   window.__wciPadShell = true
 
-  // 未配网关时，壳文档 baseURL 是原生侧固定占位 origin（主机名 local.dsh-remote.invalid）。
-  // 据此区分「离线/未配置」与「已配网关」，不必再让原生注入配置。
-  var PLACEHOLDER_HOST = 'local.dsh-remote.invalid'
+  // Phase 5 起壳 origin 恒为 http://127.0.0.1:<动态端口>，hostname 已不能区分内网
+  // 可用与否。改读原生 document-start 注入的 __DSH_TAILNET__ 信号（BridgeJS，每次
+  // 装壳按当前反代 base 重新注入）：state==='running' 且 reachable===true 才算可用。
+  // 信号缺失（S1 探针页/异常宿主/脚本未注入）一律按不可用处理。
   function gatewayConfigured() {
-    return location.hostname !== PLACEHOLDER_HOST && location.hostname !== ''
+    var sig = globalThis.__DSH_TAILNET__
+    return !!sig && sig.state === 'running' && sig.reachable === true
   }
 
-  // shell.html 的 [DSH] iframe 默认写死 src="/app#/"。占位 origin 下它会解析成
-  // 一个永不连通的 https://local.dsh-remote.invalid/app 请求；默认又停在[写作]页，
-  // 故未配网关时把 src 撤成 about:blank（等设置页/网关就绪后再恢复）。
+  // shell.html 的 [DSH] iframe 默认写死 src="/app#/"。信号缺失/不可达（异常宿主，
+  // 或桥已断但旧壳尚未被状态机重载）时把 src 撤成 about:blank，避免对失效反代发请求；
+  // 正常装壳流程下恒为 running，src 保持 /app#/ 不动。
   function neutralizeDshFrameWhenOffline() {
     var frame = document.getElementById('dsh-frame')
     if (!frame) return
@@ -45,7 +48,7 @@
     }
   }
 
-  // 默认进[写作]页。rewriter 把本脚本插在内联 tab 脚本**之前**，此时 __wcTabs 尚未定义；
+  // 默认进[写作]页。ShellHTMLInjector 把本脚本插在内联 tab 脚本**之前**，此时 __wcTabs 尚未定义；
   // 轮询到它出现即切（只切一次，之后显隐交还给 shell.html / writing.js 的既有逻辑）。
   function showWritingByDefault() {
     var tries = 0
@@ -537,7 +540,7 @@
   var cloudSessionInstalled = false
   function installCloudSession() {
     if (cloudSessionInstalled) return true
-    if (!gatewayConfigured()) { cloudSessionInstalled = true; return true } // 未配网关：不做云端会话逻辑
+    if (!gatewayConfigured()) { cloudSessionInstalled = true; return true } // 内网不可用/信号缺失：不做云端会话逻辑
     if (!installListDraftsGate()) return false // WCSyncNet 尚未就绪，调用方轮询
     cloudSessionInstalled = true
     // 闸门必须在 writing.js init 的 getState 回调调 listDrafts 之前装好（脚本按序同步执行，
@@ -806,7 +809,7 @@
   }
 
   // 与 installCloudSession 同机安装（同一就绪轮询、listDrafts 闸门装好之后）。
-  // 未配网关 = 纯本地，无云端可推，直接幂等返回，不安装、不发任何云端请求。
+  // 内网不可用/信号缺失 = 纯本地，无云端可推，直接幂等返回，不安装、不发任何云端请求。
   function installOutboxDrain() {
     var net = window.WCSyncNet
     if (net && net.__wciOutboxDrain) return true
@@ -859,7 +862,7 @@
     }, 100)
   }
 
-  // 云端会话闸门 + 发件箱补推：rewriter 把本脚本紧跟 sync-net.js 注入，WCSyncNet 应已存在；
+  // 云端会话闸门 + 发件箱补推：ShellHTMLInjector 把本脚本紧跟 sync-net.js 注入，WCSyncNet 应已存在；
   // 轮询仅为防御注入顺序变化（必须赶在 writing.js init 异步拉清单之前装好）。同一个轮询里
   // 先装云端会话（listDrafts 闸门）、成功后再装发件箱补推（saveDraft 钩子），不新增第二个定时器。
   function bootstrapCloud() {
@@ -874,8 +877,8 @@
     }, 100)
   }
 
-  // 未配网关：尽早撤掉 [DSH] iframe 的 /app#/ 请求（本脚本在解析到尾部外链时同步执行，
-  // 即便 iframe 已发起一次占位请求，改成 about:blank 也会立即中止它）。
+  // 内网不可用/信号缺失：尽早撤掉 [DSH] iframe 的 /app#/ 请求（本脚本在解析到尾部
+  // 外链时同步执行，即便 iframe 已发起一次请求，改成 about:blank 也会立即中止它）。
   neutralizeDshFrameWhenOffline()
   // 默认进[写作]页（__wcTabs 由其后的内联脚本定义，故内部轮询）。
   showWritingByDefault()

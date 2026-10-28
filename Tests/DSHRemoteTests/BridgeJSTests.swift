@@ -57,26 +57,26 @@ final class BridgeJSTests: XCTestCase {
         ctx.setObject(JSValue(object: xhrCtor, in: ctx), forKeyedSubscript: "XMLHttpRequest" as NSString)
         // JSC 不自带 window 自引用（WKWebView 里有）；注入脚本以 window/globalThis 并用
         ctx.evaluateScript("if (!globalThis.window) { globalThis.window = globalThis; }")
-        ctx.evaluateScript(BridgeJS.source)
+        ctx.evaluateScript(BridgeJS.source())
     }
 
     // MARK: - 结构断言（字符串契约）
 
     func testOwnsHostDeclared() {
-        XCTAssertTrue(BridgeJS.source.contains("globalThis.__DSH_TRANSPORT__ = { ownsHost: true }"))
+        XCTAssertTrue(BridgeJS.source().contains("globalThis.__DSH_TRANSPORT__ = { ownsHost: true }"))
     }
 
     func testResolverAndPostMessageContract() {
-        XCTAssertTrue(BridgeJS.source.contains("globalThis.__dshBridgeResolve ="))
-        XCTAssertTrue(BridgeJS.source.contains("window.webkit.messageHandlers.dshBridge.postMessage"))
+        XCTAssertTrue(BridgeJS.source().contains("globalThis.__dshBridgeResolve ="))
+        XCTAssertTrue(BridgeJS.source().contains("window.webkit.messageHandlers.dshBridge.postMessage"))
     }
 
     func testTenSecondTimeout() {
-        XCTAssertTrue(BridgeJS.source.contains("10000"))
+        XCTAssertTrue(BridgeJS.source().contains("10000"))
     }
 
     func testSyncChannelPostsToBridgeScheme() {
-        XCTAssertTrue(BridgeJS.source.contains("dsh-bridge://sync"))
+        XCTAssertTrue(BridgeJS.source().contains("dsh-bridge://sync"))
     }
 
     func testAllAndroidApiMethodsPresent() {
@@ -95,14 +95,48 @@ final class BridgeJSTests: XCTestCase {
         ]
         XCTAssertEqual(expected.count, 49)
         for m in expected {
-            XCTAssertTrue(BridgeJS.source.contains(m), "白名单缺少 \(m)")
+            XCTAssertTrue(BridgeJS.source().contains(m), "白名单缺少 \(m)")
         }
     }
 
     func testWcWritingShimExposesHash12() {
-        XCTAssertTrue(BridgeJS.source.contains("window.wcWriting"))
-        XCTAssertTrue(BridgeJS.source.contains("kind: 'ipad'"))
-        XCTAssertTrue(BridgeJS.source.contains("hash12"))
+        XCTAssertTrue(BridgeJS.source().contains("window.wcWriting"))
+        XCTAssertTrue(BridgeJS.source().contains("kind: 'ipad'"))
+        XCTAssertTrue(BridgeJS.source().contains("hash12"))
+    }
+
+    // MARK: - __DSH_TAILNET__ 信号（Phase 5.8：ipad.js 各云端闸门的唯一信号源）
+
+    /// 默认脚本（等待/失败状态页不会注入，但工厂默认值本身必须是"内网不可用"安全态）。
+    /// 按字段断言，不依赖 Swift JSONSerialization 的键序。
+    func testTailnetSignalDefaultStopped() {
+        let src = BridgeJS.source()
+        XCTAssertTrue(src.contains("globalThis.__DSH_TAILNET__ ="))
+        let sig = ctx.objectForKeyedSubscript("__DSH_TAILNET__" as NSString)
+        XCTAssertEqual(sig?.objectForKeyedSubscript("state" as NSString).toString(), "stopped")
+        XCTAssertEqual(sig?.objectForKeyedSubscript("base" as NSString).toString(), "")
+        XCTAssertEqual(sig?.objectForKeyedSubscript("reachable" as NSString).toBool(), false)
+    }
+
+    /// 参数化往返：running + 动态端口 base + reachable，且注入脚本必须是合法 JS
+    /// （模板替换若残留双对象字面量，JSC exceptionHandler 会在此立刻失败）。
+    /// 按字段断言，不依赖 Swift JSONSerialization 的键序。
+    func testTailnetSignalRunningRoundTrip() {
+        let c = JSContext()!
+        var failed: String?
+        c.exceptionHandler = { _, ex in failed = ex?.toString() }
+        c.evaluateScript("if (!globalThis.window) { globalThis.window = globalThis; }")
+        c.evaluateScript(BridgeJS.source(
+            state: "running",
+            base: "http://127.0.0.1:8080",
+            reachable: true))
+        XCTAssertNil(failed, "注入脚本语法异常：\(failed ?? "-")")
+        let sig = c.objectForKeyedSubscript("__DSH_TAILNET__" as NSString)
+        XCTAssertEqual(sig?.objectForKeyedSubscript("state" as NSString).toString(), "running")
+        XCTAssertEqual(
+            sig?.objectForKeyedSubscript("base" as NSString).toString(),
+            "http://127.0.0.1:8080")
+        XCTAssertEqual(sig?.objectForKeyedSubscript("reachable" as NSString).toBool(), true)
     }
 
     // MARK: - 行为断言（JavaScriptCore）

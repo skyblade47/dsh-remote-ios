@@ -1,5 +1,5 @@
 /* ============================================================================
-   ipad.css —— iOS 壳侧附加样式（只在 iPad 壳经 rewriter 注入加载）
+   ipad.css —— iOS 壳侧附加样式（ShellHTMLInjector 服务 shell.html 时注入加载）
    铁律：不改 shell.html / writing.css / writing.js 等任何共享核心；
          本文件只做能力裁剪（按 id 隐藏）与触控可用性补偿，不新增产品语义。
    依据：spec §7.3（≥44pt 热区 / touch-action / 惯性滚动 / 不依赖 hover）、

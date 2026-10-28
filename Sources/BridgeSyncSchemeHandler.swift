@@ -86,7 +86,7 @@ final class BridgeSyncBridge {
     }
 }
 
-// WKWebView 适配：读请求 → 内核 → didReceive/didFinish（响应头与 ShellSchemeHandler 同构）
+// WKWebView 适配：读请求 → 内核 → didReceive/didFinish
 final class BridgeSyncSchemeHandler: NSObject, WKURLSchemeHandler {
     private let bridge: BridgeSyncBridge
 

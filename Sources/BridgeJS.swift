@@ -4,8 +4,30 @@ import Foundation
 // 蓝本：安卓 MainActivity.INJECT_DOC_START；契约由 BridgeJSTests 钉死。
 enum BridgeJS {
 
-    static let source = #"""
+    /// 生成 document-start 注入脚本。
+    /// - Parameters:
+    ///   - state: 内嵌节点反代状态（stopped/starting/running/failed）；
+    ///   - base: running 时反代 base（http://127.0.0.1:<port>，无尾斜杠），其余为 ""；
+    ///   - reachable: 内网主线是否可用（running 且反代已在应答）。
+    /// 产物含 `globalThis.__DSH_TAILNET__`，供 ipad.js 各云端闸门读取——Phase 5 起壳
+    /// origin 恒为 localhost，hostname 已不能区分内网可用与否。
+    static func source(state: String = "stopped", base: String = "", reachable: Bool = false) -> String {
+        let json: String
+        if let data = try? JSONSerialization.data(withJSONObject: [
+            "state": state, "base": base, "reachable": reachable
+        ]), let s = String(data: data, encoding: .utf8) {
+            json = s
+        } else {
+            json = #"{"state":"stopped","base":"","reachable":false}"#
+        }
+        return template.replacingOccurrences(
+            of: "/*__DSH_TAILNET_JSON__*/{ \"state\": \"stopped\", \"base\": \"\", \"reachable\": false }",
+            with: json)
+    }
+
+    private static let template = #"""
 globalThis.__DSH_TRANSPORT__ = { ownsHost: true };
+globalThis.__DSH_TAILNET__ = /*__DSH_TAILNET_JSON__*/{ "state": "stopped", "base": "", "reachable": false };
 (function () {
   var hasNative = !!(window.webkit && window.webkit.messageHandlers
       && window.webkit.messageHandlers.dshBridge);
