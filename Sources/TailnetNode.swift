@@ -28,10 +28,15 @@ import TailscaleKit
 /// 节点运行后端：抽协议是为 3.4 单测注入假后端（不引 Go 网络、不碰真机）。
 /// 实现方负责把阻塞 up/addrs 丢后台；返回 up 后的地址（可能为 nil）。
 /// authKey=nil 表示用状态目录里的已存登录态恢复。
+///
+/// dialHandle：online 后取 C tailscale handle 供 4.1 本地桥每连接 tailscale_dial；
+/// 节点未起/已下时返回 nil（调用方不得起桥）。返回裸 Int32 而非 TailscaleHandle，
+/// 使测试替身无需 import TailscaleKit。
 protocol TailnetBackending: AnyObject {
     func bringUp(stateDir: URL, hostName: String, controlURL: String,
                  authKey: String?) async throws -> (ip4: String?, ip6: String?)
     func shutdown() async
+    func dialHandle() async -> Int32?
 }
 
 /// 日志 sink：TailscaleKit 从 Go 内部线程回调，统一切主队列后交给构造时注入的
@@ -94,6 +99,12 @@ actor TailnetBackend: TailnetBackending {
         try? await node.down()
         self.node = nil
     }
+
+    /// 4.1：online 后取 C tailscale handle 给本地桥做 tailscale_dial；下节点后为 nil。
+    /// 阻塞 C 调用（dial/read/write）发生在连接层的 Task.detached，不经本 actor。
+    func dialHandle() async -> Int32? {
+        await node?.tailscale
+    }
 }
 
 @MainActor
@@ -114,6 +125,15 @@ final class TailnetNode: ObservableObject {
         case failed(String)
     }
 
+    /// 方案 D / 4.1：localhost 反代生命周期（与节点同生共死）。
+    /// online 自动起桥；signOut/cancel/failed 自动停桥。前后台重建留 Phase 6。
+    enum BridgeState: Equatable {
+        case stopped
+        case starting
+        case running(String) // http://127.0.0.1:<port>
+        case failed(String)
+    }
+
     /// 节点状态目录：App 沙盒 Documents/tailscale（Tailscale 在这持久化节点凭据）。
     /// nonisolated：initializer 只碰 FileManager，且要能作 init 默认参数在 nonisolated 上下文求值。
     nonisolated static let stateDir: URL = {
@@ -126,6 +146,12 @@ final class TailnetNode: ObservableObject {
     private let controlURL = kDefaultControlURL
 
     @Published private(set) var state: State = .idle
+
+    /// 4.1 localhost 反代状态（设置页展示；WKWebView Phase 5 起固定读 UserDefaults base）。
+    @Published private(set) var bridge: BridgeState = .stopped
+
+    /// 运行中的 loopback 监听（停桥时 cancel 并关闭全部活动连接）。
+    private var loopback: LoopbackProxy?
 
     /// 最近节点日志（内存环形，最多 recentLogLimit 条；只含状态迁移/Go 日志，绝不含 key）。
     /// 真机无 Mac 看不到 os_log，设置页靠它排查弱网卡死。
@@ -211,6 +237,7 @@ final class TailnetNode: ObservableObject {
     func signOut() async {
         generation &+= 1
         timedOutGenerations.removeAll()
+        await stopBridge()
         await backend?.shutdown()
         backend = nil
         authStore.deleteAuthKey()
@@ -267,6 +294,7 @@ final class TailnetNode: ObservableObject {
                 let ip6 = addrs.ip6 ?? ""
                 if ip4.isEmpty && ip6.isEmpty {
                     // up 未抛但轮询窗口内地址没就绪：判失败、释放后端。
+                    await self.stopBridge()
                     self.backend = nil
                     state = .failed("节点已启动但未取得 tailnet 地址（检查网络/DERP）")
                     self.log("❌ up 后无地址")
@@ -275,10 +303,12 @@ final class TailnetNode: ObservableObject {
                 state = .online(ip4: ip4.isEmpty ? "—" : ip4,
                                 ip6: ip6.isEmpty ? "—" : ip6)
                 self.log("✅ 节点在线：ip4=\(ip4.isEmpty ? "—" : ip4) ip6=\(ip6.isEmpty ? "—" : ip6)")
+                await self.startBridge(gen: gen)
             } catch {
                 guard gen == self.generation else { return }
                 let wasTimedOut = timedOutGenerations.contains(gen)
                 timedOutGenerations.remove(gen)
+                await self.stopBridge()
                 self.backend = nil
                 // 坏 key/吊销/网络原因都在 error 文本里；error 由 TailscaleKit 产生，不含入参 key。
                 if wasTimedOut {
@@ -298,6 +328,7 @@ final class TailnetNode: ObservableObject {
         guard isStarting else { return }
         generation &+= 1
         timedOutGenerations.removeAll()
+        await stopBridge()
         await backend?.shutdown()
         backend = nil
         state = .unauthenticated
@@ -308,6 +339,61 @@ final class TailnetNode: ObservableObject {
     private var isStarting: Bool {
         if case .starting = state { return true }
         return false
+    }
+
+    // MARK: - 4.1 localhost 反代（与节点同生共死）
+
+    /// online 后起本地桥：Bundle.main 壳资产路由 + HttpBridge + TailnetDialConnecter
+    /// → LoopbackProxy(127.0.0.1 动态端口)。base 落 UserDefaults DSHLoopbackBaseURL，
+    /// 供 Phase 5 的 WKWebView 固定加载。spike 2.4 真机已证此装配端到端可用。
+    /// 只认自己这一版 generation：期间被取消/登出/新入网取代则丢弃迟到结果。
+    private func startBridge(gen: Int) async {
+        // starting/running 不重复起；stopped/failed 都允许起（failed 即重试入口）。
+        if case .starting = bridge { return }
+        if case .running = bridge { return }
+        bridge = .starting
+        log("▶ 起本地桥：127.0.0.1 → tailscale_dial → 100.99.84.35:8080 …")
+
+        guard let handle = await backend?.dialHandle() else {
+            guard gen == self.generation else { return }
+            bridge = .failed("拿不到 tailscale handle（节点未在线）")
+            log("❌ 起桥失败：tailscale handle 为 nil")
+            return
+        }
+
+        let routes = ShellAssetRoutes { name in
+            guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
+            return try? Data(contentsOf: url)
+        }
+        let httpBridge = HttpBridge(routes: routes,
+                                    connecter: TailnetDialConnecter(handle: TailscaleHandle(handle)))
+        let proxy = LoopbackProxy(bridge: httpBridge)
+        loopback = proxy
+        do {
+            let base = try await proxy.start()
+            guard gen == self.generation else {
+                // 起桥期间已被登出/取消：把刚起好的监听立刻撤掉，不泄漏端口。
+                proxy.stop()
+                if self.loopback === proxy { self.loopback = nil }
+                return
+            }
+            bridge = .running(base.absoluteString)
+            log("✅ 本地桥就绪：\(base.absoluteString)")
+        } catch {
+            guard gen == self.generation else { return }
+            bridge = .failed("\(error)")
+            loopback = nil
+            log("❌ 起桥失败：\(error)")
+        }
+    }
+
+    /// 停本地桥（signOut/cancel/失败/重入网前）；幂等。
+    private func stopBridge() async {
+        loopback?.stop()
+        loopback = nil
+        if case .stopped = bridge { return }
+        bridge = .stopped
+        log("■ 本地桥已停")
     }
 
     /// 等到离开 starting（signIn/retry 的 UI 用）；最多 10s 避免死等。

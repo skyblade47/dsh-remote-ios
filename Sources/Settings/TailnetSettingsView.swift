@@ -44,6 +44,31 @@ struct TailnetSettingsView: View {
                                 .minimumScaleFactor(0.5)
                         }
                     }
+                    // 4.1 localhost 反代状态：online 后桥自动起；WKWebView（Phase 5）固定读 UserDefaults base。
+                    if isOnline {
+                        HStack {
+                            Text("本地反代")
+                            Spacer()
+                            Text(bridgeText).foregroundStyle(bridgeColor)
+                        }
+                        if case .running(let base) = node.bridge {
+                            Text(base)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                        if case .failed(let reason) = node.bridge {
+                            Text(reason)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
+                        // 4.8 真机验收入口（/auth/login 渲染 + WS 1006/101 + dsh_session cookie）。
+                        NavigationLink {
+                            TailnetVerifyView()
+                        } label: {
+                            Label("验收本地反代（页面 / WS / Cookie）", systemImage: "checkmark.shield")
+                        }
+                    }
                     if case .failed(let reason) = node.state {
                         Text(reason)
                             .font(.footnote)
@@ -173,6 +198,24 @@ struct TailnetSettingsView: View {
         case .failed: return .red
         case .starting: return .orange
         case .idle, .unauthenticated: return .secondary
+        }
+    }
+
+    private var bridgeText: String {
+        switch node.bridge {
+        case .stopped: return "未启动"
+        case .starting: return "启动中…"
+        case .running: return "就绪"
+        case .failed: return "异常"
+        }
+    }
+
+    private var bridgeColor: Color {
+        switch node.bridge {
+        case .running: return .green
+        case .failed: return .red
+        case .starting: return .orange
+        case .stopped: return .secondary
         }
     }
 }

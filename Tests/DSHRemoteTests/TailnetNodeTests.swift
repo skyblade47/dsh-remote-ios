@@ -47,12 +47,17 @@ private actor FakeTailnetBackend: TailnetBackending {
     }
 
     private let outcome: FakeOutcome
+    /// 4.1：online 后是否向节点提供 tailscale handle。默认 nil（不起真实 loopback，
+    /// 保持节点状态机用例快测）；桥装配用例注入假值，并把期望的起桥失败记为无真实 dial。
+    private let handle: Int32?
     private(set) var calls: [Call] = []
     private(set) var shutdownCount = 0
+    private(set) var dialHandleCalls = 0
     private var hang: CheckedContinuation<(ip4: String?, ip6: String?), Error>?
 
-    init(outcome: FakeOutcome) {
+    init(outcome: FakeOutcome, handle: Int32? = nil) {
         self.outcome = outcome
+        self.handle = handle
     }
 
     func bringUp(stateDir: URL, hostName: String, controlURL: String,
@@ -78,6 +83,12 @@ private actor FakeTailnetBackend: TailnetBackending {
         // 模拟 down 中断挂起的 up，释放用例里卡住的 bringUp（并清掉孤立 Task）。
         hang?.resume(throwing: CancellationError())
         hang = nil
+    }
+
+    /// 4.1：节点 online 后本地桥来取 handle；记录调用次数，默认给 nil（不起真实桥）。
+    func dialHandle() async -> Int32? {
+        dialHandleCalls += 1
+        return handle
     }
 
     /// 测试主动释放挂起：resume 为指定结果。
@@ -198,6 +209,17 @@ final class TailnetNodeTests: XCTestCase {
         for _ in 0..<200 {
             if case .starting = node.state { return }
             try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// 4.1：online 后桥在独立 Task 里起（真 NWListener bind 127.0.0.1），轮询等其离开 .starting。
+    private func waitForBridge(_ node: TailnetNode) async {
+        for _ in 0..<300 {
+            if case .starting = node.bridge {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            } else {
+                return
+            }
         }
     }
 
@@ -502,5 +524,57 @@ final class TailnetNodeTests: XCTestCase {
         XCTAssertEqual(secondCall?.authKey, "tskey-b")
 
         await node.signOut()
+    }
+
+    // MARK: 4.1 localhost 反代装配（真 NWListener 绑 127.0.0.1，不经 tailnet dial）
+
+    /// online 且后端给出 handle：桥自动起、base 落 UserDefaults；signOut 后桥停。
+    func testOnlineWithHandleStartsBridgeAndSignOutStopsIt() async {
+        UserDefaults.standard.removeObject(forKey: LoopbackProxy.baseURLDefaultsKey)
+        defer { UserDefaults.standard.removeObject(forKey: LoopbackProxy.baseURLDefaultsKey) }
+
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.50", ip6: nil),
+                                         handle: 42)
+        let node = makeNode(backend)
+        await node.signIn(authKey: "tskey-bridge")
+        await waitForSettle(node)
+        await waitForBridge(node)
+
+        guard case .running(let base) = node.bridge else {
+            return XCTFail("期望桥 .running，实际 \(node.bridge)")
+        }
+        XCTAssertTrue(base.hasPrefix("http://127.0.0.1:"), "桥 base 必须是 loopback：\(base)")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: LoopbackProxy.baseURLDefaultsKey),
+                       base, "起桥必须把 base 落 UserDefaults 供 WKWebView 读取")
+        let dials = await backend.dialHandleCalls
+        XCTAssertEqual(dials, 1, "起桥必须且只取一次 tailscale handle")
+
+        // 桥只 bind 监听，未收到连接不应触发真实 tailscale_dial（connecter 在每连接时才 dial）。
+        await node.signOut()
+        guard case .stopped = node.bridge else {
+            return XCTFail("signOut 后期望桥 .stopped，实际 \(node.bridge)")
+        }
+    }
+
+    /// online 但后端给不出 handle：节点仍在线，桥进 .failed 且给出人类可读原因。
+    func testOnlineWithoutHandleFailsBridgeButNodeStaysOnline() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.51", ip6: nil),
+                                         handle: nil)
+        let node = makeNode(backend)
+        await node.signIn(authKey: "tskey-nohandle")
+        await waitForSettle(node)
+        await waitForBridge(node)
+
+        if case .online(let ip4, _) = node.state {
+            XCTAssertEqual(ip4, "100.64.0.51")
+        } else {
+            return XCTFail("桥失败不应拖垮节点，期望 online，实际 \(node.state)")
+        }
+        guard case .failed(let reason) = node.bridge else {
+            return XCTFail("期望桥 .failed，实际 \(node.bridge)")
+        }
+        XCTAssertTrue(reason.contains("handle"), "失败原因应指向 handle 缺失：\(reason)")
+        let dials = await backend.dialHandleCalls
+        XCTAssertEqual(dials, 1)
     }
 }
