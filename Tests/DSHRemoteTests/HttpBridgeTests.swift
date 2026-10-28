@@ -169,6 +169,25 @@ final class HttpBridgeTests: XCTestCase {
         await session.finish()
     }
 
+    func testDiagEchoesRawRequestTarget() async throws {
+        // 临时诊断端点：origin-form 与 absolute-form 都要被本地拦截并回显原始 target。
+        for target in ["/__shell__/diag?t=1", "http://127.0.0.1:0/__shell__/diag?t=1"] {
+            let connecter = FakeConnecter(mode: .jsonEcho)
+            let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+            let session = ClientSession()
+            await session.run(bridge)
+            try await session.writeString(
+                "GET \(target) HTTP/1.1\r\nHost: 127.0.0.1:0\r\n\r\n")
+            let resp = try await session.readResponse()
+            XCTAssertEqual(resp.status, 200, "target=\(target)")
+            let body = String(decoding: resp.body, as: UTF8.self)
+            XCTAssertTrue(body.contains("\"diag\":true"), body)
+            XCTAssertTrue(body.contains("\"rawTarget\":\"\(target)\""), body)
+            XCTAssertEqual(await connecter.connectCount, 0, "diag 不得拨上游")
+            await session.finish()
+        }
+    }
+
     func testMalformedRequestReturns400() async throws {
         let connecter = FakeConnecter(mode: .jsonEcho)
         let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)

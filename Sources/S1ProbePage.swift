@@ -21,7 +21,9 @@ enum S1ProbePage {
           .t{font-weight:600}.d{font-size:13px;color:#444;white-space:pre-wrap;word-break:break-all}
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
-        <h2>S1 五探针报告（localhost 主线）</h2><div id="out"></div>
+        <h2>S1 五探针报告（localhost 主线）</h2>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-A ／ 探针④=请求行回显</div>
+        <div id="out"></div>
         <script>
         const EXPECT = \(expect);
         const results = [];
@@ -68,13 +70,18 @@ enum S1ProbePage {
 
         // ④ 壳资产本地可达：/__shell__/ping 由反代本地应答（18 件资产走同一本地路由）
         function probeShellAsset(){
+          // 诊断版（临时）：请求反代回显端点，拿到 Swift 真实收到的请求行要素，
+          // 定位 ping 404 的真实请求形态。此探针绿 = diag 请求被本地反代接收。
           try {
             const x = new XMLHttpRequest();
-            x.open('GET', '/__shell__/ping', false);
+            x.open('GET', '/__shell__/diag?t=' + Date.now(), false);
             x.send();
-            record('④ 壳资产本地可达', x.status === 200 && x.responseText.indexOf('pong') !== -1,
-                   'GET /__shell__/ping status=' + x.status + ' body=' + x.responseText);
-          } catch (e) { record('④ 壳资产本地可达', false, String(e)); }
+            let parsed = null;
+            try { parsed = JSON.parse(x.responseText); } catch (_) {}
+            record('④ 反代请求行回显',
+                   x.status === 200 && parsed && parsed.diag === true,
+                   'status=' + x.status + '\\nbody=' + x.responseText);
+          } catch (e) { record('④ 反代请求行回显', false, String(e)); }
         }
 
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。

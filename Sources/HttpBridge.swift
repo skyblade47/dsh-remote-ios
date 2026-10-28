@@ -38,6 +38,20 @@ final class HttpBridge {
             return
         }
 
+        // S1 真机诊断（临时）：/__shell__/diag 回显反代真实收到的请求行要素。
+        // 必须在归一化之前判断并保留原始 target，用于定位 S1 文档内 XHR 的真实请求形态。
+        let rawTarget = parsed.head.target
+        let diagPath = "/__shell__/diag"
+        let diagPathPart = rawTarget
+            .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        if parsed.head.method == "GET",
+           diagPathPart.hasSuffix(diagPath)
+            || HTTPHeadCodec.normalizedTarget(rawTarget).hasPrefix(diagPath) {
+            try? await client.write(Self.diagResponse(head: parsed.head, rawTarget: rawTarget))
+            await client.close()
+            return
+        }
+
         // WKWebView 在 loadHTMLString 文档内可能发 absolute-form 请求行（真机实测），
         // 统一归一为 origin-form 后再做本地路由分流与上游透传（见 normalizedTarget）。
         var head = parsed.head
@@ -88,6 +102,24 @@ final class HttpBridge {
             }
             buffer.append(chunk)
         }
+    }
+
+    /// S1 真机诊断（临时）：回显反代真实收到的请求行要素。
+    private static func diagResponse(head: HTTPRequestHead, rawTarget: String) -> Data {
+        func q(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+             .replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let body = Data("""
+        {"ok":true,"diag":true,"method":"\(q(head.method))","rawTarget":"\(q(rawTarget))","normalizedTarget":"\(q(HTTPHeadCodec.normalizedTarget(rawTarget)))","host":"\(q(head.header("host") ?? ""))"}
+        """.utf8)
+        let h = HTTPHeadCodec.serializeResponse(status: 200, reason: "OK", headers: [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", "\(body.count)"),
+            ("Cache-Control", "no-store"),
+            ("Connection", "close")
+        ])
+        return h + body
     }
 
     private func writeError(status: Int, reason: String, to client: DuplexChannel) async {
