@@ -183,7 +183,8 @@ final class HttpBridgeTests: XCTestCase {
             let body = String(decoding: resp.body, as: UTF8.self)
             XCTAssertTrue(body.contains("\"diag\":true"), body)
             XCTAssertTrue(body.contains("\"rawTarget\":\"\(target)\""), body)
-            XCTAssertEqual(await connecter.connectCount, 0, "diag 不得拨上游")
+            let connects = connecter.connectCount
+            XCTAssertEqual(connects, 0, "diag 不得拨上游")
             await session.finish()
         }
     }
