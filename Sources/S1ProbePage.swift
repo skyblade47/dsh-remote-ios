@@ -30,7 +30,7 @@ enum S1ProbePage {
         // ① origin 必须是 http://127.0.0.1:<port>（Phase 5 起壳固定 localhost，不再借网关 https origin）
         try {
           const origin = document.location.origin;
-          record('① origin localhost', /^http:\/\/127\\.0\\.0\\.1:\\d+$/.test(origin) && origin === EXPECT,
+          record('① origin localhost', /^http:\\/\\/127\\.0\\.0\\.1:\\d+$/.test(origin) && origin === EXPECT,
                  'document.location.origin=' + origin + '\\n期望=' + EXPECT);
         } catch (e) { record('① origin localhost', false, String(e)); }
 
