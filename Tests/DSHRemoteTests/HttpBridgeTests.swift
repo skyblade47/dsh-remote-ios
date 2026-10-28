@@ -137,6 +137,38 @@ final class HttpBridgeTests: XCTestCase {
         await session.finish()
     }
 
+    func testAbsoluteFormShellAssetServedLocally() async throws {
+        // loadHTMLString 文档内 XHR 的 absolute-form 请求行（真机复现）：归一后命中本地路由。
+        let connecter = FakeConnecter(mode: .jsonEcho)
+        let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+        let session = ClientSession()
+
+        await session.run(bridge)
+        try await session.writeString(
+            "GET http://127.0.0.1:0/__shell__/ping HTTP/1.1\r\nHost: 127.0.0.1:0\r\n\r\n")
+        let resp = try await session.readResponse()
+        XCTAssertEqual(resp.status, 200)
+        XCTAssertTrue(String(decoding: resp.body, as: UTF8.self).contains("pong"))
+        XCTAssertEqual(connecter.connectCount, 0, "absolute-form 本地资源不得拨上游")
+        await session.finish()
+    }
+
+    func testAbsoluteFormApiNormalizedBeforeUpstream() async throws {
+        // absolute-form 的 API 请求：透传前 target 必须归一为 origin-form（不把 loopback authority 带上）。
+        let connecter = FakeConnecter(mode: .jsonEcho)
+        let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+        let session = ClientSession()
+
+        await session.run(bridge)
+        try await session.writeString(
+            "GET http://127.0.0.1:0/writing-studio/api/clientZone?id=7 HTTP/1.1\r\nHost: 127.0.0.1:0\r\n\r\n")
+        let resp = try await session.readResponse()
+        XCTAssertEqual(resp.status, 200)
+        let rec = await connecter.recorder.calls
+        XCTAssertEqual(rec[0].head.target, "/writing-studio/api/clientZone?id=7")
+        await session.finish()
+    }
+
     func testMalformedRequestReturns400() async throws {
         let connecter = FakeConnecter(mode: .jsonEcho)
         let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)

@@ -61,6 +61,24 @@ extension HTTPHeadCodec {
         return range.upperBound
     }
 
+    /// 把请求行 target 归一为 origin-form（`/path?query`）。
+    ///
+    /// RFC 7230 允许客户端（如正向代理）发 absolute-form 请求行：
+    /// `GET http://127.0.0.1:8080/__shell__/ping HTTP/1.1`。实测 iPadOS 27 的
+    /// WKWebView 在 `loadHTMLString(_:baseURL:)` 装载的文档内发 XHR 时就用这种形式，
+    /// 而真实导航（web.load）用 origin-form。listener 锁死 127.0.0.1，能连进来的都是
+    /// 本机进程，故可安全丢弃 absolute-form 里的 authority，仅取 path/query 用于本地路由
+    /// 与上游透传（透传时 Host 会被重写为上游，保留 loopback authority 反而是错的）。
+    /// origin-form / authority-form（CONNECT）原样返回。
+    static func normalizedTarget(_ target: String) -> String {
+        guard target.hasPrefix("http://") || target.hasPrefix("https://"),
+              let url = URL(string: target) else { return target }
+        var path = url.path
+        if path.isEmpty { path = "/" }
+        if let query = url.query { path += "?" + query }
+        return path
+    }
+
     /// 解析请求头字节（不含 CRLFCRLF 之后内容）。
     static func parseRequest(_ raw: Data) throws -> HTTPRequestHead {
         let text = String(decoding: raw, as: UTF8.self)

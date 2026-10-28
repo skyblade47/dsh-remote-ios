@@ -11,6 +11,22 @@ final class HTTPHeadCodecTests: XCTestCase {
         XCTAssertEqual(head.header("COOKIE"), "a=1")
     }
 
+    func testNormalizedTargetAbsoluteForm() {
+        // loadHTMLString 文档内 XHR 的 absolute-form（真机实测）→ origin-form
+        XCTAssertEqual(
+            HTTPHeadCodec.normalizedTarget("http://127.0.0.1:8080/__shell__/ping"),
+            "/__shell__/ping")
+        XCTAssertEqual(
+            HTTPHeadCodec.normalizedTarget("http://127.0.0.1:8080/auth/login?u=1"),
+            "/auth/login?u=1")
+        // 无 path 归一为 "/"；fragment 必须丢弃（不随请求发送）
+        XCTAssertEqual(
+            HTTPHeadCodec.normalizedTarget("http://127.0.0.1:8080#frag"), "/")
+        // origin-form / CONNECT authority-form 原样
+        XCTAssertEqual(HTTPHeadCodec.normalizedTarget("/app#/"), "/app#/")
+        XCTAssertEqual(HTTPHeadCodec.normalizedTarget("100.99.84.35:8080"), "100.99.84.35:8080")
+    }
+
     func testMalformedAndVersionRejected() {
         XCTAssertThrowsError(try HTTPHeadCodec.parseRequest(Data("GARBAGE\r\n\r\n".utf8))) {
             XCTAssertEqual($0 as? HTTPHeadCodec.CodecError, .malformedHead)

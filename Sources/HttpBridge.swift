@@ -38,9 +38,14 @@ final class HttpBridge {
             return
         }
 
+        // WKWebView 在 loadHTMLString 文档内可能发 absolute-form 请求行（真机实测），
+        // 统一归一为 origin-form 后再做本地路由分流与上游透传（见 normalizedTarget）。
+        var head = parsed.head
+        head.target = HTTPHeadCodec.normalizedTarget(head.target)
+
         // 路由分流：本地壳资源
-        if parsed.head.target.hasPrefix(ShellAssetRoutes.prefix),
-           let local = routes.respond(method: parsed.head.method, target: parsed.head.target) {
+        if head.target.hasPrefix(ShellAssetRoutes.prefix),
+           let local = routes.respond(method: head.method, target: head.target) {
             try? await client.write(local)
             await client.close()
             return
@@ -57,7 +62,7 @@ final class HttpBridge {
         }
 
         let requestBytes = HTTPHeadCodec.serializeUpstreamRequest(
-            parsed.head, upstreamHost: "\(upstreamHost):\(upstreamPort)")
+            head, upstreamHost: "\(upstreamHost):\(upstreamPort)")
         await ByteBridge.run(client: client, upstream: upstream,
                              initialClientBytes: requestBytes + parsed.rest)
     }
