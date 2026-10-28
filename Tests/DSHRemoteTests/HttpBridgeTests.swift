@@ -191,24 +191,25 @@ final class HttpBridgeTests: XCTestCase {
 
     func testDiagLogRingRecordsReachedRequestsAndClears() async throws {
         // DIAG-D 临时端点：清空环 → 打一发本地 ping → /diag-log 必须在环内看到该 raw target。
+        // HttpBridge 每条连接应答完即关，故三次请求各用独立 ClientSession（共享同一 ring/connecter）。
         let connecter = FakeConnecter(mode: .jsonEcho)
-        let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
-        let session = ClientSession()
-        await session.run(bridge)
+        func oneShot(_ target: String) async throws -> ClientSession.Response {
+            let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+            let session = ClientSession()
+            await session.run(bridge)
+            try await session.writeString("GET \(target) HTTP/1.1\r\nHost: x\r\n\r\n")
+            let resp = try await session.readResponse()
+            await session.finish()
+            return resp
+        }
 
-        try await session.writeString("GET /diag-log?clear=1 HTTP/1.1\r\nHost: x\r\n\r\n")
-        _ = try await session.readResponse()
-
-        try await session.writeString("GET /__shell__/ping HTTP/1.1\r\nHost: x\r\n\r\n")
-        _ = try await session.readResponse()
-
-        try await session.writeString("GET /diag-log HTTP/1.1\r\nHost: x\r\n\r\n")
-        let resp = try await session.readResponse()
+        _ = try await oneShot("/diag-log?clear=1")
+        _ = try await oneShot("/__shell__/ping")
+        let resp = try await oneShot("/diag-log?read=1")
         XCTAssertEqual(resp.status, 200)
         let body = String(decoding: resp.body, as: UTF8.self)
         XCTAssertTrue(body.contains("/__shell__/ping"), body)
         XCTAssertEqual(connecter.connectCount, 0)
-        await session.finish()
     }
 
     func testMalformedRequestReturns400() async throws {
