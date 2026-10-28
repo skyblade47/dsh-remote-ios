@@ -189,6 +189,28 @@ final class HttpBridgeTests: XCTestCase {
         }
     }
 
+    func testDiagLogRingRecordsReachedRequestsAndClears() async throws {
+        // DIAG-D 临时端点：清空环 → 打一发本地 ping → /diag-log 必须在环内看到该 raw target。
+        let connecter = FakeConnecter(mode: .jsonEcho)
+        let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+        let session = ClientSession()
+        await session.run(bridge)
+
+        try await session.writeString("GET /diag-log?clear=1 HTTP/1.1\r\nHost: x\r\n\r\n")
+        _ = try await session.readResponse()
+
+        try await session.writeString("GET /__shell__/ping HTTP/1.1\r\nHost: x\r\n\r\n")
+        _ = try await session.readResponse()
+
+        try await session.writeString("GET /diag-log HTTP/1.1\r\nHost: x\r\n\r\n")
+        let resp = try await session.readResponse()
+        XCTAssertEqual(resp.status, 200)
+        let body = String(decoding: resp.body, as: UTF8.self)
+        XCTAssertTrue(body.contains("/__shell__/ping"), body)
+        XCTAssertEqual(connecter.connectCount, 0)
+        await session.finish()
+    }
+
     func testMalformedRequestReturns400() async throws {
         let connecter = FakeConnecter(mode: .jsonEcho)
         let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)

@@ -17,17 +17,17 @@ enum S1ProbePage {
           h2{font-size:18px;margin:0 0 12px}
           .r{display:flex;gap:10px;align-items:flex-start;padding:10px;border-radius:10px;margin:8px 0;background:#fff}
           .b{width:14px;height:14px;border-radius:50%;margin-top:3px;flex:none}
-          .g{background:#1c9b47}.x{background:#d33}
+          .g{background:#1c9b47}.x{background:#d33}.z{background:#8a93a6}
           .t{font-weight:600}.d{font-size:13px;color:#444;white-space:pre-wrap;word-break:break-all}
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
         <h2>S1 五探针报告（localhost 主线）</h2>
-        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-C ／ baseURL 改 origin 根，探针④仍跑 A/B/C/D 矩阵</div>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-D ／ ④仍 A/B/C/D；⑥路径矩阵+服务端到达日志环（不计五绿）</div>
         <div id="out"></div>
         <script>
         const EXPECT = \(expect);
         const results = [];
-        function record(name, pass, detail){ results.push({name, pass, detail}); }
+        function record(name, pass, detail, isDiag){ results.push({name, pass, detail, diag: !!isDiag}); }
 
         // ① origin 必须是 http://127.0.0.1:<port>（Phase 5 起壳固定 localhost，不再借网关 https origin）
         try {
@@ -114,6 +114,49 @@ enum S1ProbePage {
           record('④ 本地壳路由矩阵（A/B=diag，C/D=ipad.js）', pass, lines.join('\\n'));
         }
 
+        // ⑥ DIAG-D（临时，信息项不计五绿）：多路径形态矩阵 + 反代到达日志环。
+        //    先发一组形态各异的路径（全部异步 fetch，8s 超时），再拉 /diag-log
+        //    看哪些 raw target 真正到达了 listener——空 404 的路径若不在环里，
+        //    即证明请求未进反代（被 WebKit 在网络栈外合成拦掉）。
+        async function probeDiagPathMatrix(){
+          const paths = [
+            '/__shell__/diag?m=D0',
+            '/__diag__/x?m=D1',
+            '/shell/diag?m=D2',
+            '/_shell_/diag?m=D3',
+            '/abc__/x?m=D4',
+            '/__abc/x?m=D5',
+            '/shell__extra/diag?m=D6',
+            '/zzz/plain?m=D7'
+          ];
+          const lines = [];
+          // 清空到达环，只留本轮矩阵轨迹
+          try {
+            await fetch('/diag-log?clear=1&t=' + Date.now(), {cache:'no-store'});
+          } catch (e) { lines.push('清环失败: ' + e); }
+          await Promise.all(paths.map(async p => {
+            try {
+              const ctrl = new AbortController();
+              const to = setTimeout(() => ctrl.abort(), 8000);
+              const r = await fetch(p + '&t=' + Date.now(), {cache:'no-store', signal: ctrl.signal});
+              clearTimeout(to);
+              const b = await r.text();
+              lines.push(p + ' -> status=' + r.status + ' bytes=' + b.length);
+            } catch (e) {
+              lines.push(p + ' -> EXC ' + e);
+            }
+          }));
+          // 稍等一拍确保服务端落环，再取回环原文
+          await new Promise(res => setTimeout(res, 300));
+          let ring = '(取环失败)';
+          try {
+            const r = await fetch('/diag-log?t=' + Date.now(), {cache:'no-store'});
+            ring = await r.text();
+          } catch (e) { ring = '取环 EXC ' + e; }
+          record('⑥ 路径矩阵 + 到达日志环（信息项）', true,
+                 '客户端观察：\\n' + lines.join('\\n') + '\\n\\n服务端到达环：\\n' + ring, true);
+        }
+
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。
         //    注册的是真实 BridgeSyncSchemeHandler（__ping__ 回 {ok:true,echo:"pong"}）。
         //    Task 5.6 以此探针真机结论决定保留自定义 scheme 还是改 loopback POST 端点。
@@ -132,10 +175,11 @@ enum S1ProbePage {
         function render(){
           const el = document.getElementById('out');
           el.innerHTML = results.map(r =>
-            '<div class="r"><div class="b ' + (r.pass?'g':'x') + '"></div><div>' +
+            '<div class="r"><div class="b ' + (r.diag ? 'z' : (r.pass?'g':'x')) + '"></div><div>' +
             '<div class="t">' + r.name + '</div><div class="d">' + r.detail + '</div></div></div>'
-          ).join('') + '<div class="d">五项全绿才算 Phase 5 主线通过。</div>';
-          const allGreen = results.length === 5 && results.every(r => r.pass);
+          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥为临时诊断信息项）。</div>';
+          const core = results.filter(r => !r.diag);
+          const allGreen = core.length === 5 && core.every(r => r.pass);
           if (window.webkit && window.webkit.messageHandlers.s1Report) {
             window.webkit.messageHandlers.s1Report.postMessage(
               JSON.stringify({allGreen: allGreen, results: results}));
@@ -146,6 +190,7 @@ enum S1ProbePage {
           await probeLogin();
           await probeIframe();
           await probeShellAsset();
+          await probeDiagPathMatrix();
           probeSyncBridge();
           render();
         })();
