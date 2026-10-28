@@ -22,7 +22,7 @@ enum S1ProbePage {
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
         <h2>S1 五探针报告（localhost 主线）</h2>
-        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-A ／ 探针④=请求行回显</div>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-B ／ 探针④=异步/同步 × diag/ipad.js 矩阵</div>
         <div id="out"></div>
         <script>
         const EXPECT = \(expect);
@@ -69,19 +69,49 @@ enum S1ProbePage {
         }
 
         // ④ 壳资产本地可达：/__shell__/ping 由反代本地应答（18 件资产走同一本地路由）
-        function probeShellAsset(){
-          // 诊断版（临时）：请求反代回显端点，拿到 Swift 真实收到的请求行要素，
-          // 定位 ping 404 的真实请求形态。此探针绿 = diag 请求被本地反代接收。
+        // ④ 诊断矩阵（DIAG-B，临时）：区分「异步 fetch vs 同步 XHR」×「diag 回显 vs 真实资产」。
+        //    假设：loadHTMLString 文档内同步 XHR 走 http loopback 被 WebKit 拦（空 404），
+        //    而产品壳 18 资产走 <script>/<link> 异步子资源（主壳正常即已证明），与同步 XHR 无关。
+        async function probeShellAsset(){
+          const lines = [];
+          let pass = true;
+          // A：异步 fetch diag
+          try {
+            const r = await fetch('/__shell__/diag?m=A&t=' + Date.now(), {cache:'no-store'});
+            const b = await r.text();
+            const ok = r.status === 200 && b.indexOf('"diag":true') !== -1;
+            if (!ok) pass = false;
+            lines.push('A async fetch diag: status=' + r.status + ' body=' + b.slice(0, 120));
+          } catch (e) { pass = false; lines.push('A async fetch diag: EXC ' + e); }
+          // B：同步 XHR diag
           try {
             const x = new XMLHttpRequest();
-            x.open('GET', '/__shell__/diag?t=' + Date.now(), false);
+            x.open('GET', '/__shell__/diag?m=B&t=' + Date.now(), false);
             x.send();
-            let parsed = null;
-            try { parsed = JSON.parse(x.responseText); } catch (_) {}
-            record('④ 反代请求行回显',
-                   x.status === 200 && parsed && parsed.diag === true,
-                   'status=' + x.status + '\\nbody=' + x.responseText);
-          } catch (e) { record('④ 反代请求行回显', false, String(e)); }
+            const ok = x.status === 200 && x.responseText.indexOf('"diag":true') !== -1;
+            if (!ok) pass = false;
+            lines.push('B sync  XHR  diag: status=' + x.status + ' body=' + x.responseText.slice(0, 120));
+          } catch (e) { pass = false; lines.push('B sync  XHR  diag: EXC ' + e); }
+          // C：异步 fetch 真实资产 ipad.js（产品壳子资源同源路径）
+          try {
+            const r = await fetch('/__shell__/ipad.js?m=C&t=' + Date.now(), {cache:'no-store'});
+            const b = await r.text();
+            const ok = r.status === 200 && b.indexOf('gatewayConfigured') !== -1;
+            if (!ok) pass = false;
+            lines.push('C async fetch ipad.js: status=' + r.status + ' bytes=' + b.length
+                       + (ok ? ' (含 gatewayConfigured)' : ' (内容不符)'));
+          } catch (e) { pass = false; lines.push('C async fetch ipad.js: EXC ' + e); }
+          // D：同步 XHR 真实资产 ipad.js
+          try {
+            const x = new XMLHttpRequest();
+            x.open('GET', '/__shell__/ipad.js?m=D&t=' + Date.now(), false);
+            x.send();
+            const ok = x.status === 200 && x.responseText.indexOf('gatewayConfigured') !== -1;
+            if (!ok) pass = false;
+            lines.push('D sync  XHR  ipad.js: status=' + x.status + ' bytes=' + x.responseText.length
+                       + (ok ? ' (含 gatewayConfigured)' : ' (内容不符)'));
+          } catch (e) { pass = false; lines.push('D sync  XHR  ipad.js: EXC ' + e); }
+          record('④ 本地壳路由矩阵（A/B=diag，C/D=ipad.js）', pass, lines.join('\\n'));
         }
 
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。
@@ -115,7 +145,7 @@ enum S1ProbePage {
         (async () => {
           await probeLogin();
           await probeIframe();
-          probeShellAsset();
+          await probeShellAsset();
           probeSyncBridge();
           render();
         })();
