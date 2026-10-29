@@ -22,7 +22,7 @@ enum S1ProbePage {
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
         <h2>S1 五探针报告（localhost 主线）</h2>
-        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-E ／ ④仍 A/B/C/D；⑥路径矩阵+到达环；⑦ Service Worker 取证与注销 A/B（不计五绿）</div>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-F ／ ④仍 A/B/C/D；⑥路径矩阵；⑦SW取证；⑧父文档vs真实iframe文档对照 A/B（不计五绿）</div>
         <div id="out"></div>
         <script>
         const EXPECT = \(expect);
@@ -262,6 +262,89 @@ enum S1ProbePage {
           record('⑦ Service Worker 取证/A-B（信息项）', true, L.join('\\n'), true);
         }
 
+        // ⑧ DIAG-F（临时，信息项）：父 loadHTMLString 文档 vs 真实 http 导航 iframe 文档对照。
+        //    必须在③ iframe /app 之前的最早时间点跑，区分：
+        //    P1 父页最早 ping（无任何 iframe 时）；
+        //    L1 真实 /auth/login iframe 文档内部自查 SW + 自己 fetch ping（该文档不注册 SW）；
+        //    A1 真实 /app iframe 文档内部自查 SW + 自己 fetch ping（该文档会注册两个 SW）；
+        //    P2 两个 iframe 之后父页再 ping；最后父页读 /diag-log 看到达真值。
+        async function probeDocumentAB(){
+          const L = [];
+          const parentFetch = async (marker) => {
+            try {
+              const r = await fetch('/__shell__/ping?m=' + marker + '&t=' + Date.now(), {cache:'no-store'});
+              const b = await r.text();
+              return 'status=' + r.status + ' bytes=' + b.length + (b.indexOf('pong') !== -1 ? ' pong' : '');
+            } catch (e) { return 'EXC ' + e; }
+          };
+
+          // 先清环（若这步本身都空 404，环仍是旧内容，亦可侧面印证）
+          try { await fetch('/diag-log?clear=1&t=' + Date.now(), {cache:'no-store'}); } catch (e) {}
+
+          // P1：此刻③还没跑，父页最早 ping
+          L.push('P1 父页最早(无iframe): ' + await parentFetch('P1'));
+
+          // 在真实 iframe 文档内部执行脚本（同源，父可直改其 window/document）
+          const insideProbe = (win, marker) => {
+            const out = { sw: ('serviceWorker' in win.navigator), ctrl: null, fetch: '(未执行)' };
+            try {
+              if (out.sw && win.navigator.serviceWorker.controller) {
+                out.ctrl = win.navigator.serviceWorker.controller.scriptURL;
+              }
+            } catch (e) { out.ctrl = 'EXC ' + e; }
+            return new Promise(resolve => {
+              let done = false;
+              const finish = () => { if(done) return; done = true;
+                resolve('sw=' + out.sw + ' ctrl=' + (out.ctrl||'(无)') + ' fetch=' + out.fetch); };
+              (async () => {
+                try {
+                  const r = await win.fetch('/__shell__/ping?m=' + marker + '&t=' + Date.now(),
+                                            {cache:'no-store'});
+                  const b = await r.text();
+                  out.fetch = 'status=' + r.status + ' bytes=' + b.length
+                    + (b.indexOf('pong') !== -1 ? ' pong' : '');
+                } catch (e) { out.fetch = 'EXC ' + e; }
+                finish();
+              })();
+              setTimeout(finish, 6000);
+            });
+          };
+
+          const runIframe = (src, marker) => new Promise(resolve => {
+            const f = document.createElement('iframe');
+            f.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0';
+            let done = false;
+            const finish = s => { if(done) return; done=true; f.remove(); resolve(s); };
+            f.onload = () => setTimeout(async () => {
+              try {
+                let href = '(跨源)';
+                try { href = f.contentWindow.location.href; } catch (e) {}
+                const res = await insideProbe(f.contentWindow, marker);
+                finish('href=' + href + '\\n      ' + res);
+              } catch (e) { finish('iframe 内执行 EXC ' + e); }
+            }, 800);
+            f.onerror = () => finish('iframe onerror');
+            setTimeout(() => finish('iframe 9s 超时'), 9000);
+            f.src = src;
+            document.body.appendChild(f);
+          });
+
+          L.push('L1 /auth/login 真实文档: ' + await runIframe('/auth/login?t=' + Date.now(), 'L1'));
+          L.push('A1 /app 真实文档(注册SW): ' + await runIframe('/app#/?t=' + Date.now(), 'A1'));
+
+          // P2：两个 iframe（尤其 /app）之后父页再 ping
+          L.push('P2 父页(两iframe之后): ' + await parentFetch('P2'));
+
+          // 读环（父页通道）
+          let ring = '(取环失败)';
+          try {
+            const r = await fetch('/diag-log?read=1&m=P3&t=' + Date.now(), {cache:'no-store'});
+            ring = await r.text();
+          } catch (e) { ring = '取环 EXC ' + e; }
+          L.push('到达环: ' + ring);
+          record('⑧ 父文档 vs 真实 iframe 文档 A/B（信息项）', true, L.join('\\n'), true);
+        }
+
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。
         //    注册的是真实 BridgeSyncSchemeHandler（__ping__ 回 {ok:true,echo:"pong"}）。
         //    Task 5.6 以此探针真机结论决定保留自定义 scheme 还是改 loopback POST 端点。
@@ -282,7 +365,7 @@ enum S1ProbePage {
           el.innerHTML = results.map(r =>
             '<div class="r"><div class="b ' + (r.diag ? 'z' : (r.pass?'g':'x')) + '"></div><div>' +
             '<div class="t">' + r.name + '</div><div class="d">' + r.detail + '</div></div></div>'
-          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥⑦为临时诊断信息项）。</div>';
+          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥⑦⑧为临时诊断信息项）。</div>';
           const core = results.filter(r => !r.diag);
           const allGreen = core.length === 5 && core.every(r => r.pass);
           if (window.webkit && window.webkit.messageHandlers.s1Report) {
@@ -292,6 +375,7 @@ enum S1ProbePage {
         }
 
         (async () => {
+          await probeDocumentAB();
           await probeLogin();
           await probeIframe();
           await probeShellAsset();
