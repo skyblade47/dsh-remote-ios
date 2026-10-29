@@ -22,7 +22,7 @@ enum S1ProbePage {
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
         <h2>S1 五探针报告（localhost 主线）</h2>
-        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-D ／ ④仍 A/B/C/D；⑥路径矩阵+服务端到达日志环（不计五绿）</div>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-E ／ ④仍 A/B/C/D；⑥路径矩阵+到达环；⑦ Service Worker 取证与注销 A/B（不计五绿）</div>
         <div id="out"></div>
         <script>
         const EXPECT = \(expect);
@@ -157,6 +157,111 @@ enum S1ProbePage {
                  '客户端观察：\\n' + lines.join('\\n') + '\\n\\n服务端到达环：\\n' + ring, true);
         }
 
+        // ⑦ DIAG-E（临时，信息项）：一锤定音验证「根 scope Service Worker 接管 loadHTMLString 文档，
+        //    直通请求被 WKWebView 合成空 404、不进 listener」假设。
+        //    取证 controller/registrations/caches → E0 注销前父页 fetch → 注销全部 SW+清缓存
+        //    → E1 注销后父页 fetch → E2 全新 iframe（注销后新建，按 spec 不被任何 SW 控制）fetch。
+        //    最后再用全新 iframe 读 /diag-log，看 E0/E1/E2 哪些 marker 真正到达 listener。
+        async function probeServiceWorker(){
+          const L = [];
+          const has = ('serviceWorker' in navigator);
+          L.push('navigator.serviceWorker=' + (has ? '存在' : '不存在'));
+          if (!has) { record('⑦ Service Worker 取证/A-B（信息项）', true, L.join('\\n'), true); return; }
+
+          // —— 取证：当前控制者 + 全部注册项 + 缓存名 ——
+          let ctrl = '(无 controller)';
+          try {
+            if (navigator.serviceWorker.controller) {
+              ctrl = navigator.serviceWorker.controller.scriptURL
+                + ' state=' + navigator.serviceWorker.controller.state;
+            }
+          } catch (e) { ctrl = '读 controller EXC ' + e; }
+          L.push('controller=' + ctrl);
+          try {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            L.push('registrations(' + regs.length + ')=');
+            for (const r of regs) {
+              L.push('  scope=' + r.scope
+                + ' active=' + (r.active ? r.active.scriptURL.split('/').pop() : '-')
+                + ' installing=' + (r.installing ? r.installing.scriptURL.split('/').pop() : '-'));
+            }
+          } catch (e) { L.push('getRegistrations EXC ' + e); }
+          try {
+            const keys = await caches.keys();
+            L.push('caches(' + keys.length + ')=' + (keys.join(',') || '(空)'));
+          } catch (e) { L.push('caches.keys EXC ' + e); }
+
+          const shot = async (marker) => {
+            try {
+              const r = await fetch('/__shell__/ping?m=' + marker + '&t=' + Date.now(),
+                                    {cache:'no-store'});
+              const b = await r.text();
+              return marker + ': status=' + r.status + ' bytes=' + b.length
+                + (b.indexOf('pong') !== -1 ? ' (pong)' : ' (空/非pong)');
+            } catch (e) { return marker + ': EXC ' + e; }
+          };
+
+          // E0：注销前父页（此时预期被根 SW 控制 → 空 404）
+          L.push('--- E0 注销前父页 ---');
+          L.push(await shot('E0'));
+
+          // 注销全部注册 + 清全部缓存
+          let unregN = 0;
+          try {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            for (const r of regs) { if (await r.unregister()) unregN++; }
+          } catch (e) { L.push('注销 EXC ' + e); }
+          let delN = 0;
+          try {
+            const keys = await caches.keys();
+            for (const k of keys) { if (await caches.delete(k)) delN++; }
+          } catch (e) { L.push('清缓存 EXC ' + e); }
+          L.push('已注销注册 ' + unregN + ' 个、清缓存 ' + delN + ' 个');
+
+          // 等 SW 控制状态收敛（父页 controller 在 SW 注销后是否立即释放，各实现不一）
+          await new Promise(res => setTimeout(res, 600));
+          try {
+            L.push('注销后 controller=' +
+              (navigator.serviceWorker.controller ? navigator.serviceWorker.controller.scriptURL : '(已释放)'));
+          } catch (e) {}
+
+          // E1：注销后仍在父页 fetch（controller 未释放则可能仍 404）
+          L.push('--- E1 注销后父页 ---');
+          L.push(await shot('E1'));
+
+          // 全新 iframe 取文本助手（每次新建独立客户端）
+          const iframeShot = (url, label) => new Promise(resolve => {
+            const f = document.createElement('iframe');
+            f.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0';
+            let done = false;
+            const finish = (s) => { if(done) return; done=true; f.remove(); resolve(s); };
+            const to = setTimeout(() => finish(label + ': iframe 8s 超时'), 8000);
+            f.onload = () => {
+              clearTimeout(to);
+              setTimeout(() => {
+                try {
+                  const txt = f.contentWindow.document.body
+                    ? f.contentWindow.document.body.innerText : '(无 body)';
+                  finish(label + ': ' + txt.slice(0, 200));
+                } catch (e) { finish(label + ': 读 body EXC ' + e); }
+              }, 250);
+            };
+            f.onerror = () => { clearTimeout(to); finish(label + ': iframe onerror'); };
+            f.src = url;
+            document.body.appendChild(f);
+          });
+
+          // E2：注销后新建 iframe（关键对照——若无 SW 控制，ping 应真到 listener 回 pong）
+          L.push('--- E2 注销后全新 iframe（无 SW 客户端）---');
+          L.push(await iframeShot('/__shell__/ping?m=E2&t=' + Date.now(), 'E2-iframe'));
+
+          // 全新 iframe 读环（独立真值通道；其自身读请求先入环再返回，含 E0/E1/E2 轨迹）
+          L.push('--- E3 全新 iframe 读到达环 ---');
+          L.push(await iframeShot('/diag-log?read=1&m=E3&t=' + Date.now(), 'E3-ring'));
+
+          record('⑦ Service Worker 取证/A-B（信息项）', true, L.join('\\n'), true);
+        }
+
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。
         //    注册的是真实 BridgeSyncSchemeHandler（__ping__ 回 {ok:true,echo:"pong"}）。
         //    Task 5.6 以此探针真机结论决定保留自定义 scheme 还是改 loopback POST 端点。
@@ -177,7 +282,7 @@ enum S1ProbePage {
           el.innerHTML = results.map(r =>
             '<div class="r"><div class="b ' + (r.diag ? 'z' : (r.pass?'g':'x')) + '"></div><div>' +
             '<div class="t">' + r.name + '</div><div class="d">' + r.detail + '</div></div></div>'
-          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥为临时诊断信息项）。</div>';
+          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥⑦为临时诊断信息项）。</div>';
           const core = results.filter(r => !r.diag);
           const allGreen = core.length === 5 && core.every(r => r.pass);
           if (window.webkit && window.webkit.messageHandlers.s1Report) {
@@ -191,6 +296,7 @@ enum S1ProbePage {
           await probeIframe();
           await probeShellAsset();
           await probeDiagPathMatrix();
+          await probeServiceWorker();
           probeSyncBridge();
           render();
         })();
