@@ -124,7 +124,8 @@ final class S1ViewController: UIViewController {
         for p in ["/__shell__/ping", "/__shell__/diag", "/zzz/plain", "/auth/login"] {
             lines.append(await hit(p))
         }
-        lines.append("环(上述4发之后)=" + await hit("/diag-log?read=1"))
+        let ringLine = await hit("/diag-log?read=1")
+        lines.append("环(上述4发之后)=" + ringLine)
         return lines.joined(separator: "\n")
     }
 }
