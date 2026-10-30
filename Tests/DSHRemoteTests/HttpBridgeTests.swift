@@ -169,47 +169,21 @@ final class HttpBridgeTests: XCTestCase {
         await session.finish()
     }
 
-    func testDiagEchoesRawRequestTarget() async throws {
-        // 临时诊断端点：origin-form 与 absolute-form 都要被本地拦截并回显原始 target。
-        for target in ["/__shell__/diag?t=1", "http://127.0.0.1:0/__shell__/diag?t=1"] {
-            let connecter = FakeConnecter(mode: .jsonEcho)
-            let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
-            let session = ClientSession()
-            await session.run(bridge)
-            try await session.writeString(
-                "GET \(target) HTTP/1.1\r\nHost: 127.0.0.1:0\r\n\r\n")
-            let resp = try await session.readResponse()
-            XCTAssertEqual(resp.status, 200, "target=\(target)")
-            let body = String(decoding: resp.body, as: UTF8.self)
-            XCTAssertTrue(body.contains("\"diag\":true"), body)
-            XCTAssertTrue(body.contains("\"rawTarget\":\"\(target)\""), body)
-            let connects = connecter.connectCount
-            XCTAssertEqual(connects, 0, "diag 不得拨上游")
-            await session.finish()
-        }
-    }
-
-    func testDiagLogRingRecordsReachedRequestsAndClears() async throws {
-        // DIAG-D 临时端点：清空环 → 打一发本地 ping → /diag-log 必须在环内看到该 raw target。
-        // HttpBridge 每条连接应答完即关，故三次请求各用独立 ClientSession（共享同一 ring/connecter）。
+    func testS1ProbePageServedLocallyAsHTML() async throws {
+        // S1 探针页由反代本地下发（真实 HTTP 文档），与产品壳同一加载方式。
         let connecter = FakeConnecter(mode: .jsonEcho)
-        func oneShot(_ target: String) async throws -> ClientSession.Response {
-            let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
-            let session = ClientSession()
-            await session.run(bridge)
-            try await session.writeString("GET \(target) HTTP/1.1\r\nHost: x\r\n\r\n")
-            let resp = try await session.readResponse()
-            await session.finish()
-            return resp
-        }
+        let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+        let session = ClientSession()
 
-        _ = try await oneShot("/diag-log?clear=1")
-        _ = try await oneShot("/__shell__/ping")
-        let resp = try await oneShot("/diag-log?read=1")
+        await session.run(bridge)
+        try await session.writeString(
+            "GET \(HttpBridge.s1ProbePath)?t=1 HTTP/1.1\r\nHost: x\r\n\r\n")
+        let resp = try await session.readResponse()
         XCTAssertEqual(resp.status, 200)
         let body = String(decoding: resp.body, as: UTF8.self)
-        XCTAssertTrue(body.contains("/__shell__/ping"), body)
-        XCTAssertEqual(connecter.connectCount, 0)
+        XCTAssertTrue(body.contains("S1 五探针报告"), body)
+        XCTAssertEqual(connecter.connectCount, 0, "S1 探针页不得拨上游")
+        await session.finish()
     }
 
     func testMalformedRequestReturns400() async throws {

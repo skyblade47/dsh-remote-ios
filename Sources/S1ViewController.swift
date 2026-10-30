@@ -81,52 +81,18 @@ final class S1ViewController: UIViewController {
     }
 
     @objc private func runProbes() {
-        // DIAG-G：先用 App 进程 URLSession 直连 loopback 采集真值（不经 WebKit），再装载探针页。
-        Task { @MainActor in
-            let native = await Self.nativeLoopbackDiag(base: self.loopbackBase)
-            guard let baseURL = URL(string: self.loopbackBase) else { return }
-            self.web.loadHTMLString(
-                S1ProbePage.html(loopbackOrigin: self.loopbackBase, nativeDiag: native),
-                baseURL: baseURL)
+        // 探针页由反代本地下发（/__s1__/probe），以真实 HTTP 导航装载 —— 与产品壳同一条路径。
+        // 不再用 loadHTMLString：真机实测该文档内对同源 loopback 的 fetch/XHR 会随机合成
+        // 空 404 且不进 listener（同一 URL 前一次 200、后一次 404），而真实导航文档 100% 正常。
+        guard let baseURL = URL(string: loopbackBase),
+              let probe = URL(string: HttpBridge.s1ProbePath, relativeTo: baseURL) else {
+            web.loadHTMLString("<meta charset=utf-8><body style='padding:24px'>反代未就绪，无法自检。</body>",
+                               baseURL: URL(string: "about:blank")!)
+            return
         }
-    }
-
-    /// DIAG-G（临时）：原生侧直连 `http://127.0.0.1:<port>` 的真值。
-    /// 与 WebKit 完全无关：若此通道 ping 得到 pong，说明 listener + HttpBridge 健康，
-    /// 那 WKWebView 里清一色"404 空 body"只能是被 WebKit 侧合成；反之则端口上应答的不是我们的桥。
-    private static func nativeLoopbackDiag(base: String) async -> String {
-        var lines: [String] = []
-        lines.append("loopbackBase=" + base)
-        lines.append("persisted=" + (UserDefaults.standard
-            .string(forKey: LoopbackProxy.baseURLDefaultsKey) ?? "(nil)"))
-
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 8
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        cfg.httpShouldUsePipelining = false
-        let session = URLSession(configuration: cfg)
-
-        func hit(_ path: String) async -> String {
-            guard let u = URL(string: path, relativeTo: URL(string: base)) else {
-                return path + " -> URL 构造失败"
-            }
-            do {
-                let (data, resp) = try await session.data(from: u)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
-                let body = String(decoding: data.prefix(90), as: UTF8.self)
-                    .replacingOccurrences(of: "\n", with: " ")
-                return "\(path) -> status=\(code) bytes=\(data.count) body=\(body)"
-            } catch {
-                return "\(path) -> EXC \(error.localizedDescription)"
-            }
-        }
-
-        for p in ["/__shell__/ping", "/__shell__/diag", "/zzz/plain", "/auth/login"] {
-            lines.append(await hit(p))
-        }
-        let ringLine = await hit("/diag-log?read=1")
-        lines.append("环(上述4发之后)=" + ringLine)
-        return lines.joined(separator: "\n")
+        var request = URLRequest(url: probe)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        web.load(request)
     }
 }
 

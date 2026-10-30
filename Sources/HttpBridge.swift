@@ -38,49 +38,20 @@ final class HttpBridge {
             return
         }
 
-        // DIAG-D（临时）：记录真正到达 listener 的请求（原始/归一 target + Host + UA 片段）。
-        let rawTarget0 = parsed.head.target
-        DiagLogRing.shared.append(Self.diagJSONLine([
-            "ev": "req",
-            "raw": rawTarget0,
-            "norm": HTTPHeadCodec.normalizedTarget(rawTarget0),
-            "host": parsed.head.header("host") ?? "",
-            "ua": String((parsed.head.header("user-agent") ?? "").prefix(40))
-        ]))
-
-        // DIAG-D（临时）：/diag-log 读取或清空到达日志环（普通路径，不带 __shell__ 前缀）。
-        let logPathPart = rawTarget0
-            .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
-        if parsed.head.method == "GET", logPathPart == "/diag-log" {
-            if rawTarget0.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-                .dropFirst().first?.contains("clear") == true {
-                DiagLogRing.shared.clear()
-                try? await client.write(Self.diagLogResponse(cleared: true))
-            } else {
-                try? await client.write(Self.diagLogResponse(entries: DiagLogRing.shared.snapshot()))
-            }
-            await client.close()
-            return
-        }
-
-        // S1 真机诊断（临时）：/__shell__/diag 回显反代真实收到的请求行要素。
-        // 必须在归一化之前判断并保留原始 target，用于定位 S1 文档内 XHR 的真实请求形态。
-        let rawTarget = parsed.head.target
-        let diagPath = "/__shell__/diag"
-        let diagPathPart = rawTarget
-            .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
-        if parsed.head.method == "GET",
-           diagPathPart.hasSuffix(diagPath)
-            || HTTPHeadCodec.normalizedTarget(rawTarget).hasPrefix(diagPath) {
-            try? await client.write(Self.diagResponse(head: parsed.head, rawTarget: rawTarget))
-            await client.close()
-            return
-        }
-
-        // WKWebView 在 loadHTMLString 文档内可能发 absolute-form 请求行（真机实测），
-        // 统一归一为 origin-form 后再做本地路由分流与上游透传（见 normalizedTarget）。
+        // S1 自检页：由反代本地下发，走真实 HTTP 导航（与产品壳完全同一条路径）。
+        // 历史教训：用 loadHTMLString(html, baseURL: loopback) 装载探针页时，WKWebView
+        // 对该文档的子资源/ fetch 请求行为不可靠（同一 URL 时而 200 时而空 404 且不进
+        // listener；真实导航文档则 100% 正常，见真机 18 件壳资产与 /app 文档体）。
+        // 因此探针页改为普通本地路由资源。
         var head = parsed.head
         head.target = HTTPHeadCodec.normalizedTarget(head.target)
+        let probePath = head.target.split(separator: "?", maxSplits: 1,
+                                          omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        if head.method == "GET", probePath == Self.s1ProbePath {
+            try? await client.write(Self.s1ProbeResponse())
+            await client.close()
+            return
+        }
 
         // 路由分流：本地壳资源
         if head.target.hasPrefix(ShellAssetRoutes.prefix),
@@ -129,52 +100,14 @@ final class HttpBridge {
         }
     }
 
-    /// DIAG-D（临时）：安全拼一行 JSON（键固定，值做转义）。
-    private static func diagJSONLine(_ fields: [String: String]) -> String {
-        func q(_ s: String) -> String {
-            s.replacingOccurrences(of: "\\", with: "\\\\")
-             .replacingOccurrences(of: "\"", with: "\\\"")
-        }
-        return "{" + fields.sorted { $0.key < $1.key }.map { k, v in
-            "\"\(k)\":\"\(q(v))\""
-        }.joined(separator: ",") + "}"
-    }
+    /// S1 自检页的本地路径（不加 `__shell__` 前缀，避免与白名单资产混在一起）。
+    static let s1ProbePath = "/__s1__/probe"
 
-    /// DIAG-D（临时）：/diag-log 应答。
-    private static func diagLogResponse(entries: [String] = [], cleared: Bool = false) -> Data {
-        let payload: String
-        if cleared {
-            payload = "{\"ok\":true,\"cleared\":true}"
-        } else {
-            func q(_ s: String) -> String {
-                s.replacingOccurrences(of: "\\", with: "\\\\")
-                 .replacingOccurrences(of: "\"", with: "\\\"")
-                 .replacingOccurrences(of: "\n", with: "\\n")
-            }
-            let lines = entries.map { "\"" + q($0) + "\"" }.joined(separator: ",")
-            payload = "{\"ok\":true,\"count\":\(entries.count),\"entries\":[\(lines)]}"
-        }
-        let body = Data(payload.utf8)
+    /// S1 自检页应答：真实 HTTP 文档（text/html），与产品壳相同的加载方式。
+    private static func s1ProbeResponse() -> Data {
+        let body = Data(S1ProbePage.html(loopbackOrigin: "").utf8)
         let h = HTTPHeadCodec.serializeResponse(status: 200, reason: "OK", headers: [
-            ("Content-Type", "application/json; charset=utf-8"),
-            ("Content-Length", "\(body.count)"),
-            ("Cache-Control", "no-store"),
-            ("Connection", "close")
-        ])
-        return h + body
-    }
-
-    /// S1 真机诊断（临时）：回显反代真实收到的请求行要素。
-    private static func diagResponse(head: HTTPRequestHead, rawTarget: String) -> Data {
-        func q(_ s: String) -> String {
-            s.replacingOccurrences(of: "\\", with: "\\\\")
-             .replacingOccurrences(of: "\"", with: "\\\"")
-        }
-        let body = Data("""
-        {"ok":true,"diag":true,"method":"\(q(head.method))","rawTarget":"\(q(rawTarget))","normalizedTarget":"\(q(HTTPHeadCodec.normalizedTarget(rawTarget)))","host":"\(q(head.header("host") ?? ""))"}
-        """.utf8)
-        let h = HTTPHeadCodec.serializeResponse(status: 200, reason: "OK", headers: [
-            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Type", "text/html; charset=utf-8"),
             ("Content-Length", "\(body.count)"),
             ("Cache-Control", "no-store"),
             ("Connection", "close")
