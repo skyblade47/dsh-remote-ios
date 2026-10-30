@@ -2,11 +2,16 @@ import Foundation
 
 enum S1ProbePage {
     /// Phase 5 五探针（全部以 localhost 反代为基准；`loopbackOrigin` 形如 http://127.0.0.1:<port>）。
-    static func html(loopbackOrigin: String) -> String {
+    static func html(loopbackOrigin: String, nativeDiag: String = "(未采集)") -> String {
         let expect = String(
             data: (try? JSONSerialization.data(withJSONObject: loopbackOrigin,
                                                options: [.fragmentsAllowed])) ?? Data(),
             encoding: .utf8) ?? "\"\""
+        // 原生侧真值（App 进程 URLSession 直连 127.0.0.1:<port>），JSON 字符串字面量，安全注入。
+        let native = String(
+            data: (try? JSONSerialization.data(withJSONObject: nativeDiag,
+                                               options: [.fragmentsAllowed])) ?? Data(),
+            encoding: .utf8) ?? "\"(编码失败)\""
         let slash = "/"
         return """
         <!doctype html><html><head><meta charset="utf-8">
@@ -22,10 +27,11 @@ enum S1ProbePage {
           code{background:#eee;padding:1px 4px;border-radius:4px}
         </style></head><body>
         <h2>S1 五探针报告（localhost 主线）</h2>
-        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-F ／ ④仍 A/B/C/D；⑥路径矩阵；⑦SW取证；⑧父文档vs真实iframe文档对照 A/B（不计五绿）</div>
+        <div class="d" style="margin:0 0 10px;color:#888">构建 DIAG-G ／ ④A/B/C/D；⑥路径矩阵；⑦SW取证；⑧文档对照+文档体；⑨原生URLSession真值（不计五绿）</div>
         <div id="out"></div>
         <script>
         const EXPECT = \(expect);
+        const NATIVE = \(native);
         const results = [];
         function record(name, pass, detail, isDiag){ results.push({name, pass, detail, diag: !!isDiag}); }
 
@@ -292,10 +298,19 @@ enum S1ProbePage {
                 out.ctrl = win.navigator.serviceWorker.controller.scriptURL;
               }
             } catch (e) { out.ctrl = 'EXC ' + e; }
+            // DIAG-G：真实文档的 body 长度/开头 —— 若为空则说明该导航本身吃到了空 404（空白页）
+            let docLen = -1, docHead = '(读不到)';
+            try {
+              const b = win.document.body;
+              const t = (b ? (b.innerText || b.textContent || '') : '').replace(/\\s+/g, ' ').trim();
+              docLen = t.length;
+              docHead = t.slice(0, 60);
+            } catch (e) { docHead = 'EXC ' + e; }
             return new Promise(resolve => {
               let done = false;
               const finish = () => { if(done) return; done = true;
-                resolve('sw=' + out.sw + ' ctrl=' + (out.ctrl||'(无)') + ' fetch=' + out.fetch); };
+                resolve('sw=' + out.sw + ' ctrl=' + (out.ctrl||'(无)') + '\\n      doc=' + docLen
+                        + ' "' + docHead + '"\\n      fetch=' + out.fetch); };
               (async () => {
                 try {
                   const r = await win.fetch('/__shell__/ping?m=' + marker + '&t=' + Date.now(),
@@ -332,8 +347,12 @@ enum S1ProbePage {
           L.push('L1 /auth/login 真实文档: ' + await runIframe('/auth/login?t=' + Date.now(), 'L1'));
           L.push('A1 /app 真实文档(注册SW): ' + await runIframe('/app#/?t=' + Date.now(), 'A1'));
 
+          // N1：iframe **直接导航**到本地壳路由，读导航后文档体 —— 这是导航通道 vs fetch 通道的硬对照。
+          //     若这里 doc 显示 pong，说明 WebKit 导航通道完全正常，只有 fetch/XHR 通道被拦。
+          L.push('N1 iframe 导航 /__shell__/ping: ' + await runIframe('/__shell__/ping?m=N1&t=' + Date.now(), 'N1'));
+
           // P2：两个 iframe（尤其 /app）之后父页再 ping
-          L.push('P2 父页(两iframe之后): ' + await parentFetch('P2'));
+          L.push('P2 父页(多iframe之后): ' + await parentFetch('P2'));
 
           // 读环（父页通道）
           let ring = '(取环失败)';
@@ -343,6 +362,11 @@ enum S1ProbePage {
           } catch (e) { ring = '取环 EXC ' + e; }
           L.push('到达环: ' + ring);
           record('⑧ 父文档 vs 真实 iframe 文档 A/B（信息项）', true, L.join('\\n'), true);
+
+          // ⑨ DIAG-G：原生 App 进程 URLSession 直连 127.0.0.1:<port> 的真值（在页面加载前采集）。
+          //    这是不经过 WebKit 的独立通道：若这里 ping 得到 pong，则 listener/反代完全健康，
+          //    404 空 body 只能是 WebKit 侧合成；若这里也 404/空，则本端口上应答的不是我们的 HttpBridge。
+          record('⑨ 原生 URLSession 直连真值（信息项）', true, NATIVE, true);
         }
 
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。
@@ -365,7 +389,7 @@ enum S1ProbePage {
           el.innerHTML = results.map(r =>
             '<div class="r"><div class="b ' + (r.diag ? 'z' : (r.pass?'g':'x')) + '"></div><div>' +
             '<div class="t">' + r.name + '</div><div class="d">' + r.detail + '</div></div></div>'
-          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥⑦⑧为临时诊断信息项）。</div>';
+          ).join('') + '<div class="d">①–⑤全绿才算 Phase 5 主线通过（⑥⑦⑧⑨为临时诊断信息项）。</div>';
           const core = results.filter(r => !r.diag);
           const allGreen = core.length === 5 && core.every(r => r.pass);
           if (window.webkit && window.webkit.messageHandlers.s1Report) {
