@@ -162,6 +162,7 @@
 
 - [ ] **6.1** 前后台：前台节点常驻；进后台按 iOS 预算保活（复用 BackgroundFlusher 的 beginBackgroundTask 思路做一次 flush，不强保节点）；回前台按 Phase 2.6 结论**主动重建** loopback/数据面（必要时重 bind/重 dial/重 up），重建期间壳显示「tailnet 重连中」浮层，不假装在线；重连成功自动恢复。
 - [ ] **6.2** 三档通道状态机：①内嵌节点 P2P（默认）②DERP(sha) 自动兜底（tsnet 内部，UI 只表现为①的连通/延迟）③Funnel https 应急（节点未认证/持续失败时，允许切到现有手输 Funnel 域，WKWebView 直连不经节点）。切换与失败文案沿用「失败上屏」；记录每档可达性与切换耗时。
+      — 2026-10-31 遗留登记（用户拍板，本 Phase 不查）：**PC 端网关 `100.99.84.35:8080` ETIMEDOUT** —— 等内嵌节点线路推广到 PC 端与安卓端时，三端一并排查；iPad 端 2.3 真机已证该口经 tailnet 可达（WiFi 200/1370ms），问题暂仅 PC 侧。
 - [ ] **6.3 上传同步端到端（北极星）**：弱网/断网编辑 → writeDoc 本地落盘 + outbox 入队（既有，零改）→ 回网/通道恢复后 outbox drain 经 localhost 反代 → `POST /writing-studio/api/clientZoneSave` 到 dsh-cloud → 成功出队。验证 P2P 与 DERP 两档下都能 drain；线路③应急时 drain 行为如实（Funnel 通则同路径，不通则留队不丢）。
 - [ ] **6.4** 自动保存压力：长文连续编辑、切后台、弱网丢包/高延迟（弱网仪或 Network Link Conditioner）下无丢稿、无重复、无卡死；outbox 计数与服务端最终一致。
 - [ ] **6.5** 内核可用性（在同步之后验证）：内核页插件批量加载、二次启动（同 rev 再开/弱网/断网回网）受益于方案 A 缓存 + 新通道；记录冷载/热启耗时，与 Funnel 基线（spec §8.1：冷 45s / 热 10s）对比（**不承诺突破 EIP 带宽物理上限**，只承诺成功率与冗余）。
@@ -237,3 +238,4 @@
     - 首版 commit `f181435` 用 `export IPHONEOS_DEPLOYMENT_TARGET=17.0` 透传，**run 40345456800 gate 红证伪**：脚本与 gate 的 vtool 取证三切片全部仍 minos 18.1。根因：xcodebuild build setting 优先级「命令行参数 > pbxproj 工程显式值 > 环境变量」，上游 pbxproj 6 处显式 18.1 压制环境变量；上游 Makefile 钉死在 libtailscale 仓内、命令行不可注入。另经 gh api 核查 Go c-archive 侧由 `clangwrap-ios*.sh -mios-version-min=12.0` 编译（minos 12.0），压 Swift 侧到 17.0 无版本冲突。
     - 修复 commit `30de721`：checkout 后、`make ios-fat` 前用 BSD `sed -i ''` 把 pbxproj 6 处 `IPHONEOS_DEPLOYMENT_TARGET = 18.1;` 批量改 17.0，grep BEFORE/AFTER 计数守卫（BEFORE=0 或 AFTER<BEFORE 即 exit 1，上游改写法时 CI 直接红而非静默回退）；脚本头/VERSION/workflow 注释同步改为 sed 口径并留痕失败方案。
     - **run 40348072732 全绿**（gate 4m3s）：日志「替换前 18.1 行数=6，替换后 17.0 行数=6」；vtool IOS + IOSSIMULATOR×2 三切片均 `minos 17.0`，`SLICE_CHECK=PASS`/`MINOS17_CHECK=PASS`；build 233 模拟器测试 0 失败（20.860s）、Release iphoneos 链接行 `arm64-apple-ios17.0` 且全日志零 deployment target warning、`LINK_CHECK=PASS`（embed dylib 22,356,392B、`_tailscale_dial/new` 导出齐全）、ipa 8,862,807B（留档 `E:\项目\dsh-spike\run40348072732\`）。3.1 勾选。下一 Phase **3.2**：`TailnetAuthStore`（Keychain）+ App 级 `TailnetNode` 单例状态机（产品铁律：节点生命周期独立于任何页面，不再挂 spike sheet 的 @StateObject）。
+- 2026-10-31：**Phase 5 收口后进入 Phase 6**。Phase 5 S1 五探针真机①–⑤全绿（探针④ C 子项 8s 超时已定性为探针自身缺陷：WKWebView 对 JS 动态发起的 `/__shell__/*` 请求合成空 404 不进 listener；产品壳只走真实导航/声明式子资源/上游路径三条可靠通道，不受影响），代码头 `8cb4586`（CI run 41168246679 绿，ipa 8,785,078B），plan/spec 回填提交 d8fdd4a / fa019a7，两仓已 push。开工 **6.1 前后台重建**。PC 端网关 ETIMEDOUT 按用户决策登记在 6.2 注记、本 Phase 不排查。
