@@ -16,6 +16,11 @@ enum S1ProbePage {
         <!doctype html><html><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
         <title>S1</title>
+        <!-- ④ 声明式子资源（与产品壳 shell.html 完全相同的加载机制，parser-initiated）。
+             真机实测：JS 动态发起的 fetch / 动态 <script> 打向 /__shell__/* 会被 WKWebView
+             合成空 404（不进反代）；而文档里声明的 <link>/<script> 与导航则正常。 -->
+        <link rel="stylesheet" href="/__shell__/ipad.css?m=L" onload="window.__s1Link=1" onerror="window.__s1LinkErr=1">
+        <script src="/__shell__/writing-count-core.js?m=S" onload="window.__s1Script=1" onerror="window.__s1ScriptErr=1"></script>
         <style>
           body{font:-apple-system,Sans-serif;margin:0;padding:16px;background:#f6f7f9;color:#111}
           h2{font-size:18px;margin:0 0 12px}
@@ -72,63 +77,55 @@ enum S1ProbePage {
           });
         }
 
-        // ④ 壳资产本地可达：/__shell__/* 由反代 ShellAssetRoutes 本地应答（不拨上游）。
-        //    真机证据：真实导航文档里该路由 100% 可靠（产品壳 18 件资产 <script>/<link>
-        //    全部命中）；旧的 loadHTMLString 文档会随机合成空 404，故探针页已改为本地下发。
-        //    - ping 用 fetch 校验本地路由应答；
-        //    - ipad.js 用 <script> 标签注入（产品壳真实子资源机制）；
-        //    - 原 B/D 同步 XHR 已由探针⑤ dsh-bridge:// 单独验证，不再重复。
+        // ④ 本地壳路由可达：/__shell__/* 由反代 ShellAssetRoutes 本地应答（不拨上游）。
+        //    真机证据链：产品壳 shell.html 的 18 件资产（文档里声明的 <link>/<script>）全部命中；
+        //    而 JS 动态发起的 fetch / createElement('script') 打向 /__shell__/* 会被合成空 404。
+        //    故本探针改用与产品壳完全相同的三种通道：
+        //      A 页面自身就是本地路由下发的文档（location.pathname 在 /__shell__/ 下）；
+        //      B 文档里声明的 <link>/<script>（parser-initiated，见 head 里的 onload 标志）；
+        //      C iframe 导航到 /__shell__/ping 并读文档体。
         async function probeShellAsset(){
           const lines = [];
           let pass = true;
 
-          // A：fetch 同前缀本地路由 /__shell__/ping（应回 JSON pong，且绝不该拨上游）
-          try {
-            const r = await fetch('/__shell__/ping?m=A&t=' + Date.now(), {cache:'no-store'});
-            const b = await r.text();
-            const ok = r.status === 200 && b.indexOf('pong') !== -1;
-            if (!ok) pass = false;
-            lines.push('A fetch /__shell__/ping: status=' + r.status + ' bytes=' + b.length
-                       + (ok ? ' (pong)' : ' body=' + b.slice(0, 120)));
-          } catch (e) { pass = false; lines.push('A fetch /__shell__/ping: EXC ' + e); }
+          // A：页面自身来自本地路由
+          const p = document.location.pathname;
+          const selfLocal = p.indexOf('/__shell__/') === 0;
+          if (!selfLocal) pass = false;
+          lines.push('A 页面自身本地下发: ' + (selfLocal ? '是' : '否') + ' (' + p + ')');
 
-          // B：跨前缀对照 —— 同一本地路由但换到非 /__shell__/ 路径（/__s1__/probe 已下线，
-          //    这里打根路径 /，期望是反代上游应答；仅作为"前缀敏感"规律的对照组，不计入 pass）
-          try {
-            const r = await fetch('/?m=B&t=' + Date.now(), {cache:'no-store'});
-            const b = await r.text();
-            lines.push('B fetch /（对照）: status=' + r.status + ' bytes=' + b.length);
-          } catch (e) { lines.push('B fetch /（对照）: EXC ' + e); }
+          // B：声明式子资源（onload 由 HTML 源里的属性置位）
+          const link = window.__s1Link === 1 ? 'ok'
+                     : (window.__s1LinkErr === 1 ? 'onerror' : '未触发');
+          const scr = window.__s1Script === 1 ? 'ok'
+                    : (window.__s1ScriptErr === 1 ? 'onerror' : '未触发');
+          if (link !== 'ok' || scr !== 'ok') pass = false;
+          lines.push('B 声明式 <link ipad.css: ' + link
+                     + ' ／ <script writing-count-core.js: ' + scr);
 
-          // C：<script> 标签注入 /__shell__/ipad.js（产品壳真实子资源机制）
-          try {
-            const script = new Promise((resolve) => {
-              let done = false;
-              const s = document.createElement('script');
-              const finish = (ok, detail) => {
-                if (done) return; done = true;
-                if (s.parentNode) s.parentNode.removeChild(s);
-                resolve({ok, detail});
-              };
-              s.onload = () => setTimeout(() => {
-                // ipad.js 的 IIFE 只把 window.__wciPadShell = true 暴露在全局
-                // （gatewayConfigured 等是内部函数，不挂 window）。
-                const ok = window.__wciPadShell === true;
-                finish(ok, ok
-                  ? 'ipad.js 加载成功（__wciPadShell=true）'
-                  : 'ipad.js onload 但 __wciPadShell 未设');
-              }, 100);
-              s.onerror = () => finish(false, 'ipad.js script.onerror');
-              setTimeout(() => finish(false, 'ipad.js 8s 超时'), 8000);
-              s.src = '/__shell__/ipad.js?m=C&t=' + Date.now();
-              document.head.appendChild(s);
-            });
-            const res = await script;
-            if (!res.ok) pass = false;
-            lines.push('C <script> ipad.js: ' + res.detail);
-          } catch (e) { pass = false; lines.push('C <script> ipad.js: EXC ' + e); }
+          // C：iframe 导航到本地路由（导航通道）并读文档体
+          const nav = await new Promise(resolve => {
+            const f = document.createElement('iframe');
+            f.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0';
+            let done = false;
+            const finish = (ok, detail) => {
+              if (done) return; done = true; f.remove(); resolve({ok, detail});
+            };
+            f.onload = () => {
+              try {
+                const t = (f.contentWindow.document.body.textContent || '').trim();
+                finish(t.indexOf('pong') !== -1, 'body=' + t.slice(0, 60));
+              } catch (e) { finish(false, '读 body EXC ' + e); }
+            };
+            setTimeout(() => finish(false, '8s 超时（导航未 onload）'), 8000);
+            f.src = '/__shell__/ping?m=N&t=' + Date.now();
+            document.body.appendChild(f);
+          });
+          if (!nav.ok) pass = false;
+          lines.push('C iframe 导航 /__shell__/ping: ' + (nav.ok ? 'pong' : 'FAIL')
+                     + ' ' + nav.detail);
 
-          record('④ 本地壳路由（/__shell__/ping + script 注入 ipad.js）', pass, lines.join('\\n'));
+          record('④ 本地壳路由（自体本地下发 + 声明式子资源 + 导航）', pass, lines.join('\\n'));
         }
 
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。
