@@ -212,6 +212,17 @@ final class TailnetNodeTests: XCTestCase {
         }
     }
 
+    /// 等 .starting **且**首个 bringUp 已真正进入后端（calls 已记录）。
+    /// 仅等 .starting 不够：bringUp 在 MainActor 上同步先置 .starting，随后才 enqueue
+    /// 工人 Task 跨 actor 调 backend.bringUp；CI 慢机上工人可能尚未执行到 calls.append，
+    /// 此时立刻断言 callCount 会偶发读到 0（starting 守卫用例的抖动根因）。
+    private func waitForBringUpEntered(_ node: TailnetNode, _ backend: FakeTailnetBackend) async {
+        for _ in 0..<300 {
+            if case .starting = node.state, await backend.callCount() >= 1 { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
     /// 4.1：online 后桥在独立 Task 里起（真 NWListener bind 127.0.0.1），轮询等其离开 .starting。
     private func waitForBridge(_ node: TailnetNode) async {
         for _ in 0..<300 {
@@ -439,7 +450,7 @@ final class TailnetNodeTests: XCTestCase {
         let node = makeNode(backend)
 
         Task { await node.signIn(authKey: "tskey-a") }
-        await waitForStarting(node)
+        await waitForBringUpEntered(node, backend)
 
         // starting 中第二次提交：直接被守卫忽略，不新建后端、不替换凭据。
         await node.signIn(authKey: "tskey-b")
@@ -461,7 +472,7 @@ final class TailnetNodeTests: XCTestCase {
         let node = makeNode(backend)
 
         Task { await node.signIn(authKey: "tskey-a") }
-        await waitForStarting(node)
+        await waitForBringUpEntered(node, backend)
         await node.retry()
         let calls = await backend.callCount()
         XCTAssertEqual(calls, 1)
