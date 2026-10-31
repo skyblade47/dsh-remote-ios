@@ -19,8 +19,10 @@ enum Cfg {
 
 extension Notification.Name {
     /// 设置弹层保存了新网关（Funnel 应急地址）。Phase 5 起 localhost 壳 origin 恒定，
-    /// 不再据此重建 WebView；通知保留给三档通道（Task 6.2）应急切换使用。
+    /// 不再据此重建 WebView；RouteStore 6.2 监听它刷新 Funnel 目标。
     static let dshGatewayChanged = Notification.Name("dsh.gatewayChanged")
+    /// 6.2：状态页「去 TS 设置 Funnel 应急地址」按钮（无壳可够到 Web 设置弹层）⇒ 打开原生设置页。
+    static let dshOpenTailnetSettings = Notification.Name("dsh.openTailnetSettings")
 }
 
 /// 跨 SwiftUI 视图边界共享的壳会话：让 RootView 的 scenePhase 事件够到
@@ -46,6 +48,9 @@ struct DSHRemoteApp: App {
         // 有历史态/Keychain 凭据则冷启动自动恢复，否则停在未认证等 3.3 设置页喂 key。
         // autoStart 本身只做本地探测并 fire-and-forget，up 阻塞全在后端 detached 任务里。
         TailnetNode.shared.autoStart()
+
+        // 6.2：触碰三档路由单例，建立对节点桥状态/网关变更的订阅（与节点同纪律，独立于页面）。
+        _ = RouteStore.shared
     }
 
     var body: some Scene {
@@ -59,6 +64,8 @@ struct RootView: View {
     @StateObject private var session = ShellSession()
     // Phase 5：壳固定走 localhost 反代，观察节点桥状态驱动装载（只观察、不持有节点）。
     @ObservedObject private var node = TailnetNode.shared
+    // 6.2：观察三档通道路由（内嵌壳 / Funnel 应急 / 状态页）。
+    @ObservedObject private var routeStore = RouteStore.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var titleTaps = 0
@@ -98,9 +105,11 @@ struct RootView: View {
 
             Divider()
 
-            // Phase 5：localhost origin 恒定，壳不再因网关配置变化重建；
-            // 桥状态（starting/running/failed）由 ShellWebView 内部驱动装载与状态页。
-            ShellWebView(session: session, bridge: node.bridge)
+            // 6.2：ShellWebView 按三档路由装载；bridge 仅驱动同档瞬时状态（重连浮层/状态页）。
+            ShellWebView(session: session,
+                         bridge: node.bridge,
+                         route: routeStore.route,
+                         funnelReady: routeStore.funnelReady)
                 .ignoresSafeArea(edges: .bottom)
         }
         .onChange(of: scenePhase) { _, phase in
@@ -129,6 +138,10 @@ struct RootView: View {
         // Phase 3.3：Tailscale 认证产品设置页（观察 App 级单例，不持有节点）
         .sheet(isPresented: $showTS) {
             TailnetSettingsView()
+        }
+        // 6.2：状态页「去 TS 设置 Funnel 应急地址」⇒ 打开同一原生设置页。
+        .onReceive(NotificationCenter.default.publisher(for: .dshOpenTailnetSettings)) { _ in
+            showTS = true
         }
     }
 }

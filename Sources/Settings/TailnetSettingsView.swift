@@ -14,11 +14,17 @@ import SwiftUI
 
 struct TailnetSettingsView: View {
     @ObservedObject private var node = TailnetNode.shared
+    // 6.2：应急开关/路由状态（Funnel 地址本身存 UserDefaults "gateway"，与壳弹层同一处）。
+    @ObservedObject private var routeStore = RouteStore.shared
     @Environment(\.dismiss) private var dismiss
 
     // key 只活在这个 @State：点「入网」后立刻置空，不落盘、不进日志。
     @State private var authKeyInput: String = ""
     @State private var showWipeConfirm = false
+
+    // 6.2 Funnel 应急地址输入（https origin）；保存时归一化校验。
+    @State private var funnelInput: String = ""
+    @State private var funnelError: String?
 
     var body: some View {
         NavigationStack {
@@ -107,6 +113,39 @@ struct TailnetSettingsView: View {
                     Text("Tailscale 认证")
                 }
 
+                // 6.2 三档通道之③：Funnel https 应急直连（仅节点未认证/持续故障时手动启用）。
+                Section {
+                    TextField("https://xxx.ts.net", text: $funnelInput)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    if let funnelError {
+                        Text(funnelError).font(.footnote).foregroundStyle(.red)
+                    }
+                    Button {
+                        saveFunnel()
+                    } label: {
+                        Label("保存应急地址", systemImage: "tray.and.arrow.down")
+                    }
+                    .disabled(funnelInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Toggle(isOn: Binding(
+                        get: { routeStore.emergencyEnabled },
+                        set: { routeStore.setEmergency($0) }
+                    )) {
+                        Text("使用应急通道")
+                    }
+                    .disabled(!routeStore.funnelReady)
+                    Text("节点未入网或内网通道持续故障时，可手动开启应急通道，直接打开网关自己的网页版本（需在该页重新登录）。此模式不加载本地壳，未上传的草稿仍安全保留，恢复内网后自动同步。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Funnel 应急通道")
+                } footer: {
+                    if routeStore.funnelReady {
+                        Text("已配置：\(Cfg.gateway)")
+                    }
+                }
+
                 Section("维护") {
                     Button {
                         Task { await node.retry() }
@@ -147,6 +186,10 @@ struct TailnetSettingsView: View {
             }
             .navigationTitle("Tailscale 内网")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                // 进入页面回填已保存的 Funnel 地址（与壳内设置弹层共用 UserDefaults "gateway"）。
+                if funnelInput.isEmpty { funnelInput = Cfg.gateway }
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
@@ -169,6 +212,19 @@ struct TailnetSettingsView: View {
 
     private var trimmedInput: String {
         authKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 6.2：归一化校验 Funnel https 地址后落 UserDefaults，并通知 RouteStore 立即重算。
+    private func saveFunnel() {
+        do {
+            let origin = try GatewayURL.normalize(funnelInput)
+            funnelInput = origin
+            funnelError = nil
+            Cfg.gateway = origin
+            NotificationCenter.default.post(name: .dshGatewayChanged, object: nil)
+        } catch {
+            funnelError = (error as? LocalizedError)?.errorDescription ?? "网关地址不合法"
+        }
     }
 
     // State 带关联值（online/failed），与无关联值成员比较统一走模式匹配。

@@ -22,8 +22,19 @@ struct ShellWebView: UIViewRepresentable {
     let session: ShellSession
     /// 当前 localhost 反代状态（由 App 侧观察 TailnetNode.shared.bridge 后传入）。
     let bridge: TailnetNode.BridgeState
+    /// 6.2 三档通道路由：.embedded 装 localhost 壳 / .funnel 直连网关网页 / nil 放状态页。
+    let route: AppRoute?
+    /// 是否已配置合法 Funnel 地址（决定 stopped/failed 状态页能否给「应急连接」按钮）。
+    let funnelReady: Bool
 
-    func makeCoordinator() -> Coordinator { Coordinator(session: session) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(session: session,
+                    useEmergency: { Task { @MainActor in RouteStore.shared.setEmergency(true) } },
+                    exitEmergency: { Task { @MainActor in RouteStore.shared.setEmergency(false) } },
+                    openSettings: {
+                        NotificationCenter.default.post(name: .dshOpenTailnetSettings, object: nil)
+                    })
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -50,14 +61,14 @@ struct ShellWebView: UIViewRepresentable {
         // ③ 桥在此创建并注册（早于壳加载）；dispatcher 不可用时 attach 内部空操作
         context.coordinator.attach(to: web)
 
-        // ② 按桥当前状态装载壳或状态页
-        context.coordinator.apply(bridge, to: web)
+        // ② 按三档路由装载：内嵌壳 / Funnel 直连页 / 状态页
+        context.coordinator.apply(route: route, bridge: bridge, funnelReady: funnelReady, to: web)
         return web
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
-        // 桥状态变化（starting→running→failed）驱动装载/状态页；壳本身不因网关变化重建。
-        context.coordinator.apply(bridge, to: web)
+        // 路由/桥状态变化驱动装载；同一档内的瞬时状态（reconnecting）不重建页面。
+        context.coordinator.apply(route: route, bridge: bridge, funnelReady: funnelReady, to: web)
     }
 
     static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
@@ -71,18 +82,35 @@ struct ShellWebView: UIViewRepresentable {
         private let dispatcher: BridgeDispatcher?
         private let session: ShellSession
 
-        /// 当前已装载的反代 base；壳成功加载后非空，桥重启换端口时随之重载。
+        /// 当前已装载的反代 base；内嵌壳成功加载后非空，桥重启换端口时随之重载。
         private var loadedBase: String?
-        /// 当前展示的状态页标识（nil 表示壳/非状态页）；相同状态不重复 loadHTMLString。
+        /// 6.2 当前已装载的 Funnel origin（应急档）；与 loadedBase 互斥，切档时清空。
+        private var loadedFunnel: URL?
+        /// 当前展示的状态页标识（nil 表示壳/funnel/非状态页）；相同状态不重复 loadHTMLString。
         private var statusShown: String?
         /// 6.1 回前台重建浮层（盖在壳上，不拆壳）；非重建态置 nil 并移除。
         private var reconnectOverlay: UIView?
+        /// 6.2 应急档顶部「返回内网」原生条（只在 funnel 页上盖）。
+        private var funnelBanner: UIView?
+
+        /// 状态页「应急连接」按钮回调（由 RouteStore 切应急档）。
+        private let useEmergency: () -> Void
+        /// 应急条「返回内网」回调。
+        private let exitEmergency: () -> Void
+        /// 状态页「去设置」回调（未配置 Funnel 时打开 Tailscale 设置页）。
+        private let openSettings: () -> Void
 
         static let appVersion: String =
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
 
-        init(session: ShellSession) {
+        init(session: ShellSession,
+             useEmergency: @escaping () -> Void,
+             exitEmergency: @escaping () -> Void,
+             openSettings: @escaping () -> Void) {
             self.session = session
+            self.useEmergency = useEmergency
+            self.exitEmergency = exitEmergency
+            self.openSettings = openSettings
             // dataDir=Documents 根（config.json/outbox.json/drafts/proofread/sync 直接在根）。
             // 沙盒多工作区：容器 Documents/workspace，其下每个子目录是一个工作区，
             // 当前工作区名持久化在 config.json 的 currentWorkspace。
@@ -117,48 +145,105 @@ struct ShellWebView: UIViewRepresentable {
 
         // MARK: - 壳装载（localhost 反代状态机）
 
-        /// 按 TailnetNode.bridge 状态驱动 WebView：
-        /// - running(base)：装载反代壳（base 变化即重载，适配桥重启换动态端口）；
-        /// - reconnecting（6.1 回前台重建）：已装壳则盖原生「tailnet 重连中」浮层，**不拆壳、
-        ///   不假装在线**；未装壳（极端时序）才放一张重连状态页；
-        /// - starting/stopped：等待页；
-        /// - failed：失败页（引导去右上「TS」设置页入网/重试）。
-        /// 节点运行中 bridge 偶发短暂变更时不主动拆已装好的壳，避免无谓白屏；
-        /// 只有在尚未装好壳时才放等待/失败状态页。
-        func apply(_ state: TailnetNode.BridgeState, to webView: WKWebView) {
-            switch state {
-            case .running(let base):
+        /// 6.2：按三档路由（AppRoute）驱动 WebView，bridge 仅用于同档瞬时状态（重连浮层）。
+        /// - .embedded：running 时装 localhost 反代壳（base 变化即重载）；reconnecting 已装壳
+        ///   则盖原生「tailnet 重连中」浮层，**不拆壳、不假装在线**；
+        /// - .funnel：直连用户手输的 Funnel https origin，**不套壳、不注入 BridgeJS**，
+        ///   顶部盖「应急通道·返回内网」原生条；
+        /// - nil：等待/未连接/失败状态页（failed 页带「改用 Funnel 应急连接」入口）。
+        /// 切档（embedded↔funnel↔nil）才重新装载；同档内的 bridge 瞬时变化不重建页面。
+        /// 最近一次 apply 入参：状态页/应急失败页的「重试」按钮据此原地回放（不依赖外部再推）。
+        private var lastApply: (route: AppRoute?, bridge: TailnetNode.BridgeState, funnelReady: Bool)?
+
+        func apply(route: AppRoute?, bridge: TailnetNode.BridgeState,
+                   funnelReady: Bool, to webView: WKWebView) {
+            lastApply = (route, bridge, funnelReady)
+            switch route {
+            case .embedded(let base):
+                applyEmbedded(base: base, bridge: bridge, to: webView)
+            case .funnel(let url):
+                applyFunnel(url: url, bridge: bridge, to: webView)
+            case nil:
+                applyStatusOnly(bridge: bridge, funnelReady: funnelReady, to: webView)
+            }
+        }
+
+        /// ①②内嵌主线：running 装 localhost 壳；reconnecting 只盖浮层；其余状态在已装壳时
+        /// 不应出现（路由决策层会把 stopped/failed 切走），保险起见不拆壳。
+        private func applyEmbedded(base: String, bridge: TailnetNode.BridgeState, to webView: WKWebView) {
+            hideFunnelBanner(in: webView)
+            switch bridge {
+            case .reconnecting:
+                if loadedBase != nil {
+                    showReconnectOverlay(in: webView)
+                } else {
+                    showStatus("reconnecting", page: Self.reconnectingPage, in: webView)
+                }
+            case .running:
                 hideReconnectOverlay()
                 guard loadedBase != base else { return }
                 guard let shellURL = URL(string: base)?.appendingPathComponent("/__shell__/shell.html") else {
                     NSLog("[dsh-ios] 反代 base 非法：\(base)")
                     return
                 }
+                // 从应急档切回：先清 funnel 标记，再装 document-start 桥脚本并装载壳。
+                loadedFunnel = nil
                 loadedBase = base
                 statusShown = nil
                 installBridgeScript(state: "running", base: base, reachable: true, in: webView)
                 var request = URLRequest(url: shellURL)
                 request.cachePolicy = .reloadIgnoringLocalCacheData
                 webView.load(request)
-            case .reconnecting:
-                if loadedBase != nil {
-                    // 壳保持原样（不白屏），只盖一层不可交互的重连浮层表明此刻未在线。
-                    showReconnectOverlay(in: webView)
-                } else {
-                    showStatus("reconnecting", page: Self.reconnectingPage, in: webView)
-                }
+            default:
+                // starting/stopped/failed：壳若已在屏上则保持（路由层正常已切走，不会到这）。
+                hideReconnectOverlay()
+            }
+        }
+
+        /// ③Funnel 应急：直接加载网关自己的网页应用 origin。**不 removeAllUserScripts 之外
+        /// 不做任何注入**——切出内嵌时清掉 BridgeJS，保证 funnel 页拿不到 ownsHost/dshBridge。
+        private func applyFunnel(url: URL, bridge: TailnetNode.BridgeState, to webView: WKWebView) {
+            hideReconnectOverlay()
+            // 应急档期间内网节点可能在重试入网（starting），但绝不因此拆应急页/盖内网浮层。
+            _ = bridge
+            guard loadedFunnel != url else {
+                showFunnelBanner(in: webView)
+                return
+            }
+            // 切档：卸下内嵌壳的 document-start 桥脚本与装载标记，状态页标记也清掉。
+            webView.configuration.userContentController.removeAllUserScripts()
+            loadedBase = nil
+            statusShown = nil
+            loadedFunnel = url
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            webView.load(request)
+            showFunnelBanner(in: webView)
+        }
+
+        /// 无线路：按 bridge 放等待/状态页。stopped/failed 且已配置 Funnel 时给应急入口。
+        private func applyStatusOnly(bridge: TailnetNode.BridgeState,
+                                     funnelReady: Bool, to webView: WKWebView) {
+            hideReconnectOverlay()
+            hideFunnelBanner(in: webView)
+            // 从 funnel/壳掉回状态页：清装载标记，保证后续重连能重新装载。
+            loadedBase = nil
+            loadedFunnel = nil
+            // 状态页 key 带 funnelReady：用户在设置页保存/清空 Funnel 后按钮形态要随之刷新。
+            let suffix = funnelReady ? ":funnel" : ":none"
+            switch bridge {
             case .starting:
-                hideReconnectOverlay()
-                guard loadedBase == nil else { return }
                 showStatus("starting", page: Self.startingPage, in: webView)
+            case .reconnecting:
+                showStatus("reconnecting", page: Self.reconnectingPage, in: webView)
             case .stopped:
-                hideReconnectOverlay()
-                guard loadedBase == nil else { return }
-                showStatus("stopped", page: Self.stoppedPage, in: webView)
+                showStatus("stopped\(suffix)", page: Self.stoppedPage(funnelReady: funnelReady), in: webView)
             case .failed(let reason):
-                hideReconnectOverlay()
-                guard loadedBase == nil else { return }
-                showStatus("failed", page: Self.failedPage(reason), in: webView)
+                showStatus("failed:\(reason)\(suffix)",
+                           page: Self.failedPage(reason, funnelReady: funnelReady), in: webView)
+            case .running:
+                // running 但路由为 nil 不应发生（running 恒为 .embedded）；保险放等待页。
+                showStatus("starting", page: Self.startingPage, in: webView)
             }
         }
 
@@ -234,6 +319,64 @@ struct ShellWebView: UIViewRepresentable {
             reconnectOverlay = nil
         }
 
+        // MARK: - 6.2 应急档原生条 / 状态页按钮 scheme
+
+        /// 应急档顶部条：告知当前在 Funnel 降级线上，并提供「返回内网」。
+        /// 盖在 WebView 顶部（页面自身不知道存在应急态，网关网页不改一行）。
+        private func showFunnelBanner(in webView: WKWebView) {
+            if funnelBanner != nil { return }
+            let bar = UIView()
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            bar.backgroundColor = UIColor.systemOrange
+            let label = UILabel()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.text = "应急通道（Funnel）· 本地草稿将在恢复内网后同步"
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 12, weight: .medium)
+            label.lineBreakMode = .byTruncatingTail
+            let button = UIButton(type: .system)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.setTitle("返回内网", for: .normal)
+            button.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+            button.setTitleColor(.white, for: .normal)
+            button.backgroundColor = UIColor.white.withAlphaComponent(0.22)
+            button.layer.cornerRadius = 6
+            button.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+            button.addAction(UIAction { [weak self] _ in self?.exitEmergency() }, for: .touchUpInside)
+            bar.addSubview(label)
+            bar.addSubview(button)
+            webView.addSubview(bar)
+            NSLayoutConstraint.activate([
+                bar.topAnchor.constraint(equalTo: webView.topAnchor),
+                bar.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
+                bar.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
+                button.topAnchor.constraint(equalTo: bar.topAnchor, constant: 6),
+                button.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -6),
+                button.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
+                label.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+                label.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10)
+            ])
+            funnelBanner = bar
+            // 让网页内容从条下方开始滚动（bar 高度约 38pt + 安全区由 WKWebView 自身 inset 处理）。
+            var inset = webView.scrollView.contentInset
+            inset.top = max(inset.top, 44)
+            webView.scrollView.contentInset = inset
+            webView.scrollView.scrollIndicatorInsets = inset
+        }
+
+        private func hideFunnelBanner(in webView: WKWebView) {
+            guard funnelBanner != nil else { return }
+            funnelBanner?.removeFromSuperview()
+            funnelBanner = nil
+            var inset = webView.scrollView.contentInset
+            if inset.top >= 44 {
+                inset.top -= 44
+                webView.scrollView.contentInset = inset
+                webView.scrollView.scrollIndicatorInsets = inset
+            }
+        }
+
         // MARK: - 导航观测
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -251,15 +394,50 @@ struct ShellWebView: UIViewRepresentable {
             handleShellFailure(error)
         }
 
-        /// 壳加载失败且错误非主动取消时，清空 loadedBase，使后续 running（新端口）能重载；
-        /// 桥若仍标记 running，本拍补一张失败页给出可感知反馈（不静默白屏）。
+        /// 装载失败（内嵌壳或 Funnel）且非主动取消时清标记，使下一拍能重载。
+        /// Funnel 失败补一张应急失败页（带重试/返回内网/去设置，不静默白屏）；内嵌失败仍走原失败页。
         private func handleShellFailure(_ error: Error) {
-            guard loadedBase != nil else { return }
             let nsError = error as NSError
             if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
-            loadedBase = nil
             guard let web else { return }
-            showStatus("failed", page: Self.failedPage(error.localizedDescription), in: web)
+            if loadedFunnel != nil {
+                loadedFunnel = nil
+                statusShown = nil
+                hideFunnelBanner(in: web)
+                showStatus("funnel-failed",
+                           page: Self.funnelFailedPage(error.localizedDescription), in: web)
+                return
+            }
+            guard loadedBase != nil else { return }
+            loadedBase = nil
+            showStatus("failed", page: Self.failedPage(error.localizedDescription, funnelReady: true), in: web)
+        }
+
+        /// 6.2：状态页/应急失败页按钮用 `dsh-action:<name>` 回调原生（这些页没有 dshBridge）。
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if let url = navigationAction.request.url, url.scheme == "dsh-action" {
+                decisionHandler(.cancel)
+                // dsh-action:<name> 是 opaque URL（无 host），动作名在冒号之后。
+                let action = String(url.absoluteString.dropFirst("dsh-action:".count))
+                switch action {
+                case "use-emergency": useEmergency()
+                case "exit-emergency": exitEmergency()
+                case "open-settings": openSettings()
+                case "retry": replayLastApply(to: web)
+                default: break
+                }
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        /// 「重试」：按最近一次 apply 入参重放（funnel 失败 ⇒ loadedFunnel 已清，会重新发起请求）。
+        private func replayLastApply(to webView: WKWebView) {
+            guard let last = lastApply else { return }
+            statusShown = nil
+            apply(route: last.route, bridge: last.bridge, funnelReady: last.funnelReady, to: webView)
         }
 
         func webView(
@@ -294,6 +472,10 @@ struct ShellWebView: UIViewRepresentable {
                 + "h3{margin:0;font-size:18px}p{margin:0;color:#6b7280;font-size:14px;line-height:1.6}"
                 + ".spin{width:26px;height:26px;border:3px solid #e5e7eb;border-top-color:#3b82f6;"
                 + "border-radius:50%;animation:r 0.9s linear infinite}@keyframes r{to{transform:rotate(360deg)}}"
+                // 6.2 状态页按钮：<a> 借 dsh-action: scheme 回调原生 decidePolicyFor。
+                + "a.btn{display:inline-block;margin-top:4px;padding:10px 18px;border-radius:10px;"
+                + "font-size:15px;font-weight:600;text-decoration:none;background:#3b82f6;color:#fff}"
+                + "a.btn.ghost{background:#e5e7eb;color:#1c1c1e}"
                 + "</style><body>\(body)</body>"
         }
 
@@ -302,25 +484,50 @@ struct ShellWebView: UIViewRepresentable {
             "<div class=\"spin\"></div><h3>正在连接内网…</h3>"
             + "<p>正在启动安全通道与本地服务，弱网下可能需要约一分钟。</p>")
 
-        /// 桥停止：节点未认证（首启未喂 key）或已登出。
-        static let stoppedPage = wrap(body:
-            "<h3>内网通道未连接</h3>"
-            + "<p>请点右上角「TS」完成一次入网，通道建立后会自动进入写作页。</p>")
+        /// 桥停止：节点未认证（首启未喂 key）或已登出。已配置 Funnel 时给③档应急入口。
+        static func stoppedPage(funnelReady: Bool) -> String {
+            wrap(body:
+                "<h3>内网通道未连接</h3>"
+                + "<p>请点右上角「TS」完成一次入网，通道建立后会自动进入写作页。</p>"
+                + emergencyActions(funnelReady: funnelReady))
+        }
 
         /// 6.1 回前台重建中（壳尚未装好的极端时序才用；正常路径盖原生浮层不拆壳）。
         static let reconnectingPage = wrap(body:
             "<div class=\"spin\"></div><h3>tailnet 重连中…</h3>"
             + "<p>正在恢复本地安全通道，通常一秒内完成。</p>")
 
-        /// 桥失败/壳加载失败：reason 转义后上屏，绝不静默白屏。
-        static func failedPage(_ reason: String) -> String {
+        /// 桥失败/壳加载失败：reason 转义后上屏，绝不静默白屏；带 Funnel 应急入口。
+        static func failedPage(_ reason: String, funnelReady: Bool) -> String {
             let escaped = reason
                 .replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
             return wrap(body:
                 "<h3>本地通道不可用</h3>"
                 + "<p>\(escaped)</p>"
-                + "<p>请点右上角「TS」查看节点状态并重试。</p>")
+                + "<p>请点右上角「TS」查看节点状态并重试。</p>"
+                + emergencyActions(funnelReady: funnelReady))
+        }
+
+        /// 6.2 状态页应急动作组：已配置 Funnel ⇒ 一键进应急档；否则引导去 TS 设置页填地址。
+        private static func emergencyActions(funnelReady: Bool) -> String {
+            if funnelReady {
+                return "<a class=\"btn\" href=\"dsh-action:use-emergency\">改用 Funnel 应急连接</a>"
+            }
+            return "<a class=\"btn ghost\" href=\"dsh-action:open-settings\">去「TS」设置 Funnel 应急地址</a>"
+        }
+
+        /// 6.2 应急档自身加载失败（Funnel 不可达/证书错等）：本地未上传草稿仍在 outbox 不丢。
+        static func funnelFailedPage(_ reason: String) -> String {
+            let escaped = reason
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+            return wrap(body:
+                "<h3>应急通道也无法连接</h3>"
+                + "<p>\(escaped)</p>"
+                + "<p>本地未上传的草稿仍安全保留，恢复内网后会自动同步。</p>"
+                + "<a class=\"btn\" href=\"dsh-action:retry\">重试应急连接</a>"
+                + "<a class=\"btn ghost\" href=\"dsh-action:exit-emergency\">返回内网通道</a>")
         }
 
         // MARK: - JS alert/confirm 面板
