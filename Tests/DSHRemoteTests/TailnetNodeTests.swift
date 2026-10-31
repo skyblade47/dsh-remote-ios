@@ -50,6 +50,10 @@ private actor FakeTailnetBackend: TailnetBackending {
     /// 4.1：online 后是否向节点提供 tailscale handle。默认 nil（不起真实 loopback，
     /// 保持节点状态机用例快测）；桥装配用例注入假值，并把期望的起桥失败记为无真实 dial。
     private let handle: Int32?
+    /// 6.2 切片4：gatewayStatusJSON() 每次返回的脚本；默认 nil（节点轮询拿到 nil 即跳过）。
+    /// 用 actor 可变状态做「先 unknown 后 P2P」之类的换链序列。
+    private var statusScript: [Data?] = []
+    private(set) var statusCalls = 0
     private(set) var calls: [Call] = []
     private(set) var shutdownCount = 0
     private(set) var dialHandleCalls = 0
@@ -58,6 +62,18 @@ private actor FakeTailnetBackend: TailnetBackending {
     init(outcome: FakeOutcome, handle: Int32? = nil) {
         self.outcome = outcome
         self.handle = handle
+    }
+
+    /// 6.2 切片4：预置 statusJSON 返回序列（按调用顺序弹出，耗尽后恒返回最后一个）。
+    func setStatusScript(_ data: [Data?]) {
+        statusScript = data
+    }
+
+    func gatewayStatusJSON() async throws -> Data? {
+        statusCalls += 1
+        guard !statusScript.isEmpty else { return nil }
+        if statusScript.count == 1 { return statusScript[0] }
+        return statusScript.removeFirst()
     }
 
     func bringUp(stateDir: URL, hostName: String, controlURL: String,
@@ -674,6 +690,96 @@ final class TailnetNodeTests: XCTestCase {
         if newBase != oldBase { XCTAssertFalse(oldAlive, "换端口重建后旧 listener 必须已停") }
         let shutdowns = await backend.shutdowns()
         XCTAssertEqual(shutdowns, 0, "重建只动外挂桥，不重 up 节点")
+        await node.signOut()
+    }
+
+    // MARK: 6.2 切片4：网关对端 P2P/DERP 链路形态轮询
+
+    private func statusJSON(curAddr: String?? = nil, relay: String?? = nil,
+                            online: Bool? = true) -> Data {
+        var fields: [String] = ["\"ID\":\"g\"", "\"HostName\":\"dsh-cloud\"",
+                                "\"TailscaleIPs\":[\"100.99.84.35\"]"]
+        if let curAddr { fields.append("\"CurAddr\":\(curAddr.map { "\"\($0)\"" } ?? "null")") }
+        if let relay { fields.append("\"Relay\":\(relay.map { "\"\($0)\"" } ?? "null")") }
+        if let online { fields.append("\"Online\":\(online)") }
+        return Data("{\"Peer\":{\"g\":{\(fields.joined(separator: ","))}}}".utf8)
+    }
+
+    private func makePollingNode(_ backend: FakeTailnetBackend, interval: TimeInterval = 0.02) -> TailnetNode {
+        TailnetNode(authStore: auth, stateDirectory: tempDir,
+                    pathPollInterval: interval) { backend }
+    }
+
+    private func waitForPath(_ node: TailnetNode, _ match: (PeerPath?) -> Bool) async {
+        for _ in 0..<300 {
+            if match(node.gatewayPath) { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    private func waitForStatusCalls(_ backend: FakeTailnetBackend, atLeast n: Int) async {
+        for _ in 0..<300 {
+            if await backend.statusCalls >= n { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    func testGatewayPathPublishedAsP2PAfterOnline() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.70", ip6: nil))
+        await backend.setStatusScript([statusJSON(curAddr: "203.0.113.9:41641", relay: "sha")])
+        let node = makePollingNode(backend)
+        await node.signIn(authKey: "tskey-path-p2p")
+        await waitForSettle(node)
+        await waitForPath(node) { if case .p2p = $0 { return true }; return false }
+        guard case .p2p(let addr) = node.gatewayPath else {
+            return XCTFail("期望 .p2p，实际 \(String(describing: node.gatewayPath))")
+        }
+        XCTAssertEqual(addr, "203.0.113.9:41641")
+        await node.signOut()
+        XCTAssertNil(node.gatewayPath, "离网后链路形态必须清空")
+    }
+
+    func testGatewayPathReportedDERPWhenRelayed() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.71", ip6: nil))
+        await backend.setStatusScript([statusJSON(curAddr: .some(nil), relay: "sha")])
+        let node = makePollingNode(backend)
+        await node.signIn(authKey: "tskey-path-derp")
+        await waitForSettle(node)
+        await waitForPath(node) { if case .derp = $0 { return true }; return false }
+        guard case .derp(let relay) = node.gatewayPath else {
+            return XCTFail("期望 .derp，实际 \(String(describing: node.gatewayPath))")
+        }
+        XCTAssertEqual(relay, "sha")
+        await node.signOut()
+    }
+
+    func testGatewayPathSwitchDERPToP2PUpdatesAndLogs() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.72", ip6: nil))
+        await backend.setStatusScript([
+            statusJSON(curAddr: .some(nil), relay: "sha"),
+            statusJSON(curAddr: "198.51.100.1:41641", relay: "sha")
+        ])
+        let node = makePollingNode(backend)
+        await node.signIn(authKey: "tskey-path-switch")
+        await waitForSettle(node)
+        await waitForStatusCalls(backend, atLeast: 2)
+        await waitForPath(node) { if case .p2p = $0 { return true }; return false }
+        // 建链（DERP）与换档（→P2P）两条耗时打点都应在节点日志里。
+        XCTAssertTrue(node.recentLogs.contains { $0.contains("网关链路就绪") },
+                      "首次有路径应记建链耗时，日志：\(node.recentLogs)")
+        XCTAssertTrue(node.recentLogs.contains { $0.contains("网关链路切换") },
+                      "DERP→P2P 应记切换耗时，日志：\(node.recentLogs)")
+        await node.signOut()
+    }
+
+    func testGatewayPathUnknownBeforeFirstPath() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.73", ip6: nil))
+        // 对端在线但 CurAddr/Relay 皆空 → unknown（非 nil）。
+        await backend.setStatusScript([statusJSON(curAddr: .some(nil), relay: .some(nil))])
+        let node = makePollingNode(backend)
+        await node.signIn(authKey: "tskey-path-unknown")
+        await waitForSettle(node)
+        await waitForPath(node) { $0 == .some(.unknown) }
         await node.signOut()
     }
 

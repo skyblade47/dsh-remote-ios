@@ -68,6 +68,14 @@ struct TailnetSettingsView: View {
                                 .foregroundStyle(.red)
                                 .textSelection(.enabled)
                         }
+                        // 6.2 切片4：dsh-cloud 对端链路形态（①P2P / ②DERP 自动兜底，仅表现）。
+                        if let path = node.gatewayPath {
+                            HStack {
+                                Text("网关链路")
+                                Spacer()
+                                Text(pathText(path)).foregroundStyle(pathColor(path))
+                            }
+                        }
                         // 4.8 真机验收入口（/auth/login 渲染 + WS 1006/101 + dsh_session cookie）。
                         NavigationLink {
                             TailnetVerifyView()
@@ -273,6 +281,24 @@ struct TailnetSettingsView: View {
         case .failed: return .red
         case .starting, .reconnecting: return .orange
         case .stopped: return .secondary
+        }
+    }
+
+    /// 6.2 切片4：①档直连优先（绿）；②档 DERP 中继由 tsnet 自动兜底（橙，提示绕路）。
+    private func pathText(_ path: PeerPath) -> String {
+        switch path {
+        case .p2p: return "直连 P2P"
+        case .derp: return "DERP 中继"
+        case .offline: return "网关离线"
+        case .unknown: return "建立中…"
+        }
+    }
+
+    private func pathColor(_ path: PeerPath) -> Color {
+        switch path {
+        case .p2p: return .green
+        case .derp, .unknown: return .orange
+        case .offline: return .red
         }
     }
 }

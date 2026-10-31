@@ -37,6 +37,9 @@ protocol TailnetBackending: AnyObject {
                  authKey: String?) async throws -> (ip4: String?, ip6: String?)
     func shutdown() async
     func dialHandle() async -> Int32?
+    /// 6.2 切片4：取 ipnstate 状态 JSON（解析 dsh-cloud 对端 P2P/DERP 链路形态）；
+    /// 节点未起返回 nil。这是 Go 阻塞跨 actor 调用，实现内部丢 detached。
+    func gatewayStatusJSON() async throws -> Data?
 }
 
 /// 日志 sink：TailscaleKit 从 Go 内部线程回调，统一切主队列后交给构造时注入的
@@ -105,6 +108,14 @@ actor TailnetBackend: TailnetBackending {
     func dialHandle() async -> Int32? {
         await node?.tailscale
     }
+
+    /// 6.2 切片4：节点在线时取 ipnstate JSON（Go 阻塞调用，丢 detached）；下节点后为 nil。
+    func gatewayStatusJSON() async throws -> Data? {
+        guard let node else { return nil }
+        return try await Task.detached(priority: .utility) {
+            try await node.statusJSON()
+        }.value
+    }
 }
 
 @MainActor
@@ -160,6 +171,20 @@ final class TailnetNode: ObservableObject {
     /// 4.1 localhost 反代状态（设置页展示；WKWebView Phase 5 起固定读 UserDefaults base）。
     @Published private(set) var bridge: BridgeState = .stopped
 
+    /// 6.2 切片4：dsh-cloud 网关对端当前链路形态（①P2P / ②DERP / 离线 / 未知）。
+    /// 只用于表现，不参与任何路由切换（DERP 由 tsnet 内部自动兜底）；离线/停轮询时为 nil。
+    @Published private(set) var gatewayPath: PeerPath?
+
+    /// ①②档链路轮询任务（online 后每 pathPollInterval 拉一次 statusJSON）；离网即取消。
+    private var pathPollTask: Task<Void, Never>?
+    /// 当前已记录的链路与最近一次「建链/换链」时间：同档不重复打点，换档才记切换耗时。
+    private var observedPath: PeerPath?
+    private var pathBecameOnlineAt: Date?
+
+    /// 轮询节奏与目标对端（测试可注入更短间隔）。
+    private let pathPollInterval: TimeInterval
+    private let gatewayTailnetIP: String
+
     /// 运行中的 loopback 监听（停桥时 cancel 并关闭全部活动连接）。
     private var loopback: LoopbackProxy?
 
@@ -202,10 +227,14 @@ final class TailnetNode: ObservableObject {
          bringUpTimeout: TimeInterval = 45,
          bridgeProbe: ((String) async -> Bool)? = nil,
          bridgeFactory: ((Int32) -> LoopbackProxy)? = nil,
+         pathPollInterval: TimeInterval = 5,
+         gatewayTailnetIP: String = "100.99.84.35",
          backendFactory: (() -> TailnetBackending)? = nil) {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
         self.bringUpTimeout = bringUpTimeout
+        self.pathPollInterval = pathPollInterval
+        self.gatewayTailnetIP = gatewayTailnetIP
         self.injectedBackendFactory = backendFactory
         self.bridgeProbe = bridgeProbe ?? { base in await LoopbackProbe.isAlive(base: base) }
         self.bridgeFactory = bridgeFactory ?? TailnetNode.makeProductionProxy
@@ -339,6 +368,7 @@ final class TailnetNode: ObservableObject {
                                 ip6: ip6.isEmpty ? "—" : ip6)
                 self.log("✅ 节点在线：ip4=\(ip4.isEmpty ? "—" : ip4) ip6=\(ip6.isEmpty ? "—" : ip6)")
                 await self.startBridge(gen: gen)
+                self.startPathPolling(gen: gen)
             } catch {
                 guard gen == self.generation else { return }
                 let wasTimedOut = timedOutGenerations.contains(gen)
@@ -484,11 +514,86 @@ final class TailnetNode: ObservableObject {
 
     /// 停本地桥（signOut/cancel/失败/重入网前）；幂等。
     private func stopBridge() async {
+        stopPathPolling()
         loopback?.stop()
         loopback = nil
         if case .stopped = bridge { return }
         bridge = .stopped
         log("■ 本地桥已停")
+    }
+
+    // MARK: - 6.2 切片4：①②档链路形态轮询（只表现，不切换）
+
+    /// online 后启动链路轮询：每 pathPollInterval 拉一次 statusJSON，解析网关对端是
+    /// P2P 直连还是 DERP 中继。只认自己这一版 generation；被取代即停。
+    private func startPathPolling(gen: Int) {
+        pathPollTask?.cancel()
+        observedPath = nil
+        gatewayPath = nil
+        pathBecameOnlineAt = Date()
+        let interval = pathPollInterval
+        pathPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.refreshGatewayPath(gen: gen)
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+        }
+    }
+
+    private func stopPathPolling() {
+        pathPollTask?.cancel()
+        pathPollTask = nil
+        observedPath = nil
+        gatewayPath = nil
+        pathBecameOnlineAt = nil
+    }
+
+    /// 单次拉取并打点。对端消失/取态失败都不弹窗（轮询自愈），仅记日志。
+    private func refreshGatewayPath(gen: Int) {
+        guard gen == self.generation, let backend else { return }
+        Task { @MainActor in
+            let data: Data?
+            do {
+                data = try await backend.gatewayStatusJSON()
+            } catch {
+                self.log("⟳ 链路状态取态失败：\(error)")
+                return
+            }
+            guard gen == self.generation, let data,
+                  let path = try? PeerPathParser.parse(data, targetIP: self.gatewayTailnetIP) else { return }
+            self.recordGatewayPath(path)
+        }
+    }
+
+    /// 更新表现态并在「建链/换档」时记录可达性与切换耗时（同档不重复打点）。
+    private func recordGatewayPath(_ path: PeerPath) {
+        gatewayPath = path
+        guard path != observedPath else { return }
+        let label: String
+        switch path {
+        case .p2p(let addr): label = "P2P 直连（\(addr)）"
+        case .derp(let relay): label = "DERP 中继（\(relay)）"
+        case .offline: label = "网关离线"
+        case .unknown: label = "链路建立中"
+        }
+        // 仅落到「有路径」档（P2P/DERP）才算建链/切换耗时；unknown/offline 只记形态。
+        let isConnected: Bool
+        if case .p2p = path { isConnected = true }
+        else if case .derp = path { isConnected = true }
+        else { isConnected = false }
+        if isConnected, let since = pathBecameOnlineAt {
+            let ms = Int(Date().timeIntervalSince(since) * 1000)
+            if observedPath == nil {
+                log("🔗 网关链路就绪：\(label)，自建桥起 \(ms)ms")
+            } else {
+                log("🔀 网关链路切换：\(label)，距上次换档 \(ms)ms")
+            }
+            // 换档基准重置为本次，后续「距上次换档」才有意义。
+            pathBecameOnlineAt = Date()
+        } else {
+            log("⇢ 网关链路：\(label)")
+        }
+        observedPath = path
     }
 
     /// 等到离开 starting（signIn/retry 的 UI 用）；最多 10s 避免死等。
