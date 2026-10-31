@@ -82,15 +82,23 @@ enum S1ProbePage {
           const lines = [];
           let pass = true;
 
-          // A：fetch 本地壳路由 /__shell__/ping（应回 JSON pong，且绝不该拨上游）
+          // A：fetch 同前缀本地路由 /__shell__/ping（应回 JSON pong，且绝不该拨上游）
           try {
             const r = await fetch('/__shell__/ping?m=A&t=' + Date.now(), {cache:'no-store'});
             const b = await r.text();
             const ok = r.status === 200 && b.indexOf('pong') !== -1;
             if (!ok) pass = false;
-            lines.push('A fetch ping: status=' + r.status + ' bytes=' + b.length
+            lines.push('A fetch /__shell__/ping: status=' + r.status + ' bytes=' + b.length
                        + (ok ? ' (pong)' : ' body=' + b.slice(0, 120)));
-          } catch (e) { pass = false; lines.push('A fetch ping: EXC ' + e); }
+          } catch (e) { pass = false; lines.push('A fetch /__shell__/ping: EXC ' + e); }
+
+          // B：跨前缀对照 —— 同一本地路由但换到非 /__shell__/ 路径（/__s1__/probe 已下线，
+          //    这里打根路径 /，期望是反代上游应答；仅作为"前缀敏感"规律的对照组，不计入 pass）
+          try {
+            const r = await fetch('/?m=B&t=' + Date.now(), {cache:'no-store'});
+            const b = await r.text();
+            lines.push('B fetch /（对照）: status=' + r.status + ' bytes=' + b.length);
+          } catch (e) { lines.push('B fetch /（对照）: EXC ' + e); }
 
           // C：<script> 标签注入 /__shell__/ipad.js（产品壳真实子资源机制）
           try {
@@ -120,7 +128,7 @@ enum S1ProbePage {
             lines.push('C <script> ipad.js: ' + res.detail);
           } catch (e) { pass = false; lines.push('C <script> ipad.js: EXC ' + e); }
 
-          record('④ 本地壳路由（fetch ping/diag + script 注入 ipad.js）', pass, lines.join('\\n'));
+          record('④ 本地壳路由（/__shell__/ping + script 注入 ipad.js）', pass, lines.join('\\n'));
         }
 
         // ⑤ dsh-bridge 同步写盘通道：在 http loopback origin 下实测自定义 scheme 同步 XHR。

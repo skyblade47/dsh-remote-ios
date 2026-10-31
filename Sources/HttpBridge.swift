@@ -100,8 +100,12 @@ final class HttpBridge {
         }
     }
 
-    /// S1 自检页的本地路径（不加 `__shell__` 前缀，避免与白名单资产混在一起）。
-    static let s1ProbePath = "/__s1__/probe"
+    /// S1 自检页的本地路径。
+    /// 必须与产品壳同处 `/__shell__/` 前缀下：真机实测 WKWebView 里，文档发往
+    /// `/__shell__/*` 的请求只有**文档自身也在该前缀下**时才可靠送达（产品壳
+    /// `/__shell__/shell.html` 加载 18 件资产全部命中；而放在 `/__s1__/probe` 的
+    /// 同一份页面，发往 `/__shell__/ping`、`/__shell__/ipad.js` 一律空 404）。
+    static let s1ProbePath = "/__shell__/s1probe.html"
 
     /// S1 自检页应答：真实 HTTP 文档（text/html），与产品壳相同的加载方式。
     private static func s1ProbeResponse() -> Data {
