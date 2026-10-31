@@ -702,7 +702,7 @@ final class TailnetNodeTests: XCTestCase {
         if let curAddr { fields.append("\"CurAddr\":\(curAddr.map { "\"\($0)\"" } ?? "null")") }
         if let relay { fields.append("\"Relay\":\(relay.map { "\"\($0)\"" } ?? "null")") }
         if let online { fields.append("\"Online\":\(online)") }
-        return Data("{\"Peer\":{\"g\":{\(fields.joined(separator: ","))}}}".utf8)
+        return Data("{\"Peer\":{\"g\":{\(fields.joined(separator: ","))}}}}".utf8)
     }
 
     private func makePollingNode(_ backend: FakeTailnetBackend, interval: TimeInterval = 0.02) -> TailnetNode {

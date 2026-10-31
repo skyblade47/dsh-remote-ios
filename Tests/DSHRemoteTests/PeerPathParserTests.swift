@@ -34,7 +34,7 @@ final class PeerPathParserTests: XCTestCase {
         if let relay { fields.append("\"Relay\":\(relay.map { "\"\($0)\"" } ?? "null")") }
         if let online { fields.append("\"Online\":\(online)") }
         let body = """
-        {"Peer":{"\(id)":{\(fields.joined(separator: ","))}}
+        {"Peer":{"\(id)":{\(fields.joined(separator: ","))}}}
         """
         return Data(body.utf8)
     }
