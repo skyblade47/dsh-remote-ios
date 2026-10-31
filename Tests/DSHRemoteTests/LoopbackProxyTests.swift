@@ -96,7 +96,9 @@ final class LoopbackProxyTests: XCTestCase {
         let dead = await LoopbackProbe.isAlive(base: started.base.absoluteString)
         XCTAssertFalse(dead, "listener 已回收（iOS 挂起场景）必须探活失败，触发重建")
 
-        XCTAssertFalse(await LoopbackProbe.isAlive(base: "not-a-url"))
+        // XCTAssert 的 autoclosure 不支持并发：await 结果先落本地常量再断言（plan §3.4 教训）。
+        let invalidURL = await LoopbackProbe.isAlive(base: "not-a-url")
+        XCTAssertFalse(invalidURL)
     }
 
     // MARK: 6.1 回前台重建：优先复用原端口（WKWebView 已装壳无需换 base 重载）
