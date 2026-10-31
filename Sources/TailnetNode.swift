@@ -532,9 +532,14 @@ final class TailnetNode: ObservableObject {
         gatewayPath = nil
         pathBecameOnlineAt = Date()
         let interval = pathPollInterval
-        pathPollTask = Task { @MainActor [weak self] in
+        // 单循环内联 await：不在循环体内再 spawn fire-and-forget Task——
+        // CI 模拟器主队列拥塞时内层 Task 可能迟迟不被调度（run 41191738184 实证
+        // gatewayPath 恒 nil）。循环内直接 await，取态完成才进 sleep，节奏与结果都确定。
+        // 强持有 self：任务只由 stopPathPolling 取消（离网/重入网），与旧的 weak 写法
+        // 生命周期一致；代际不匹配即空转等取消，不写任何状态。
+        pathPollTask = Task { @MainActor in
             while !Task.isCancelled {
-                self?.refreshGatewayPath(gen: gen)
+                await self.refreshGatewayPath(gen: gen)
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
@@ -549,20 +554,20 @@ final class TailnetNode: ObservableObject {
     }
 
     /// 单次拉取并打点。对端消失/取态失败都不弹窗（轮询自愈），仅记日志。
-    private func refreshGatewayPath(gen: Int) {
+    /// 由轮询循环直接 await（不再内部 spawn Task），保证取态与记录在同一调度步内完成。
+    private func refreshGatewayPath(gen: Int) async {
         guard gen == self.generation, let backend else { return }
-        Task { @MainActor in
-            let data: Data?
-            do {
-                data = try await backend.gatewayStatusJSON()
-            } catch {
-                self.log("⟳ 链路状态取态失败：\(error)")
-                return
-            }
-            guard gen == self.generation, let data,
-                  let path = try? PeerPathParser.parse(data, targetIP: self.gatewayTailnetIP) else { return }
-            self.recordGatewayPath(path)
+        let data: Data?
+        do {
+            data = try await backend.gatewayStatusJSON()
+        } catch {
+            guard gen == self.generation else { return }
+            self.log("⟳ 链路状态取态失败：\(error)")
+            return
         }
+        guard gen == self.generation, let data,
+              let path = try? PeerPathParser.parse(data, targetIP: self.gatewayTailnetIP) else { return }
+        self.recordGatewayPath(path)
     }
 
     /// 更新表现态并在「建链/换档」时记录可达性与切换耗时（同档不重复打点）。

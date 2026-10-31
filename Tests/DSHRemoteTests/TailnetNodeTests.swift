@@ -710,11 +710,20 @@ final class TailnetNodeTests: XCTestCase {
                     pathPollInterval: interval) { backend }
     }
 
-    private func waitForPath(_ node: TailnetNode, _ match: (PeerPath?) -> Bool) async {
+    /// 等到 gatewayPath 命中断言；超时显式失败并附上当前形态与取态次数，
+    /// 避免「轮询没跑」和「解析不对」混成一句 nil 断言。
+    private func waitForPath(_ node: TailnetNode, _ backend: FakeTailnetBackend,
+                             atLeastCalls calls: Int = 1,
+                             _ match: (PeerPath?) -> Bool,
+                             file: StaticString = #filePath, line: UInt = #line) async {
+        await waitForStatusCalls(backend, atLeast: calls)
         for _ in 0..<300 {
             if match(node.gatewayPath) { return }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        let actualCalls = await backend.statusCalls
+        XCTFail("等待链路形态超时：实际 \(String(describing: node.gatewayPath))，" +
+                "statusCalls=\(actualCalls)（期望≥\(calls)）", file: file, line: line)
     }
 
     private func waitForStatusCalls(_ backend: FakeTailnetBackend, atLeast n: Int) async {
@@ -730,7 +739,7 @@ final class TailnetNodeTests: XCTestCase {
         let node = makePollingNode(backend)
         await node.signIn(authKey: "tskey-path-p2p")
         await waitForSettle(node)
-        await waitForPath(node) { if case .p2p = $0 { return true }; return false }
+        await waitForPath(node, backend) { if case .p2p = $0 { return true }; return false }
         guard case .p2p(let addr) = node.gatewayPath else {
             return XCTFail("期望 .p2p，实际 \(String(describing: node.gatewayPath))")
         }
@@ -745,7 +754,7 @@ final class TailnetNodeTests: XCTestCase {
         let node = makePollingNode(backend)
         await node.signIn(authKey: "tskey-path-derp")
         await waitForSettle(node)
-        await waitForPath(node) { if case .derp = $0 { return true }; return false }
+        await waitForPath(node, backend) { if case .derp = $0 { return true }; return false }
         guard case .derp(let relay) = node.gatewayPath else {
             return XCTFail("期望 .derp，实际 \(String(describing: node.gatewayPath))")
         }
@@ -762,8 +771,9 @@ final class TailnetNodeTests: XCTestCase {
         let node = makePollingNode(backend)
         await node.signIn(authKey: "tskey-path-switch")
         await waitForSettle(node)
-        await waitForStatusCalls(backend, atLeast: 2)
-        await waitForPath(node) { if case .p2p = $0 { return true }; return false }
+        await waitForPath(node, backend, atLeastCalls: 2) {
+            if case .p2p = $0 { return true }; return false
+        }
         // 建链（DERP）与换档（→P2P）两条耗时打点都应在节点日志里。
         XCTAssertTrue(node.recentLogs.contains { $0.contains("网关链路就绪") },
                       "首次有路径应记建链耗时，日志：\(node.recentLogs)")
@@ -779,7 +789,7 @@ final class TailnetNodeTests: XCTestCase {
         let node = makePollingNode(backend)
         await node.signIn(authKey: "tskey-path-unknown")
         await waitForSettle(node)
-        await waitForPath(node) { $0 == .some(.unknown) }
+        await waitForPath(node, backend) { $0 == .some(.unknown) }
         await node.signOut()
     }
 
