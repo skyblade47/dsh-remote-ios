@@ -21,6 +21,10 @@ final class LoopbackProxy {
     private let stateLock = NSLock()
     private var activeChannels: [NWConnectionChannel] = []
     private var portContinuation: CheckedContinuation<Int, Error>?
+    /// bind 代际：每次 bind 自增。失败回退/复用端口会在同一 proxy 上发起第二任 bind，
+    /// 旧 listener 迟到的 .cancelled 回调只能凭自己捕获的 gen 校验，gen 不符即丢弃，
+    /// 不得误 resume 新一任 continuation。
+    private var bindGeneration = 0
 
     init(bridge: HttpBridge, defaults: UserDefaults = .standard) {
         self.bridge = bridge
@@ -57,20 +61,28 @@ final class LoopbackProxy {
         let listener = try NWListener(using: parameters, on: .any)
         self.listener = listener
 
+        // 本任 bind 的代际令牌：只允许这一任 listener 的回调结束本次 continuation。
+        stateLock.lock()
+        bindGeneration &+= 1
+        let gen = bindGeneration
+        stateLock.unlock()
+
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
             portContinuation = cont
             listener.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
                     if let port = listener.port?.rawValue {
-                        self?.resumePort(.success(Int(port)))
+                        self?.resumePort(gen, .success(Int(port)))
                     }
                 case .failed(let error):
-                    // 端口占用等失败：释放失败 listener，避免回退重建时泄漏。
+                    // 先以真实错误结束本任续体，再 cancel 释放失败 listener。顺序不可反：
+                    // cancel 会在并发队列上再投递一次 .cancelled，先 resume 可让该迟到回调
+                    // 被 gen 守卫丢弃，避免它把端口占用错报成 CancellationError。
+                    self?.resumePort(gen, .failure(error))
                     listener.cancel()
-                    self?.resumePort(.failure(error))
                 case .cancelled:
-                    self?.resumePort(.failure(CancellationError()))
+                    self?.resumePort(gen, .failure(CancellationError()))
                 default:
                     break
                 }
@@ -94,12 +106,17 @@ final class LoopbackProxy {
 
     // MARK: - 内部
 
-    private func resumePort(_ result: Result<Int, Error>) {
+    /// 结束某次 bind 的续体。仅当回调所属代际仍是当前代际（本次 bind 未被更新一任
+    /// 取代、续体尚未 resume）时落地，避免旧 listener 的迟到回调误 resume 新 bind。
+    private func resumePort(_ gen: Int, _ result: Result<Int, Error>) {
         stateLock.lock()
-        let cont = portContinuation
+        guard gen == bindGeneration, let cont = portContinuation else {
+            stateLock.unlock()
+            return
+        }
         portContinuation = nil
         stateLock.unlock()
-        cont?.resume(with: result)
+        cont.resume(with: result)
     }
 
     private func accept(_ connection: NWConnection) {
