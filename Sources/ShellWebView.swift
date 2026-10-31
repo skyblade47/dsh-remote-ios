@@ -425,7 +425,7 @@ struct ShellWebView: UIViewRepresentable {
                 case "use-emergency": useEmergency()
                 case "exit-emergency": exitEmergency()
                 case "open-settings": openSettings()
-                case "retry": replayLastApply(to: web)
+                case "retry": replayLastApply(to: webView)
                 default: break
                 }
                 return
