@@ -104,8 +104,17 @@ struct RootView: View {
                 .ignoresSafeArea(edges: .bottom)
         }
         .onChange(of: scenePhase) { _, phase in
-            // iOS 切后台不触发 pagehide；主动驱动 writing.js 的 session-end 同步落盘
-            if phase == .background { session.flusher.flush() }
+            switch phase {
+            case .background:
+                // iOS 切后台不触发 pagehide；主动驱动 writing.js 的 session-end 同步落盘
+                session.flusher.flush()
+            case .active:
+                // 6.1：回前台按 2.6 真机结论主动探活/重建外挂 loopback 桥（节点不重 up）。
+                // 节点未 online/桥非 running 时内部 no-op；fire-and-forget，不阻塞 UI。
+                Task { await TailnetNode.shared.reconnectAfterForeground() }
+            default:
+                break
+            }
         }
         .alert("内网通道未就绪", isPresented: $showS1Alert) {
             Button("好", role: .cancel) {}

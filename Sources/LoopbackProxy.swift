@@ -28,16 +28,36 @@ final class LoopbackProxy {
     }
 
     /// 启动监听，阻塞到 ready 后返回实际 base URL（同时写入 UserDefaults）。
-    func start() async throws -> URL {
-        // requiredLocalEndpoint 锁死 loopback，杜绝局域网/公网侧访问；端口 .any 由内核分配。
+    ///
+    /// - Parameter preferredPort: 6.1 回前台重建时优先复用的端口（WKWebView 已装壳，
+    ///   同端口复用时壳无需换 base 重载）。该端口已被占用（极端情况）时自动回退到
+    ///   内核动态端口，绝不起桥失败。nil（默认/首次）直接用动态端口。
+    func start(preferredPort: UInt16? = nil) async throws -> URL {
+        let port: Int
+        do {
+            port = try await bind(port: preferredPort ?? 0)
+        } catch {
+            // 首选端口绑定失败（被占用）：回退动态端口重建，而非把错误抛给调用方。
+            guard let preferredPort, preferredPort != 0 else { throw error }
+            port = try await bind(port: 0)
+        }
+
+        let base = URL(string: "http://127.0.0.1:\(port)")!
+        defaults.set(base.absoluteString, forKey: Self.baseURLDefaultsKey)
+        return base
+    }
+
+    /// 在 127.0.0.1 指定端口上 bind（0 = 内核动态分配），阻塞到 ready 返回实际端口。
+    /// requiredLocalEndpoint 锁死 loopback，杜绝局域网/公网侧访问。
+    private func bind(port: UInt16) async throws -> Int {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(
             host: NWEndpoint.Host("127.0.0.1"),
-            port: NWEndpoint.Port(rawValue: 0)!)
+            port: NWEndpoint.Port(rawValue: port)!)
         let listener = try NWListener(using: parameters, on: .any)
         self.listener = listener
 
-        let port = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
             portContinuation = cont
             listener.stateUpdateHandler = { [weak self] state in
                 switch state {
@@ -46,6 +66,8 @@ final class LoopbackProxy {
                         self?.resumePort(.success(Int(port)))
                     }
                 case .failed(let error):
+                    // 端口占用等失败：释放失败 listener，避免回退重建时泄漏。
+                    listener.cancel()
                     self?.resumePort(.failure(error))
                 case .cancelled:
                     self?.resumePort(.failure(CancellationError()))
@@ -58,10 +80,6 @@ final class LoopbackProxy {
             }
             listener.start(queue: .global(qos: .userInitiated))
         }
-
-        let base = URL(string: "http://127.0.0.1:\(port)")!
-        defaults.set(base.absoluteString, forKey: Self.baseURLDefaultsKey)
-        return base
     }
 
     func stop() {

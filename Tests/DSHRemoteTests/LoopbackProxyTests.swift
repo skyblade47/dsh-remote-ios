@@ -82,6 +82,75 @@ final class LoopbackProxyTests: XCTestCase {
                        "http://127.0.0.1:\(port)")
     }
 
+    // MARK: 6.1 回前台探活：有监听且应答 → true；无监听 → false（不卡死、不假装活）
+
+    func testProbeAliveTrueForServingBridgeAndFalseForClosedPort() async throws {
+        let started = try await startProxy(connecter: FakeConnecter(mode: .jsonEcho))
+        defer { started.proxy.stop() }
+
+        let alive = await LoopbackProbe.isAlive(base: started.base.absoluteString)
+        XCTAssertTrue(alive, "正在应答的桥必须探活成功")
+
+        started.proxy.stop()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let dead = await LoopbackProbe.isAlive(base: started.base.absoluteString)
+        XCTAssertFalse(dead, "listener 已回收（iOS 挂起场景）必须探活失败，触发重建")
+
+        XCTAssertFalse(await LoopbackProbe.isAlive(base: "not-a-url"))
+    }
+
+    // MARK: 6.1 回前台重建：优先复用原端口（WKWebView 已装壳无需换 base 重载）
+
+    func testRestartPrefersSamePortAndServesAgain() async throws {
+        let suite = "LoopbackProxyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let connecter = FakeConnecter(mode: .jsonEcho)
+        let bridge = HttpBridge(routes: makeRoutes(), connecter: connecter)
+        let proxy = LoopbackProxy(bridge: bridge, defaults: defaults)
+
+        let first = try await proxy.start()
+        let preferred = try XCTUnwrap(first.port)
+        proxy.stop()
+        // 等 listener 完全释放，再要求按原端口重建（对齐 2.6 真机 stop/start 355ms）。
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let second = try await proxy.start(preferredPort: UInt16(preferred))
+        defer { proxy.stop() }
+        XCTAssertEqual(second.port, preferred, "原端口已释放时重建必须复用，壳无需换 base 重载")
+
+        let request = Data("GET /__shell__/ping HTTP/1.1\r\n\r\n".utf8)
+        let response = try await roundTrip(to: second, request: request)
+        XCTAssertEqual(response.status, 200, "重建后的桥必须能正常应答")
+    }
+
+    func testRestartFallsBackToDynamicPortWhenPreferredBusy() async throws {
+        let suite = "LoopbackProxyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // 占用方：持续监听一个动态端口不释放。
+        let holderConnecter = FakeConnecter(mode: .jsonEcho)
+        let holder = LoopbackProxy(
+            bridge: HttpBridge(routes: ShellAssetRoutes { _ in nil }, connecter: holderConnecter),
+            defaults: defaults)
+        let holderBase = try await holder.start()
+        let busyPort = UInt16(try XCTUnwrap(holderBase.port))
+        defer { holder.stop() }
+
+        // 重建方：要求占用中的端口，必须回退到另一个动态端口而非起桥失败。
+        let connecter = FakeConnecter(mode: .jsonEcho)
+        let proxy = LoopbackProxy(
+            bridge: HttpBridge(routes: makeRoutes(), connecter: connecter), defaults: defaults)
+        let rebound = try await proxy.start(preferredPort: busyPort)
+        defer { proxy.stop() }
+        XCTAssertNotEqual(rebound.port, Int(busyPort), "首选端口被占时必须回退动态端口")
+        let request = Data("GET /__shell__/ping HTTP/1.1\r\n\r\n".utf8)
+        let response = try await roundTrip(to: rebound, request: request)
+        XCTAssertEqual(response.status, 200)
+    }
+
     // MARK: - 流式大响应经真实 TCP 字节无损（300KB，跨多个 64KB 接收片）
 
     func testLargeStreamedResponseByteExact() async throws {

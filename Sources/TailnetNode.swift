@@ -126,11 +126,15 @@ final class TailnetNode: ObservableObject {
     }
 
     /// 方案 D / 4.1：localhost 反代生命周期（与节点同生共死）。
-    /// online 自动起桥；signOut/cancel/failed 自动停桥。前后台重建留 Phase 6。
+    /// online 自动起桥；signOut/cancel/failed 自动停桥。
+    /// 6.1：回前台探活发现外挂桥被挂起回收时进入 .reconnecting（壳不拆，只盖浮层），
+    /// 同端口优先重建成功后回 .running。
     enum BridgeState: Equatable {
         case stopped
         case starting
         case running(String) // http://127.0.0.1:<port>
+        /// 回前台重建中：节点仍 online，仅外挂 loopback 桥在 stop/start（6.1）。
+        case reconnecting
         case failed(String)
 
         /// running 时取出反代 base（无尾斜杠），其余状态为 nil。
@@ -170,6 +174,13 @@ final class TailnetNode: ObservableObject {
     private let injectedBackendFactory: (() -> TailnetBackending)?
     private var backend: TailnetBackending?
 
+    /// 6.1 回前台探活：入参桥 base，返回桥是否仍在应答。生产用 LoopbackProbe；
+    /// 单测注入可编程替身（不依赖真实 listener 时序）。
+    private let bridgeProbe: (String) async -> Bool
+    /// 6.1 桥装配工厂：online 起桥与回前台重建共用。入参 tailscale handle（测试替身无需
+    /// import TailscaleKit，故用裸 Int32）；生产默认复刻 Bundle 壳路由 + tailscale_dial 装配。
+    private let bridgeFactory: (Int32) -> LoopbackProxy
+
     /// 本实例使用的状态目录（生产固定 Documents/tailscale；3.4 注入临时目录保证测试隔离）。
     private let stateDirectory: URL
 
@@ -184,14 +195,32 @@ final class TailnetNode: ObservableObject {
     private var timedOutGenerations = Set<Int>()
 
     /// 3.4 测试入口：注入假 auth store / 临时状态目录 / 假后端 / 短超时；生产用默认 init。
+    /// 6.1：追加 bridgeProbe / bridgeFactory 注入点（均带生产默认值），供回前台重建单测
+    /// 注入可编程探活与真 127.0.0.1 测试桥。
     init(authStore: AuthKeyStoring = TailnetAuthStore(),
          stateDirectory: URL = TailnetNode.stateDir,
          bringUpTimeout: TimeInterval = 45,
+         bridgeProbe: ((String) async -> Bool)? = nil,
+         bridgeFactory: ((Int32) -> LoopbackProxy)? = nil,
          backendFactory: (() -> TailnetBackending)? = nil) {
         self.authStore = authStore
         self.stateDirectory = stateDirectory
         self.bringUpTimeout = bringUpTimeout
         self.injectedBackendFactory = backendFactory
+        self.bridgeProbe = bridgeProbe ?? { base in await LoopbackProbe.isAlive(base: base) }
+        self.bridgeFactory = bridgeFactory ?? TailnetNode.makeProductionProxy
+    }
+
+    /// 生产桥装配：Bundle.main 壳资产路由 + HttpBridge + TailnetDialConnecter
+    /// → LoopbackProxy（127.0.0.1 动态端口）。online 起桥与 6.1 回前台重建共用同一份装配。
+    private static func makeProductionProxy(handle: Int32) -> LoopbackProxy {
+        let routes = ShellAssetRoutes { name in
+            guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
+            return try? Data(contentsOf: url)
+        }
+        let httpBridge = HttpBridge(routes: routes,
+                                    connecter: TailnetDialConnecter(handle: TailscaleHandle(handle)))
+        return LoopbackProxy(bridge: httpBridge)
     }
 
     /// 运行期建本次入网的 backend：测试用注入工厂；生产建 TailnetBackend 并把 Go 日志
@@ -349,14 +378,15 @@ final class TailnetNode: ObservableObject {
 
     // MARK: - 4.1 localhost 反代（与节点同生共死）
 
-    /// online 后起本地桥：Bundle.main 壳资产路由 + HttpBridge + TailnetDialConnecter
-    /// → LoopbackProxy(127.0.0.1 动态端口)。base 落 UserDefaults DSHLoopbackBaseURL，
-    /// 供 Phase 5 的 WKWebView 固定加载。spike 2.4 真机已证此装配端到端可用。
+    /// online 后起本地桥：bridgeFactory（生产=Bundle 壳路由 + HttpBridge +
+    /// TailnetDialConnecter）→ LoopbackProxy(127.0.0.1 动态端口)。base 落 UserDefaults
+    /// DSHLoopbackBaseURL，供 Phase 5 的 WKWebView 固定加载。spike 2.4 真机已证此装配端到端可用。
     /// 只认自己这一版 generation：期间被取消/登出/新入网取代则丢弃迟到结果。
     private func startBridge(gen: Int) async {
-        // starting/running 不重复起；stopped/failed 都允许起（failed 即重试入口）。
+        // starting/running/reconnecting 不重复起；stopped/failed 都允许起（failed 即重试入口）。
         if case .starting = bridge { return }
         if case .running = bridge { return }
+        if case .reconnecting = bridge { return }
         bridge = .starting
         log("▶ 起本地桥：127.0.0.1 → tailscale_dial → 100.99.84.35:8080 …")
 
@@ -367,13 +397,7 @@ final class TailnetNode: ObservableObject {
             return
         }
 
-        let routes = ShellAssetRoutes { name in
-            guard let url = Bundle.main.url(forResource: name, withExtension: nil) else { return nil }
-            return try? Data(contentsOf: url)
-        }
-        let httpBridge = HttpBridge(routes: routes,
-                                    connecter: TailnetDialConnecter(handle: TailscaleHandle(handle)))
-        let proxy = LoopbackProxy(bridge: httpBridge)
+        let proxy = bridgeFactory(handle)
         loopback = proxy
         do {
             let base = try await proxy.start()
@@ -391,6 +415,71 @@ final class TailnetNode: ObservableObject {
             loopback = nil
             log("❌ 起桥失败：\(error)")
         }
+    }
+
+    /// 6.1 回前台主动重建（Phase 2.6 真机策略）：**不重 up 节点**（节点本身存活，重 up 要
+    /// 重新入网数十秒），只探活外挂 loopback 桥——iOS 挂起回收的是 NWListener。
+    /// - 桥仍活：什么都不做（壳不白屏、不换 base）；
+    /// - 桥已被回收：进 .reconnecting（壳不拆，只盖「tailnet 重连中」浮层），stop 旧桥后
+    ///   按原端口优先 start(preferredPort:)（被占用则回退动态端口，由 ShellWebView 换 base 重载）；
+    /// - 节点未 online / 桥非 running：no-op（冷启动有 autoStart，未认证有状态页）。
+    func reconnectAfterForeground() async {
+        guard case .online = state, case .running(let oldBase) = bridge else { return }
+
+        if await bridgeProbe(oldBase) {
+            return
+        }
+        guard genStillOnlineAndBridge(matches: oldBase) else { return }
+        log("↻ 回前台探活失败，重建本地桥（节点不重 up）…")
+        bridge = .reconnecting
+
+        loopback?.stop()
+        loopback = nil
+
+        guard let handle = await backend?.dialHandle() else {
+            guard genStillOnline() else { return }
+            bridge = .failed("回前台重建失败：拿不到 tailscale handle")
+            log("❌ 回前台重建失败：tailscale handle 为 nil")
+            return
+        }
+        guard genStillOnlineAndBridgeReconnecting() else { return }
+
+        let preferred = URL(string: oldBase)?.port
+        let proxy = bridgeFactory(handle)
+        loopback = proxy
+        do {
+            let base = try await proxy.start(preferredPort: preferred.map(UInt16.init) ?? nil)
+            // 重建期间可能已被登出/取消/重入网（桥已离开 .reconnecting）：撤掉刚起的监听，
+            // 丢弃迟到结果。
+            guard genStillOnlineAndBridgeReconnecting() else {
+                proxy.stop()
+                if self.loopback === proxy { self.loopback = nil }
+                return
+            }
+            bridge = .running(base.absoluteString)
+            log("✅ 回前台本地桥恢复：\(base.absoluteString)")
+        } catch {
+            guard case .online = state else { return }
+            bridge = .failed("回前台重建本地桥失败：\(error)")
+            loopback = nil
+            log("❌ 回前台重建本地桥失败：\(error)")
+        }
+    }
+
+    /// 重建守卫：节点仍 online、桥仍是记录中的那个 running base（期间未被登出/重入网）。
+    private func genStillOnlineAndBridge(matches base: String) -> Bool {
+        guard case .online = state, case .running(let current) = bridge else { return false }
+        return current == base
+    }
+
+    private func genStillOnline() -> Bool {
+        if case .online = state { return true }
+        return false
+    }
+
+    private func genStillOnlineAndBridgeReconnecting() -> Bool {
+        guard case .online = state, case .reconnecting = bridge else { return false }
+        return true
     }
 
     /// 停本地桥（signOut/cancel/失败/重入网前）；幂等。

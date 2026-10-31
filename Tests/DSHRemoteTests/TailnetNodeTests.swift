@@ -577,4 +577,110 @@ final class TailnetNodeTests: XCTestCase {
         let dials = await backend.dialHandleCalls
         XCTAssertEqual(dials, 1)
     }
+
+    // MARK: 6.1 回前台主动重建（2.6 真机策略：不重 up 节点，只探活外挂桥，失效则重建）
+
+    /// 测试桥工厂：起真实 127.0.0.1 listener，本地 /__shell__/ping 不经上游即可应答。
+    private func makeTestProxy() -> LoopbackProxy {
+        let suite = "TailnetNodeTests.bridge.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let bridge = HttpBridge(routes: ShellAssetRoutes { _ in nil }, connecter: FakeConnecter())
+        return LoopbackProxy(bridge: bridge, defaults: defaults)
+    }
+
+    private func makeReconnectNode(
+        backend: FakeTailnetBackend,
+        probe: @escaping (String) async -> Bool,
+        onMakeBridge: (() -> Void)? = nil
+    ) -> TailnetNode {
+        TailnetNode(
+            authStore: auth, stateDirectory: tempDir,
+            bridgeProbe: probe,
+            bridgeFactory: { _ in
+                onMakeBridge?()
+                return self.makeTestProxy()
+            }) { backend }
+    }
+
+    private func waitForBridgeRunning(_ node: TailnetNode, base: inout String?) async {
+        for _ in 0..<300 {
+            if case .running(let b) = node.bridge { base = b; return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    func testForegroundReconnectWhenBridgeAliveDoesNotRebuild() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.60", ip6: nil), handle: 7)
+        var probeCalls = 0
+        var makes = 0
+        let node = makeReconnectNode(backend: backend,
+                                     probe: { _ in probeCalls += 1; return true },
+                                     onMakeBridge: { makes += 1 })
+        await node.signIn(authKey: "tskey-fg-ok")
+        await waitForSettle(node)
+        var base: String?
+        await waitForBridgeRunning(node, base: &base)
+        let baseBefore = base
+
+        await node.reconnectAfterForeground()
+
+        guard case .running(let baseAfter) = node.bridge else {
+            return XCTFail("期望重建后仍 .running，实际 \(node.bridge)")
+        }
+        XCTAssertEqual(baseAfter, baseBefore, "桥仍活时不得重建/换端口")
+        XCTAssertEqual(probeCalls, 1, "回前台必须探活一次")
+        XCTAssertEqual(makes, 1, "桥活时不得新建第二个本地桥")
+        let shutdowns = await backend.shutdowns()
+        XCTAssertEqual(shutdowns, 0, "2.6 策略：回前台不重 up 节点")
+        await node.signOut()
+    }
+
+    func testForegroundReconnectRebuildsDeadBridgeAndServesAgain() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.61", ip6: nil), handle: 8)
+        var probeCalls = 0
+        var makes = 0
+        let node = makeReconnectNode(backend: backend,
+                                     probe: { _ in probeCalls += 1; return false },
+                                     onMakeBridge: { makes += 1 })
+        await node.signIn(authKey: "tskey-fg-dead")
+        await waitForSettle(node)
+        var base: String?
+        await waitForBridgeRunning(node, base: &base)
+        let oldBase = try! XCTUnwrap(base)
+
+        // 重建期间对外是 .reconnecting，不假装在线；最终回到 .running 且新端口真实应答。
+        await node.reconnectAfterForeground()
+
+        guard case .running(let newBase) = node.bridge else {
+            return XCTFail("期望重建后 .running，实际 \(node.bridge)")
+        }
+        XCTAssertEqual(probeCalls, 1)
+        XCTAssertEqual(makes, 2, "探活失败必须停旧桥、按原端口优先重建一次")
+        let alive = await LoopbackProbe.isAlive(base: newBase)
+        XCTAssertTrue(alive, "重建后的新桥必须真实可连")
+        let oldAlive = await LoopbackProbe.isAlive(base: oldBase)
+        // 换端口时旧 listener 必须已关闭（同端口复用则新旧同址，不做断言）。
+        if newBase != oldBase { XCTAssertFalse(oldAlive, "换端口重建后旧 listener 必须已停") }
+        let shutdowns = await backend.shutdowns()
+        XCTAssertEqual(shutdowns, 0, "重建只动外挂桥，不重 up 节点")
+        await node.signOut()
+    }
+
+    func testForegroundReconnectIgnoredWhenNodeNotRunning() async {
+        let backend = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.62", ip6: nil))
+        var probeCalls = 0
+        var makes = 0
+        let node = makeReconnectNode(backend: backend,
+                                     probe: { _ in probeCalls += 1; return true },
+                                     onMakeBridge: { makes += 1 })
+        // 未认证（桥 .stopped）：回前台什么都不做，不探活、不建桥。
+        node.autoStart()
+        await node.reconnectAfterForeground()
+        XCTAssertEqual(node.state, .unauthenticated)
+        XCTAssertEqual(probeCalls, 0)
+        XCTAssertEqual(makes, 0)
+        guard case .stopped = node.bridge else {
+            return XCTFail("期望桥 .stopped，实际 \(node.bridge)")
+        }
+    }
 }

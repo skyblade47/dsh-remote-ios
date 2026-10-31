@@ -209,6 +209,7 @@ struct TailnetVerifyView: View {
         case .stopped: return "未启动"
         case .starting: return "启动中…"
         case .running: return "就绪"
+        case .reconnecting: return "重连中…"
         case .failed(let reason): return "异常：\(reason)"
         }
     }

@@ -75,6 +75,8 @@ struct ShellWebView: UIViewRepresentable {
         private var loadedBase: String?
         /// 当前展示的状态页标识（nil 表示壳/非状态页）；相同状态不重复 loadHTMLString。
         private var statusShown: String?
+        /// 6.1 回前台重建浮层（盖在壳上，不拆壳）；非重建态置 nil 并移除。
+        private var reconnectOverlay: UIView?
 
         static let appVersion: String =
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
@@ -117,6 +119,8 @@ struct ShellWebView: UIViewRepresentable {
 
         /// 按 TailnetNode.bridge 状态驱动 WebView：
         /// - running(base)：装载反代壳（base 变化即重载，适配桥重启换动态端口）；
+        /// - reconnecting（6.1 回前台重建）：已装壳则盖原生「tailnet 重连中」浮层，**不拆壳、
+        ///   不假装在线**；未装壳（极端时序）才放一张重连状态页；
         /// - starting/stopped：等待页；
         /// - failed：失败页（引导去右上「TS」设置页入网/重试）。
         /// 节点运行中 bridge 偶发短暂变更时不主动拆已装好的壳，避免无谓白屏；
@@ -124,6 +128,7 @@ struct ShellWebView: UIViewRepresentable {
         func apply(_ state: TailnetNode.BridgeState, to webView: WKWebView) {
             switch state {
             case .running(let base):
+                hideReconnectOverlay()
                 guard loadedBase != base else { return }
                 guard let shellURL = URL(string: base)?.appendingPathComponent("/__shell__/shell.html") else {
                     NSLog("[dsh-ios] 反代 base 非法：\(base)")
@@ -135,13 +140,23 @@ struct ShellWebView: UIViewRepresentable {
                 var request = URLRequest(url: shellURL)
                 request.cachePolicy = .reloadIgnoringLocalCacheData
                 webView.load(request)
+            case .reconnecting:
+                if loadedBase != nil {
+                    // 壳保持原样（不白屏），只盖一层不可交互的重连浮层表明此刻未在线。
+                    showReconnectOverlay(in: webView)
+                } else {
+                    showStatus("reconnecting", page: Self.reconnectingPage, in: webView)
+                }
             case .starting:
+                hideReconnectOverlay()
                 guard loadedBase == nil else { return }
                 showStatus("starting", page: Self.startingPage, in: webView)
             case .stopped:
+                hideReconnectOverlay()
                 guard loadedBase == nil else { return }
                 showStatus("stopped", page: Self.stoppedPage, in: webView)
             case .failed(let reason):
+                hideReconnectOverlay()
                 guard loadedBase == nil else { return }
                 showStatus("failed", page: Self.failedPage(reason), in: webView)
             }
@@ -166,6 +181,57 @@ struct ShellWebView: UIViewRepresentable {
             statusShown = key
             // 状态页以 about:blank 为 base：零网络，且不占据 localhost origin。
             webView.loadHTMLString(page, baseURL: URL(string: "about:blank")!)
+        }
+
+        /// 6.1：在已装好的壳上盖一层原生重连浮层（不拆壳、不白屏、不假装在线）。
+        /// 半透明遮罩拦截全部触摸，避免用户在桥断的瞬间继续触发会失败的操作。
+        private func showReconnectOverlay(in webView: WKWebView) {
+            if reconnectOverlay != nil { return }
+            let dim = UIView()
+            dim.translatesAutoresizingMaskIntoConstraints = false
+            dim.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+
+            let card = UIView()
+            card.translatesAutoresizingMaskIntoConstraints = false
+            card.backgroundColor = UIColor.systemBackground
+            card.layer.cornerRadius = 14
+            let stack = UIStackView()
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            stack.axis = .vertical
+            stack.alignment = .center
+            stack.spacing = 12
+
+            let spinner = UIActivityIndicatorView(style: .large)
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            spinner.startAnimating()
+            let label = UILabel()
+            label.text = "tailnet 重连中…"
+            label.font = .systemFont(ofSize: 15, weight: .medium)
+            label.textColor = .label
+            stack.addArrangedSubview(spinner)
+            stack.addArrangedSubview(label)
+            card.addSubview(stack)
+            dim.addSubview(card)
+            webView.addSubview(dim)
+            NSLayoutConstraint.activate([
+                dim.topAnchor.constraint(equalTo: webView.topAnchor),
+                dim.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+                dim.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
+                dim.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
+                card.centerXAnchor.constraint(equalTo: dim.centerXAnchor),
+                card.centerYAnchor.constraint(equalTo: dim.centerYAnchor),
+                card.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 22),
+                stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -22),
+                stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 28),
+                stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -28)
+            ])
+            reconnectOverlay = dim
+        }
+
+        private func hideReconnectOverlay() {
+            reconnectOverlay?.removeFromSuperview()
+            reconnectOverlay = nil
         }
 
         // MARK: - 导航观测
@@ -240,6 +306,11 @@ struct ShellWebView: UIViewRepresentable {
         static let stoppedPage = wrap(body:
             "<h3>内网通道未连接</h3>"
             + "<p>请点右上角「TS」完成一次入网，通道建立后会自动进入写作页。</p>")
+
+        /// 6.1 回前台重建中（壳尚未装好的极端时序才用；正常路径盖原生浮层不拆壳）。
+        static let reconnectingPage = wrap(body:
+            "<div class=\"spin\"></div><h3>tailnet 重连中…</h3>"
+            + "<p>正在恢复本地安全通道，通常一秒内完成。</p>")
 
         /// 桥失败/壳加载失败：reason 转义后上屏，绝不静默白屏。
         static func failedPage(_ reason: String) -> String {

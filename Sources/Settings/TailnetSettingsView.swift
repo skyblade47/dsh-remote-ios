@@ -206,6 +206,7 @@ struct TailnetSettingsView: View {
         case .stopped: return "未启动"
         case .starting: return "启动中…"
         case .running: return "就绪"
+        case .reconnecting: return "重连中…"
         case .failed: return "异常"
         }
     }
@@ -214,7 +215,7 @@ struct TailnetSettingsView: View {
         switch node.bridge {
         case .running: return .green
         case .failed: return .red
-        case .starting: return .orange
+        case .starting, .reconnecting: return .orange
         case .stopped: return .secondary
         }
     }
