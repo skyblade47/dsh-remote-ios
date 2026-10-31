@@ -144,10 +144,12 @@ enum S1ProbePage {
         }
 
         function render(){
+          const esc = s => String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           const el = document.getElementById('out');
           el.innerHTML = results.map(r =>
             '<div class="r"><div class="b ' + (r.pass?'g':'x') + '"></div><div>' +
-            '<div class="t">' + r.name + '</div><div class="d">' + r.detail + '</div></div></div>'
+            '<div class="t">' + esc(r.name) + '</div><div class="d">' + esc(r.detail) + '</div></div></div>'
           ).join('') + '<div class="d">①–⑤全绿即 Phase 5 主线通过。</div>';
           const allGreen = results.length === 5 && results.every(r => r.pass);
           if (window.webkit && window.webkit.messageHandlers.s1Report) {
