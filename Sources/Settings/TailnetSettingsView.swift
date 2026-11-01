@@ -16,6 +16,8 @@ struct TailnetSettingsView: View {
     @ObservedObject private var node = TailnetNode.shared
     // 6.2：应急开关/路由状态（Funnel 地址本身存 UserDefaults "gateway"，与壳弹层同一处）。
     @ObservedObject private var routeStore = RouteStore.shared
+    // 6.3：待发箱只读计数（上传同步北极星的真机取证）；与 BridgeDispatcher 读同一 outbox.json。
+    @StateObject private var outboxCounter = OutboxCounter()
     @Environment(\.dismiss) private var dismiss
 
     // key 只活在这个 @State：点「入网」后立刻置空，不落盘、不进日志。
@@ -100,6 +102,40 @@ struct TailnetSettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                // 6.3 上传同步（北极星）真机取证：只读 outbox 计数，与 BridgeDispatcher 同一文件。
+                Section {
+                    HStack {
+                        Text("待同步草稿")
+                        Spacer()
+                        Text("\(outboxCounter.pendingCount) 条")
+                            .foregroundStyle(outboxCounter.pendingCount == 0 ? .green : .orange)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    if !outboxCounter.countByDoc.isEmpty {
+                        ForEach(
+                            outboxCounter.countByDoc.sorted {
+                                $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key
+                            },
+                            id: \.key
+                        ) { name, count in
+                            HStack {
+                                Text(name.isEmpty ? "（根文档）" : name)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(count)")
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Text("断网编辑的草稿会先保存在本机待同步队列，恢复网络后经内嵌通道自动上传；上传成功即从队列移除。此处每秒刷新，可用于核对「入队 → 归零」。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("上传同步")
                 }
 
                 Section {
@@ -197,6 +233,11 @@ struct TailnetSettingsView: View {
             .onAppear {
                 // 进入页面回填已保存的 Funnel 地址（与壳内设置弹层共用 UserDefaults "gateway"）。
                 if funnelInput.isEmpty { funnelInput = Cfg.gateway }
+                // 6.3：进入设置页才轮询待发箱计数，离开即停（省电、避免常驻）。
+                outboxCounter.start()
+            }
+            .onDisappear {
+                outboxCounter.stop()
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
