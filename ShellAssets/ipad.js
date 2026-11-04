@@ -617,6 +617,38 @@
     }).catch(function (err) { console.warn('基线更新异常，不阻断补推', relPath, err) })
   }
 
+  // 补推成功后的**双通道**版本回填（修复纯在线反复弹「本地与远端都改过」）：
+  // drain 是 writing.js syncPush 之外的第二条上行通道。若只写持久基线（上面的
+  // applySyncedBaseline），writing.js 内存里的 state.sync.baseline 仍是旧版本
+  // （它只在启动 initSync 时从持久基线播种一次），下一次自动保存便会拿着过期
+  // baseVersion 撞 409、被判 remote-newer/conflict 而反复弹横幅。
+  // writing.js 暴露的 __wcSyncBridge.noteSavedVersion 正是「双通道版本对齐（写）」
+  // 原语（send-net 已在用）：一次调用同时回填**内存+持久**基线并清横幅去重。
+  // 窄桥缺失/异常（写作模块未就绪等）⇒ 退回只写持久基线，至少不回归磁盘一致性。
+  // @param rel 本地 relPath（无 正文/ 前缀）；@param remoteVersion 保存响应权威版本
+  function recordSyncedVersion(rel, remoteVersion) {
+    if (!remoteVersion || !rel) return applySyncedBaseline(rel, remoteVersion || '')
+    try {
+      var bridge = window.__wcSyncBridge
+      if (bridge && typeof bridge.noteSavedVersion === 'function' &&
+          window.WCSync && typeof window.WCSync.toRemoteRel === 'function') {
+        var remoteRel = window.WCSync.toRemoteRel(rel)
+        if (remoteRel) {
+          // noteSavedVersion 内部 saveSyncBaseline 会同时改内存并写盘；fire-and-forget，
+          // 与 writing.js syncPush 成功路径同口径。
+          return Promise.resolve(bridge.noteSavedVersion(remoteRel, remoteVersion))
+            .catch(function (err) {
+              console.warn('内存版本对齐失败，退回持久基线', rel, err)
+              return applySyncedBaseline(rel, remoteVersion)
+            })
+        }
+      }
+    } catch (err) {
+      console.warn('内存版本对齐异常，退回持久基线', rel, err)
+    }
+    return applySyncedBaseline(rel, remoteVersion)
+  }
+
   // spec §6.25/§6.44（同安卓）：saveDraft 是所有上行的唯一咽喉。
   //   · 成功即 outboxRemove（writeDoc 落盘时已无条件入队，直推成功后无人移除）；
   //   · single-flight：同 rel|base|长度|djb2 哈希 的在途调用复用同一个 Promise，
@@ -749,7 +781,7 @@
               })
               // ② skip（内容未变/同源同内容）：更新基线后出队。
               if (d.action === 'skip') {
-                return applySyncedBaseline(rel, hit ? (hit.version || '') : '').then(function () {
+                return recordSyncedVersion(rel, hit ? (hit.version || '') : '').then(function () {
                   return api.outboxRemove(rel)
                 }).then(next)
               }
@@ -773,7 +805,7 @@
               return window.WCSyncNet.saveDraft(rel, content, saveOpts).then(function (sr) {
                 if (sr && sr.ok) {
                   pushedSomething = true
-                  return applySyncedBaseline(rel, sr.version).then(function () {
+                  return recordSyncedVersion(rel, sr.version).then(function () {
                     return api.outboxRemove(rel)
                   }).then(next)
                 }
