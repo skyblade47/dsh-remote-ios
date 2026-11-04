@@ -614,6 +614,11 @@ final class TailnetNodeTests: XCTestCase {
         let node = makeNodeQueue(queue)
 
         Task { await node.signIn(authKey: "tskey-a") }
+        // signIn 在后台 Task 里，必须先等工厂真正创建出第一个后端再取（否则 created 为空越界）。
+        for _ in 0..<300 {
+            if queue.createdCount() >= 1 { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         await waitForBringUpEntered(node, queue.backend(at: 0))
 
         // 旧实现里这一句会 await 挂死的 shutdown 永不返回；放后台 Task 调，给状态恢复设死线。
