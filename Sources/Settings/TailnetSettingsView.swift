@@ -203,14 +203,16 @@ struct TailnetSettingsView: View {
                     } label: {
                         Label("登出（下线并删除 Keychain 凭据）", systemImage: "arrow.down.circle")
                     }
-                    .disabled(isStarting || node.state == .idle)
+                    // starting 也允许：2026-11 死锁回归后 signOut 先翻状态再非阻塞下线，不会卡死。
+                    .disabled(node.state == .idle || node.state == .unauthenticated)
 
                     Button(role: .destructive) {
                         showWipeConfirm = true
                     } label: {
                         Label("彻底清除本机节点状态", systemImage: "trash")
                     }
-                    .disabled(isStarting || node.state == .idle)
+                    // 最终逃生口：starting 卡死/取消无效时也必须可点，直接删状态目录自救。
+                    .disabled(node.state == .idle)
                 }
 
                 // 真机无 Mac 看不到 os_log：最近节点日志直接上屏，弱网卡死时可据此排查（可复制）。

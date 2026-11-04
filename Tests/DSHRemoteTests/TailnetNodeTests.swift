@@ -58,10 +58,15 @@ private actor FakeTailnetBackend: TailnetBackending {
     private(set) var shutdownCount = 0
     private(set) var dialHandleCalls = 0
     private var hang: CheckedContinuation<(ip4: String?, ip6: String?), Error>?
+    /// 真机缺陷回归：模拟 Go 侧 down() 自身也永久阻塞（与挂死的 up() 争用同一节点锁）。
+    /// 开启后 shutdown() 只计数、永不返回，也不释放挂起的 up —— 节点层的逃生口必须
+    /// 不 await 它也能把 UI 状态打回。
+    private let shutdownHangs: Bool
 
-    init(outcome: FakeOutcome, handle: Int32? = nil) {
+    init(outcome: FakeOutcome, handle: Int32? = nil, shutdownHangs: Bool = false) {
         self.outcome = outcome
         self.handle = handle
+        self.shutdownHangs = shutdownHangs
     }
 
     /// 6.2 切片4：预置 statusJSON 返回序列（按调用顺序弹出，耗尽后恒返回最后一个）。
@@ -96,6 +101,10 @@ private actor FakeTailnetBackend: TailnetBackending {
 
     func shutdown() async {
         shutdownCount += 1
+        // 真机缺陷回归：down() 自身也永久阻塞时，不释放挂起的 up、也不返回。
+        if shutdownHangs {
+            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+        }
         // 模拟 down 中断挂起的 up，释放用例里卡住的 bringUp（并清掉孤立 Task）。
         hang?.resume(throwing: CancellationError())
         hang = nil
@@ -235,6 +244,15 @@ final class TailnetNodeTests: XCTestCase {
     private func waitForBringUpEntered(_ node: TailnetNode, _ backend: FakeTailnetBackend) async {
         for _ in 0..<300 {
             if case .starting = node.state, await backend.callCount() >= 1 { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// 下线是 fire-and-forget（生产 down() 丢 detached，绝不挡住逃生口）：轮询等 shutdown()
+    /// 真正进入后端，避免在「await signOut() 返回」那一刻就读计数造成竞态。
+    private func waitForShutdowns(_ backend: FakeTailnetBackend, _ expected: Int) async {
+        for _ in 0..<100 {
+            if await backend.shutdowns() >= expected { return }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
     }
@@ -440,6 +458,7 @@ final class TailnetNodeTests: XCTestCase {
         await node.signOut()
         XCTAssertEqual(node.state, .unauthenticated)
         XCTAssertNil(auth.key)
+        await waitForShutdowns(backend, 1)
         let shutdowns = await backend.shutdowns()
         XCTAssertEqual(shutdowns, 1)
     }
@@ -516,6 +535,7 @@ final class TailnetNodeTests: XCTestCase {
         }
         let calls = await backend.callCount()
         XCTAssertEqual(calls, 1, "超时不得重试点燃第二次 bringUp")
+        await waitForShutdowns(backend, 1)
         let shutdowns = await backend.shutdowns()
         XCTAssertEqual(shutdowns, 1, "看门狗必须 down() 打断阻塞中的 up")
         XCTAssertFalse(node.recentLogs.isEmpty, "超时过程应写入内存日志，供设置页排查")
@@ -532,6 +552,7 @@ final class TailnetNodeTests: XCTestCase {
 
         await node.cancelBringUp()
         XCTAssertEqual(node.state, .unauthenticated, "取消后应回未认证态，不再死锁在 starting")
+        await waitForShutdowns(queue.backend(at: 0), 1)
         let firstShutdowns = await queue.backend(at: 0).shutdowns()
         XCTAssertEqual(firstShutdowns, 1, "取消必须 down() 打断第一次挂起的 up")
 
@@ -551,6 +572,70 @@ final class TailnetNodeTests: XCTestCase {
         XCTAssertEqual(secondCall?.authKey, "tskey-b")
 
         await node.signOut()
+    }
+
+    /// 真机缺陷回归（2026-11）：Go 侧 down() 自身也永久阻塞时（与挂死的 up() 争用同一把
+    /// 节点锁），看门狗到点也**必须无条件**把状态落 .failed，不能被 shutdown() 反杀后永留
+    /// starting（真机表现：启动中卡死、取消无反应、登出/彻底清除全不可点）。
+    func testWatchdogFailsEvenWhenShutdownItselfHangs() async throws {
+        try seedState()
+        let backend = FakeTailnetBackend(outcome: .hang, shutdownHangs: true)
+        let node = makeNode(backend, bringUpTimeout: 0.3)
+
+        node.autoStart()
+        await waitForStarting(node)
+        await waitForFailed(node)
+
+        if case .failed(let reason) = node.state {
+            XCTAssertTrue(reason.contains("超时"), "必须上屏超时原因，实际：\(reason)")
+        } else {
+            return XCTFail("shutdown 自身卡死时，看门狗也必须落 .failed，实际 \(node.state)")
+        }
+        let calls = await backend.callCount()
+        XCTAssertEqual(calls, 1, "超时不得点燃第二次 bringUp")
+
+        // 看门狗必须作废旧代际：随后挂死的 up 即便迟到成功，也不得把 .failed 覆盖成 online。
+        await backend.releaseHang(outcome: .online(ip4: "100.64.0.77", ip6: nil))
+        for _ in 0..<10 {
+            if case .failed = node.state { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        if case .failed = node.state {} else {
+            return XCTFail("超时作废后旧 up 的迟到成功必须被丢弃，实际 \(node.state)")
+        }
+    }
+
+    /// 真机缺陷回归（2026-11）：shutdown() 永久挂起时，取消入网也必须在有界时间内把状态打回
+    /// .unauthenticated，且用户能立刻用新 key 重新入网（新后端），旧后端的挂死下线不得挡住。
+    func testCancelBringUpRecoversEvenWhenShutdownHangs() async throws {
+        let queue = BackendQueue()
+        queue.append(FakeTailnetBackend(outcome: .hang, shutdownHangs: true))
+        queue.append(FakeTailnetBackend(outcome: .online(ip4: "100.64.0.41", ip6: nil)))
+        let node = makeNodeQueue(queue)
+
+        Task { await node.signIn(authKey: "tskey-a") }
+        await waitForBringUpEntered(node, queue.backend(at: 0))
+
+        // 旧实现里这一句会 await 挂死的 shutdown 永不返回；放后台 Task 调，给状态恢复设死线。
+        let cancelTask = Task { await node.cancelBringUp() }
+        var recovered = false
+        for _ in 0..<100 {
+            if node.state == .unauthenticated { recovered = true; break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(recovered, "shutdown 卡死时取消也必须把状态打回 .unauthenticated，实际 \(node.state)")
+        cancelTask.cancel()
+
+        // 旧后端的 shutdown 永远挂着：不影响用第二个后端重新入网成功。
+        await node.signIn(authKey: "tskey-b")
+        await waitForSettle(node)
+        if case .online(let ip4, _) = node.state {
+            XCTAssertEqual(ip4, "100.64.0.41")
+        } else {
+            return XCTFail("取消（shutdown 卡死）后重入期望 online，实际 \(node.state)")
+        }
+        let secondCall = await queue.backend(at: 1).lastCall()
+        XCTAssertEqual(secondCall?.authKey, "tskey-b")
     }
 
     // MARK: 4.1 localhost 反代装配（真 NWListener 绑 127.0.0.1，不经 tailnet dial）

@@ -99,8 +99,11 @@ actor TailnetBackend: TailnetBackending {
 
     func shutdown() async {
         guard let node else { return }
-        try? await node.down()
         self.node = nil
+        // 真机死锁根因（2026-11）：down() 与可能仍挂死的 up() 争同一把 Go 节点锁，弱网/
+        // 控制面不可达时会无限阻塞。绝不在本 actor 内 await 它——否则节点层的取消/看门狗/
+        // 登出全被这一句反杀，UI 永久 starting。丢 detached 尽力下线，调用方立即拿到返回。
+        Task.detached { try? await node.down() }
     }
 
     /// 4.1：online 后取 C tailscale handle 给本地桥做 tailscale_dial；下节点后为 nil。
@@ -216,8 +219,6 @@ final class TailnetNode: ObservableObject {
     /// 代际令牌：每次 bringUp/cancel/signOut 自增；旧 bringUp Task 的迟到回调只认自己
     /// 那一版，作废后不得写 state（取消后旧结果迟到覆盖新入网是典型竞态）。
     private var generation = 0
-    /// 已被看门狗判定超时的代际：旧回调 catch 到时据此给「超时」而非泛化错误文案。
-    private var timedOutGenerations = Set<Int>()
 
     /// 3.4 测试入口：注入假 auth store / 临时状态目录 / 假后端 / 短超时；生产用默认 init。
     /// 6.1：追加 bridgeProbe / bridgeFactory 注入点（均带生产默认值），供回前台重建单测
@@ -297,16 +298,17 @@ final class TailnetNode: ObservableObject {
         await settle()
     }
 
-    /// 登出：下节点、删 Keychain item；状态目录默认保留（彻底清理由 wipeState 显式做）。
+    /// 登出：先同步作废旧代际、删 Keychain 并回未认证态，再非阻塞尽力下线（starting 中
+    /// 也可登出，不被可能挂死的 down() 反杀）。状态目录默认保留（彻底清理由 wipeState 显式做）。
     func signOut() async {
         generation &+= 1
-        timedOutGenerations.removeAll()
-        await stopBridge()
-        await backend?.shutdown()
+        let old = backend
         backend = nil
+        await stopBridge()
         authStore.deleteAuthKey()
         state = .unauthenticated
         log("signOut：节点已下线，Keychain 凭据已删")
+        Task { await old?.shutdown() }
     }
 
     /// 3.3「彻底清除」：登出后连 Documents/tailscale 历史态一起删（删完回到未认证）。
@@ -323,7 +325,6 @@ final class TailnetNode: ObservableObject {
     private func bringUp(authKey: String?) {
         generation &+= 1
         let gen = generation
-        timedOutGenerations.remove(gen)
         state = .starting
         log(authKey == nil
             ? "▶ 用已存登录态恢复节点…"
@@ -336,24 +337,26 @@ final class TailnetNode: ObservableObject {
         let ctl = controlURL
         let timeout = bringUpTimeout
 
-        // 弱网看门狗（3.5 真机缺陷）：up() 无超时，控制面不通时会无限挂起。到点仍未
-        // 回来就 down() 打断（actor 可重入：up 跑在 detached 里，shutdown 能进去），
-        // 旧 bringUp 因此抛错，被下面 catch 按「超时」上屏。只认自己这一版 generation。
+        // 弱网看门狗（3.5 真机缺陷 / 2026-11 死锁回归）：up() 无超时，控制面不通时会无限
+        // 挂起。到点仍未回来就**无条件、同步**先把状态落 .failed 并作废旧代际，再非阻塞尽力
+        // 下线——绝不 await 可能与 up() 互锁的 shutdown()，否则看门狗自身被反杀、UI 永久
+        // starting。旧 bringUp 无论随后成功还是抛错，都因 gen 已作废而被丢弃。
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard gen == self.generation, case .starting = self.state else { return }
-            self.timedOutGenerations.insert(gen)
+            self.generation &+= 1
             self.log("⏱ 入网 \(Int(timeout))s 未完成，判定超时，中断 up…")
-            await backend.shutdown()
+            state = .failed("入网超时（\(Int(timeout))s）：国际网络/DERP 不可达，检查网络后重试")
+            self.log("❌ 入网超时（弱网/控制面不可达）")
+            Task { await backend.shutdown() }
         }
 
         Task { @MainActor in
             do {
                 let addrs = try await backend.bringUp(
                     stateDir: dir, hostName: host, controlURL: ctl, authKey: authKey)
-                // 期间已被取消/登出/新一次入网取代：迟到结果一律丢弃。
+                // 期间已被取消/登出/看门狗超时/新一次入网取代（gen 作废）：迟到结果一律丢弃。
                 guard gen == self.generation else { return }
-                timedOutGenerations.remove(gen)
                 let ip4 = addrs.ip4 ?? ""
                 let ip6 = addrs.ip6 ?? ""
                 if ip4.isEmpty && ip6.isEmpty {
@@ -370,34 +373,29 @@ final class TailnetNode: ObservableObject {
                 await self.startBridge(gen: gen)
                 self.startPathPolling(gen: gen)
             } catch {
+                // 看门狗超时已自行落 .failed 并 bump gen；这里只处理「没等到超时就真实失败」。
                 guard gen == self.generation else { return }
-                let wasTimedOut = timedOutGenerations.contains(gen)
-                timedOutGenerations.remove(gen)
                 await self.stopBridge()
                 self.backend = nil
                 // 坏 key/吊销/网络原因都在 error 文本里；error 由 TailscaleKit 产生，不含入参 key。
-                if wasTimedOut {
-                    state = .failed("入网超时（\(Int(timeout))s）：国际网络/DERP 不可达，检查网络后重试")
-                    self.log("❌ 入网超时（弱网/控制面不可达）")
-                } else {
-                    state = .failed("\(error)")
-                    self.log("❌ 入网失败：\(error)")
-                }
+                state = .failed("\(error)")
+                self.log("❌ 入网失败：\(error)")
             }
         }
     }
 
-    /// starting 中用户主动取消：作废旧代际、down() 打断阻塞中的 up，回未认证态
-    /// （Keychain key 保留；覆盖安装残留的旧状态目录可用「彻底清除」删掉）。
+    /// starting 中用户主动取消：**同步先**作废旧代际、回未认证态，再非阻塞尽力下线。
+    /// 绝不在返回前 await 可能与挂死 up() 互锁的 shutdown()——这是真机「取消入网无反应」
+    /// 的根因（2026-11）。Keychain key 保留；覆盖安装残留的旧状态目录可用「彻底清除」删掉。
     func cancelBringUp() async {
         guard isStarting else { return }
         generation &+= 1
-        timedOutGenerations.removeAll()
-        await stopBridge()
-        await backend?.shutdown()
+        let old = backend
         backend = nil
+        await stopBridge()
         state = .unauthenticated
         log("已取消入网")
+        Task { await old?.shutdown() }
     }
 
     /// 带关联值的 .online 不能直接用 `== .starting` 比较；统一走模式匹配。
