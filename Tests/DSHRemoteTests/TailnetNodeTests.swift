@@ -54,6 +54,9 @@ private actor FakeTailnetBackend: TailnetBackending {
     /// 用 actor 可变状态做「先 unknown 后 P2P」之类的换链序列。
     private var statusScript: [Data?] = []
     private(set) var statusCalls = 0
+    /// 缺陷①自愈：dialHandle() 的可编程返回序列（按调用顺序弹出，耗尽后回落到构造时 handle）。
+    /// 用于模拟「首次起桥给 handle、回前台再取已失效给 nil」的 tsnet 挂死场景。
+    private var dialHandleScript: [Int32?] = []
     private(set) var calls: [Call] = []
     private(set) var shutdownCount = 0
     private(set) var dialHandleCalls = 0
@@ -72,6 +75,11 @@ private actor FakeTailnetBackend: TailnetBackending {
     /// 6.2 切片4：预置 statusJSON 返回序列（按调用顺序弹出，耗尽后恒返回最后一个）。
     func setStatusScript(_ data: [Data?]) {
         statusScript = data
+    }
+
+    /// 缺陷①自愈：预置 dialHandle 返回序列（按调用顺序弹出，耗尽后回落到构造时 handle）。
+    func setDialHandleScript(_ values: [Int32?]) {
+        dialHandleScript = values
     }
 
     func gatewayStatusJSON() async throws -> Data? {
@@ -110,9 +118,13 @@ private actor FakeTailnetBackend: TailnetBackending {
         hang = nil
     }
 
-    /// 4.1：节点 online 后本地桥来取 handle；记录调用次数，默认给 nil（不起真实桥）。
+    /// 4.1：节点 online 后本地桥来取 handle；记录调用次数。预置了 dialHandleScript 时
+    /// 按调用顺序弹出脚本值（模拟回前台再取已失效），否则回落到构造时 handle。
     func dialHandle() async -> Int32? {
         dialHandleCalls += 1
+        if !dialHandleScript.isEmpty {
+            return dialHandleScript.removeFirst()
+        }
         return handle
     }
 
@@ -708,7 +720,8 @@ final class TailnetNodeTests: XCTestCase {
     private func makeReconnectNode(
         backend: FakeTailnetBackend,
         probe: @escaping (String) async -> Bool,
-        onMakeBridge: (() -> Void)? = nil
+        onMakeBridge: (() -> Void)? = nil,
+        backendFactory: (() -> TailnetBackending)? = nil
     ) -> TailnetNode {
         TailnetNode(
             authStore: auth, stateDirectory: tempDir,
@@ -716,7 +729,7 @@ final class TailnetNodeTests: XCTestCase {
             bridgeFactory: { _ in
                 onMakeBridge?()
                 return self.makeTestProxy()
-            }) { backend }
+            }) { backendFactory?() ?? backend }
     }
 
     private func waitForBridgeRunning(_ node: TailnetNode, base: inout String?) async {
@@ -757,7 +770,12 @@ final class TailnetNodeTests: XCTestCase {
         var probeCalls = 0
         var makes = 0
         let node = makeReconnectNode(backend: backend,
-                                     probe: { _ in probeCalls += 1; return false },
+                                     probe: { _ in
+                                         // 首次探活旧桥已失效（false）；重建后二次探活必须命中新桥（true），
+                                         // 证明纯 NWListener 被回收、tsnet 仍活时只重建桥、不触发节点重 up。
+                                         probeCalls += 1
+                                         return probeCalls > 1
+                                     },
                                      onMakeBridge: { makes += 1 })
         await node.signIn(authKey: "tskey-fg-dead")
         await waitForSettle(node)
@@ -771,7 +789,7 @@ final class TailnetNodeTests: XCTestCase {
         guard case .running(let newBase) = node.bridge else {
             return XCTFail("期望重建后 .running，实际 \(node.bridge)")
         }
-        XCTAssertEqual(probeCalls, 1)
+        XCTAssertEqual(probeCalls, 2, "首次探旧桥 + 重建后二次探活新桥")
         XCTAssertEqual(makes, 2, "探活失败必须停旧桥、按原端口优先重建一次")
         let alive = await LoopbackProbe.isAlive(base: newBase)
         XCTAssertTrue(alive, "重建后的新桥必须真实可连")
@@ -780,6 +798,79 @@ final class TailnetNodeTests: XCTestCase {
         if newBase != oldBase { XCTAssertFalse(oldAlive, "换端口重建后旧 listener 必须已停") }
         let shutdowns = await backend.shutdowns()
         XCTAssertEqual(shutdowns, 0, "重建只动外挂桥，不重 up 节点")
+        await node.signOut()
+    }
+
+    /// 缺陷①自愈（信号一）：回前台取节点 handle 返回 nil（handle 已失效），判定 tsnet 挂死，
+    /// 必须非阻塞下线旧后端并用已存登录态重新 bringUp（复用重入网内核），最终重新 online。
+    func testForegroundRecoversNodeWhenDialHandleLost() async throws {
+        try seedState() // 有历史态：自愈恢复 authKey 必须传 nil（凭据在状态目录里）。
+        let backend0 = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.80", ip6: nil), handle: 7)
+        // 首次起桥给 7，回前台再取给 nil —— 模拟用户态 tsnet 被系统挂死后 handle 失效。
+        await backend0.setDialHandleScript([7, nil])
+        let backend1 = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.81", ip6: nil), handle: 9)
+        let queue = BackendQueue()
+        queue.append(backend0); queue.append(backend1)
+        var makes = 0
+        let node = makeReconnectNode(
+            backend: backend0,
+            probe: { _ in false }, // 旧桥已失效。
+            onMakeBridge: { makes += 1 },
+            backendFactory: { queue.make() }) // 自愈时 makeBackendInstance() 取到 backend1。
+        await node.signIn(authKey: "tskey-recover-handle")
+        await waitForSettle(node)
+        var base: String?
+        await waitForBridgeRunning(node, base: &base)
+
+        await node.reconnectAfterForeground()
+
+        // 发生第二次 bringUp：新后端被创建且确实入网，旧后端被非阻塞下线。
+        await waitForBringUpEntered(node, backend1)
+        await waitForSettle(node)
+        XCTAssertEqual(queue.createdCount(), 2, "handle 失效必须触发节点重新入网")
+        let b1Calls = await backend1.callCount()
+        XCTAssertGreaterThanOrEqual(b1Calls, 1)
+        XCTAssertNil(await backend1.lastCall()?.authKey, "有历史态时恢复入网不得带 auth key")
+        await waitForShutdowns(backend0, 1)
+        if case .online(let ip4, _) = node.state {
+            XCTAssertEqual(ip4, "100.64.0.81", "自愈后应承载新后端的在线地址")
+        } else {
+            return XCTFail("期望自愈后重新 online，实际 \(node.state)")
+        }
+        await waitForBridgeRunning(node, base: &base)
+        XCTAssertNotNil(base)
+        await node.signOut()
+    }
+
+    /// 缺陷①自愈（信号二）：handle 仍有效、新桥也重建成功，但二次探活仍不可达
+    /// （netstack 静默挂死），同样判定节点已死并重新 bringUp。
+    func testForegroundRecoversNodeWhenRebuiltBridgeStillUnreachable() async throws {
+        try seedState()
+        let backend0 = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.82", ip6: nil), handle: 8)
+        let backend1 = FakeTailnetBackend(outcome: .online(ip4: "100.64.0.83", ip6: nil), handle: 10)
+        let queue = BackendQueue()
+        queue.append(backend0); queue.append(backend1)
+        let node = makeReconnectNode(
+            backend: backend0,
+            probe: { _ in false }, // 含重建后二次探活仍 false：新桥数据面不可达。
+            backendFactory: { queue.make() })
+        await node.signIn(authKey: "tskey-recover-probe")
+        await waitForSettle(node)
+        var base: String?
+        await waitForBridgeRunning(node, base: &base)
+
+        await node.reconnectAfterForeground()
+
+        await waitForBringUpEntered(node, backend1)
+        await waitForSettle(node)
+        XCTAssertEqual(queue.createdCount(), 2, "重建后仍不可达必须触发节点重新入网")
+        XCTAssertGreaterThanOrEqual(await backend1.callCount(), 1)
+        await waitForShutdowns(backend0, 1)
+        if case .online = node.state {
+            // 通过即继续
+        } else {
+            return XCTFail("期望自愈后重新 online，实际 \(node.state)")
+        }
         await node.signOut()
     }
 

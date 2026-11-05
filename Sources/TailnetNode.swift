@@ -445,12 +445,16 @@ final class TailnetNode: ObservableObject {
         }
     }
 
-    /// 6.1 回前台主动重建（Phase 2.6 真机策略）：**不重 up 节点**（节点本身存活，重 up 要
-    /// 重新入网数十秒），只探活外挂 loopback 桥——iOS 挂起回收的是 NWListener。
+    /// 6.1 回前台主动重建（Phase 2.6 真机策略）：**正常路径不重 up 节点**（节点本身存活，
+    /// 重 up 要重新入网数十秒），只探活外挂 loopback 桥——iOS 挂起回收的是 NWListener。
     /// - 桥仍活：什么都不做（壳不白屏、不换 base）；
     /// - 桥已被回收：进 .reconnecting（壳不拆，只盖「tailnet 重连中」浮层），stop 旧桥后
     ///   按原端口优先 start(preferredPort:)（被占用则回退动态端口，由 ShellWebView 换 base 重载）；
     /// - 节点未 online / 桥非 running：no-op（冷启动有 autoStart，未认证有状态页）。
+    ///
+    /// 缺陷①（issue #20060）防御性自愈兜底：6.4 真机已裁决非临时节点正常回前台不会死，
+    /// 故正常路径仍只重建桥、不重 up。仅当出现「节点真死」信号（取 handle 失败，或新桥
+    /// 重建后二次探活仍不可达）才走 `recoverNodeFromForeground` 重新入网，作为极端情况兜底。
     func reconnectAfterForeground() async {
         guard case .online = state, case .running(let oldBase) = bridge else { return }
 
@@ -465,9 +469,10 @@ final class TailnetNode: ObservableObject {
         loopback = nil
 
         guard let handle = await backend?.dialHandle() else {
+            // 真死信号一：online 状态下却取不回 tailscale handle，说明用户态 tsnet 已挂死，
+            // 仅重建桥无意义（桥依赖 handle 做 tailscale_dial），转自愈重新入网。
             guard genStillOnline() else { return }
-            bridge = .failed("回前台重建失败：拿不到 tailscale handle")
-            log("❌ 回前台重建失败：tailscale handle 为 nil")
+            await recoverNodeFromForeground(reason: "回前台取节点 handle 失败，判定 tsnet 已挂死，重新入网…")
             return
         }
         guard genStillOnlineAndBridgeReconnecting() else { return }
@@ -484,14 +489,38 @@ final class TailnetNode: ObservableObject {
                 if self.loopback === proxy { self.loopback = nil }
                 return
             }
-            bridge = .running(base.absoluteString)
-            log("✅ 回前台本地桥恢复：\(base.absoluteString)")
+            // 真死信号二：listener 已起，但二次探活确认新桥数据面仍不可达（纯 NWListener
+            // 被回收时 handle 仍有效、这里会探活成功，不会误判；仅 netstack 静默挂死才命中）。
+            if await bridgeProbe(base.absoluteString) {
+                bridge = .running(base.absoluteString)
+                log("✅ 回前台本地桥恢复：\(base.absoluteString)")
+            } else {
+                proxy.stop()
+                if self.loopback === proxy { self.loopback = nil }
+                await recoverNodeFromForeground(reason: "回前台重建本地桥后仍不可达，判定 tsnet 已挂死，重新入网…")
+            }
         } catch {
             guard case .online = state else { return }
             bridge = .failed("回前台重建本地桥失败：\(error)")
             loopback = nil
             log("❌ 回前台重建本地桥失败：\(error)")
         }
+    }
+
+    /// 缺陷①自愈兜底：仅在 `reconnectAfterForeground` 观测到节点真死信号时调用。
+    /// 复用既有 `bringUp` 重入网内核（generation 自增、看门狗、状态机全复用），状态会
+    /// .starting → online/.failed，App 层据此切状态页/浮层。**不 await 入网完成**，交给状态机。
+    /// 逃生纪律沿用 cancelBringUp：先同步解绑 backend 并停桥，再非阻塞尽力下线旧后端，
+    /// 绝不 await 可能与挂死 up() 互锁的 shutdown()，否则自愈自身被反杀、UI 无反应。
+    private func recoverNodeFromForeground(reason: String) async {
+        log("🩺 \(reason)")
+        generation &+= 1
+        let old = backend
+        backend = nil
+        await stopBridge()
+        Task { await old?.shutdown() }
+        // 有历史态用目录凭据恢复（authKey=nil）；目录被清的极端情况才带 Keychain key。
+        bringUp(authKey: hasPersistedState ? nil : authStore.loadAuthKey())
     }
 
     /// 重建守卫：节点仍 online、桥仍是记录中的那个 running base（期间未被登出/重入网）。
