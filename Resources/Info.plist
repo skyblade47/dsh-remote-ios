@@ -63,5 +63,9 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!-- 语音输入（方案 E / spec §7.1）：WKWebView getUserMedia 首次授权时系统 TCC 弹窗的描述串，
+	     缺失该键会导致麦克风采集直接被判负（不弹授权框、mediaDevices 能力检测失败）。 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>用于在 DSH 中语音输入并转写为文字</string>
 </dict>
 </plist>

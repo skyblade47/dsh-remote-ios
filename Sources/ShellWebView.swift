@@ -462,6 +462,32 @@ struct ShellWebView: UIViewRepresentable {
             return nil
         }
 
+        // MARK: - 媒体采集授权（语音，spec §7.1 方案 E-iOS）
+
+        /// getUserMedia 授权闸门：仅当请求 origin 与当前实际装载的受信 origin
+        /// （①内嵌 localhost 反代 loadedBase / ③用户自配 Funnel https loadedFunnel）严格相等才授予。
+        /// 该回调公开签名不携带 WKMediaCaptureType，原生无法区分麦克风/相机，故 origin 白名单是
+        /// 唯一闸门；状态页无任何装载 origin（白名单为 nil）一律拒绝。系统级麦克风 TCC 弹窗由
+        /// WebKit 在首次 grant 后自行触发（依赖 Info.plist 的 NSMicrophoneUsageDescription）。
+        func webView(
+            _ webView: WKWebView,
+            requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+            initiatedByRequest frame: WKFrameInfo,
+            decisionHandler: @escaping (WKPermissionDecision) -> Void
+        ) {
+            let requestOrigin = MediaOrigin(
+                scheme: origin.`protocol`, host: origin.host, port: origin.port)
+            let allowedLocalhost = loadedBase.flatMap(MediaOrigin.init(urlString:))
+            let allowedFunnel = loadedFunnel.flatMap(MediaOrigin.init(url:))
+            let decision = MediaPermission.decision(
+                origin: requestOrigin,
+                allowedLocalhost: allowedLocalhost,
+                allowedFunnel: allowedFunnel)
+            NSLog("[dsh-ios] 媒体采集授权 \(origin.protocol)://\(origin.host):\(origin.port) -> "
+                + (decision == .grant ? "grant" : "deny"))
+            decisionHandler(decision)
+        }
+
         // MARK: - 状态页（零外部资源）
 
         private static func wrap(body: String) -> String {

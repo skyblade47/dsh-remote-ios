@@ -196,7 +196,10 @@
 
 ### Phase 7 — 语音（方案 E-iOS，随 D 收尾）与打包/文档/验收
 
-- [ ] **7.1** Info.plist 加 `NSMicrophoneUsageDescription`；接 AVAudioSession 录制授权回调（spec §7.1 两缺失）。
+- [x] **7.1** Info.plist 加 `NSMicrophoneUsageDescription`；实现 `WKUIDelegate` 媒体采集授权回调（spec §7.1 两缺失）。
+  - **实现（2026-11-05，TDD，待 CI 跑测试 + 7.2 真机收口）**：① [Info.plist](../../Resources/Info.plist) 末尾加 `NSMicrophoneUsageDescription`（文案「用于在 DSH 中语音输入并转写为文字」，spec §7.1 原句）。② 新增 [MediaPermission.swift](../../Sources/MediaPermission.swift)：`MediaOrigin`（scheme/host/port 三元组，大小写归一、缺省端口归一 0，可从 URL/URL 字符串构造，无 host 返回 nil）+ 纯函数 `MediaPermission.decision(origin:allowedLocalhost:allowedFunnel:)`，命中白名单返回 `.grant` 否则 `.deny`。③ [ShellWebView.swift](../../Sources/ShellWebView.swift) Coordinator 实现 `webView(_:requestMediaCapturePermissionFor:origin:initiatedByRequest:decisionHandler:)`，白名单取实时 `loadedBase`（①localhost 反代）/`loadedFunnel`（③Funnel https），授权结果打 NSLog。④ 测试 [MediaPermissionTests.swift](../../Tests/DSHRemoteTests/MediaPermissionTests.swift) 覆盖 grant/deny/端口-host-scheme 三元组/白名单 nil/便利构造 14 断言。
+  - **🔴 与 spec §7.1 表述的 API 现实偏差（重要）**：plan 原写「AVAudioSession 录制授权回调」、spec 写「对 `WKMediaCaptureType.microphone` 授予、相机 deny」。实测 WebKit 公开 API 中 `WKUIDelegate` 该回调签名**不携带 `WKMediaCaptureType` 参数**，原生侧无法区分麦克风/相机请求，也**不是 AVAudioSession 回调**（壳内零原生录音，录音是网关下发插件在 SPA 内用浏览器 `getUserMedia`，不走 native bridge/AVAudioSession）。实际安全姿态：origin 白名单是唯一闸门（仅两个受信自有 origin 可 grant，状态页白名单 nil 必 deny），系统级麦克风 TCC 弹窗由 WebKit 首次 grant 后自行触发；壳内唯一采集方是语音插件的 `getUserMedia({audio})`，全仓无视频采集约束。spec §7.1 第 2 点的「相机类型 deny」在公开 API 下不可直接判定，以此 origin 白名单 + 无视频约束两点等效兜底，待 7.4 回填 spec 注记。
+  - Windows 无 Swift 工具链，单测正确性由 CI `macos-15` 模拟器 test 验证；本地仅静态自查。
 - [ ] **7.2** 真机 localhost 安全上下文下：授权弹窗 → 录音（波形有振幅）→ transcribe（服务端 SenseVoice 方案 C 期已验就绪）→ 文本回填；拒绝授权显示 permission 文案不白屏。Funnel https 通道回归一次麦克风（https 也是安全上下文）。
 - [ ] **7.3** CI 产物：`CODE_SIGNING_ALLOWED=NO` 未签名 ipa 流程兼容新依赖；确认侧载装机步骤（Xcode 或重签工具）与 7 天重签节奏写入 README；记录包体增量。
 - [ ] **7.4** README 架构回填（§0.1/§3/§4）、构建说明（libtailscale 版本/脚本/CI）、三档通道与已知限制（后台挂起、7 天重签、包体、issue #20060）；spec §5/§8 回填「已实施」注记（对齐方案 C 在 spec §4.6 的回填范式）。
