@@ -830,7 +830,8 @@ final class TailnetNodeTests: XCTestCase {
         XCTAssertEqual(queue.createdCount(), 2, "handle 失效必须触发节点重新入网")
         let b1Calls = await backend1.callCount()
         XCTAssertGreaterThanOrEqual(b1Calls, 1)
-        XCTAssertNil(await backend1.lastCall()?.authKey, "有历史态时恢复入网不得带 auth key")
+        let b1AuthKey = await backend1.lastCall()?.authKey
+        XCTAssertNil(b1AuthKey, "有历史态时恢复入网不得带 auth key")
         await waitForShutdowns(backend0, 1)
         if case .online(let ip4, _) = node.state {
             XCTAssertEqual(ip4, "100.64.0.81", "自愈后应承载新后端的在线地址")
@@ -864,7 +865,8 @@ final class TailnetNodeTests: XCTestCase {
         await waitForBringUpEntered(node, backend1)
         await waitForSettle(node)
         XCTAssertEqual(queue.createdCount(), 2, "重建后仍不可达必须触发节点重新入网")
-        XCTAssertGreaterThanOrEqual(await backend1.callCount(), 1)
+        let b1Calls2 = await backend1.callCount()
+        XCTAssertGreaterThanOrEqual(b1Calls2, 1)
         await waitForShutdowns(backend0, 1)
         if case .online = node.state {
             // 通过即继续
