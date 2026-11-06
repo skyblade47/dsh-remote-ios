@@ -1,11 +1,13 @@
 # macOS runner 上编译 iOS 应用 → 产出**未签名** .ipa 工件
 #
 # 为什么这样切：Windows 上编译不出 iOS 应用（无 Xcode/iOS SDK），
-# 所以把"编译"放到 GitHub 的 macOS runner，"签名"留在本机（Sideloadly 用你的 Apple ID）。
+# 所以把"编译"放到 GitHub 的 macOS runner，"签名"留在本机（iLoader 用你的 Apple ID 重签）。
 # ⇒ **不给 CI 任何 Apple ID 凭据**（签名凭据不离开你的电脑）。
 #
-# 产物：DSHRemote-unsigned.ipa（Payload/DSHRemote.app 打包），本机用 Sideloadly 重签后装到 iPad。
-# ⚠️ 未实测：本条流水线尚未在真仓跑过（见 README §0）。
+# 产物：DSHRemote-unsigned.ipa（Payload/DSHRemote.app 打包，含 embed 的 TailscaleKit.framework），
+#       本机用 iLoader 重签（app + Frameworks 一并签）后装到 iPad。
+# 现状：已实测通过——2026-11-06 run-42166079900 产出 8,870,461 B ipa，真机侧载 + 语音五项验收全过。
+#       流水线含 TailscaleKit 闸门 A、PLIST_KEYS_CHECK、LINK_CHECK 三道硬自检。
 
 name: ios-build
 

@@ -38,7 +38,7 @@ targets:
     #    即 TailscaleKit 是**动态 framework**（21MB Go 在 dylib 内，不在主二进制里）。
     #    -force_load 对 dylib 不并入代码（run 40167137252 实测主二进制仅 1.0MB），
     #    正确做法是 Embed & Sign：拷贝到 .app/Frameworks/，主二进制只留 LC_LOAD_DYLIB。
-    #    未签名 CI 包里 embed 阶段只拷贝；签名交给本机 Sideloadly（须覆盖 Frameworks 内全部二进制）。
+    #    未签名 CI 包里 embed 阶段只拷贝；签名交给本机 iLoader（须覆盖 Frameworks 内全部二进制）。
     dependencies:
       - framework: Vendor/TailscaleKit.xcframework
         embed: true                       # 动态 framework：Embed Frameworks 拷进 .app/Frameworks/
@@ -49,7 +49,7 @@ targets:
         CURRENT_PROJECT_VERSION: "4"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "2"       # 2 = iPad only（本仓只面向 iPad）
-        CODE_SIGNING_ALLOWED: "NO"        # CI 里产出**未签名**包，签名留给本机 Sideloadly
+        CODE_SIGNING_ALLOWED: "NO"        # CI 里产出**未签名**包，签名留给本机 iLoader
         ENABLE_BITCODE: "NO"
         # 显式指定手写 Info.plist 为唯一事实源，并关闭 Xcode 16+ 的自动 plist 生成
         # （GENERATE_INFOPLIST_FILE 默认开，会用 build settings 另造一份最小 plist，吞掉自定义键）。

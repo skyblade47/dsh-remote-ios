@@ -200,11 +200,43 @@
   - **实现（2026-11-05，TDD，待 CI 跑测试 + 7.2 真机收口）**：① [Info.plist](../../Resources/Info.plist) 末尾加 `NSMicrophoneUsageDescription`（文案「用于在 DSH 中语音输入并转写为文字」，spec §7.1 原句）。② 新增 [MediaPermission.swift](../../Sources/MediaPermission.swift)：`MediaOrigin`（scheme/host/port 三元组，大小写归一、缺省端口归一 0，可从 URL/URL 字符串构造，无 host 返回 nil）+ 纯函数 `MediaPermission.decision(origin:allowedLocalhost:allowedFunnel:)`，命中白名单返回 `.grant` 否则 `.deny`。③ [ShellWebView.swift](../../Sources/ShellWebView.swift) Coordinator 实现 `webView(_:requestMediaCapturePermissionFor:origin:initiatedByRequest:decisionHandler:)`，白名单取实时 `loadedBase`（①localhost 反代）/`loadedFunnel`（③Funnel https），授权结果打 NSLog。④ 测试 [MediaPermissionTests.swift](../../Tests/DSHRemoteTests/MediaPermissionTests.swift) 覆盖 grant/deny/端口-host-scheme 三元组/白名单 nil/便利构造 14 断言。
   - **🔴 与 spec §7.1 表述的 API 现实偏差（重要）**：plan 原写「AVAudioSession 录制授权回调」、spec 写「对 `WKMediaCaptureType.microphone` 授予、相机 deny」。实测 WebKit 公开 API 中 `WKUIDelegate` 该回调签名**不携带 `WKMediaCaptureType` 参数**，原生侧无法区分麦克风/相机请求，也**不是 AVAudioSession 回调**（壳内零原生录音，录音是网关下发插件在 SPA 内用浏览器 `getUserMedia`，不走 native bridge/AVAudioSession）。实际安全姿态：origin 白名单是唯一闸门（仅两个受信自有 origin 可 grant，状态页白名单 nil 必 deny），系统级麦克风 TCC 弹窗由 WebKit 首次 grant 后自行触发；壳内唯一采集方是语音插件的 `getUserMedia({audio})`，全仓无视频采集约束。spec §7.1 第 2 点的「相机类型 deny」在公开 API 下不可直接判定，以此 origin 白名单 + 无视频约束两点等效兜底，待 7.4 回填 spec 注记。
   - Windows 无 Swift 工具链，单测正确性由 CI `macos-15` 模拟器 test 验证；本地仅静态自查。
-- [ ] **7.2** 真机 localhost 安全上下文下：授权弹窗 → 录音（波形有振幅）→ transcribe（服务端 SenseVoice 方案 C 期已验就绪）→ 文本回填；拒绝授权显示 permission 文案不白屏。Funnel https 通道回归一次麦克风（https 也是安全上下文）。
-- [ ] **7.3** CI 产物：`CODE_SIGNING_ALLOWED=NO` 未签名 ipa 流程兼容新依赖；确认侧载装机步骤（Xcode 或重签工具）与 7 天重签节奏写入 README；记录包体增量。
-- [ ] **7.4** README 架构回填（§0.1/§3/§4）、构建说明（libtailscale 版本/脚本/CI）、三档通道与已知限制（后台挂起、7 天重签、包体、issue #20060）；spec §5/§8 回填「已实施」注记（对齐方案 C 在 spec §4.6 的回填范式）。
-- [ ] **7.5** 清理：删除 Phase 2 spike 临时 target/工程；grep 无密钥/无占位 origin/无死代码；全量 CI（模拟器 test + Release iphoneos build）绿。
-- [ ] **7.6 总验收（对应 spec §5.7 九场景）**：自签真机；入网一次、杀进程/7 天重签登录态保留；Keychain 之外无明文；18 资产 + `/plugins`(combo/rev) + `/api` + 登录登出 Cookie + CSP iframe `/app` + WS；Secure/SameSite Cookie 在 http://127.0.0.1 实测；三档切换；弱网耗时对比；前后台重连；语音双通道。
+- [x] **7.2** 真机 localhost 安全上下文下：授权弹窗 → 录音（波形有振幅）→ transcribe（服务端 SenseVoice 方案 C 期已验就绪）→ 文本回填；拒绝授权显示 permission 文案不白屏。Funnel https 通道回归一次麦克风（https 也是安全上下文）。
+  - **2026-11-06 真机验收 GO（五项全过，iPad 经 iLoader 侧载 run-42166079900，含 plist 修复 6374e3c）**：
+    · **localhost 主线（①授权弹窗 ②录音波形 ③transcribe+回填）**：内嵌壳 `http://127.0.0.1` 反代安全上下文下，首次 getUserMedia 弹系统 TCC 麦克风授权框 → 录音波形有振幅 → transcribe（SenseVoice）→ 文本正确回填，端到端通过（用户实测「前三点没有问题」）。
+    · **④ 拒绝授权**：iPad 设置→隐私与安全性→麦克风关闭 DSH Remote 后回 App 触发语音，页面显示「权限未开启」permission 文案，**无白屏、无卡死、无崩溃**——getUserMedia 被系统 reject 后前端走权限提示分支，WKUIDelegate origin 闸门 + 系统 TCC 双层均生效（用户实测「正常显示权限未开启」）。
+    · **⑤ Funnel https 回归**：Tailnet 设置页保存合法 https Funnel origin（GatewayURL 强制 https），节点非 running 时开应急切 `.funnel`，顶部「应急通道（Funnel）· 返回内网」原生条出现，在 https 安全上下文重测麦克风授权/录音/转写**正常通过**（用户实测「第五项正常」）；与 [MediaPermissionTests.swift](../../Tests/DSHRemoteTests/MediaPermissionTests.swift) funnel 白名单 14 断言形成「单测 + 真机」闭环互证。
+    · **硬前置取证**：本条能跑通依赖 7.1 的 `NSMicrophoneUsageDescription` 真正进包——6374e3c 修复 XcodeGen `info:` 段只给 path 不给 properties 时模板 plist 吞键缺陷（旧 run-42160507335 包内 plist 仅 751B、21 个自定义键全丢，TCC 不弹窗、getUserMedia 直接判负），改显式 `INFOPLIST_FILE` + `GENERATE_INFOPLIST_FILE=NO`，CI 新增 PlistBuddy 逐项自检（PLIST_KEYS_CHECK）固化防回归。
+- [x] **7.3** CI 产物：`CODE_SIGNING_ALLOWED=NO` 未签名 ipa 流程兼容新依赖；确认侧载装机步骤（Xcode 或重签工具）与 7 天重签节奏写入 README；记录包体增量。
+  - **CI 未签名流程（已验证，无需改流水线）**：[ios-build.yml](../../.github/workflows/ios-build.yml) 双 job——`tailscalekit-gate`（构建 xcframework + 闸门 A 切片/minos 17.0 验收）→ `build`（模拟器 test + Release iphoneos `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""` + PLIST_KEYS_CHECK + TailscaleKit LINK_CHECK + 打未签名 ipa）。run-42166079900 全绿并产出可装机包，证明新依赖下未签名流程兼容。
+  - **侧载口径（2026-11-06 拍定 iLoader）**：Phase 2.1 曾用 Sideloadly 验证含 Go 动态框架可整包重签；最终装机以 **iLoader** 为准（run-42166079900 真机侧载通过），app 本体与 `Frameworks/TailscaleKit.framework` 一并重签。README §5 已写 iLoader 四步、免费 Apple ID **7 天重签**节奏（覆盖安装不丢 `Documents/tailscale` 节点态）、免装 Tailscale App。同步修正 README §0/§1、ios-build.yml 头注释、project.yml 注释里的 Sideloadly 旧口径。
+  - **包体增量（实测 run-42166079900 解包）**：内嵌前纯壳 ipa 约 0.44–0.54 MB（v0.2.5）→ 内嵌后 **ipa 8,870,461 B（≈8.46 MiB）**；包内 TailscaleKit dylib 未压缩 **22,356,392 B（≈21.3 MiB）**、主二进制 2,400,464 B（≈2.29 MiB，仅 LC_LOAD_DYLIB 不含 Go）。净增约 +8.3 MiB ipa，一次性固定成本，已记入 README §5.1。
+- [x] **7.4** README 架构回填（§0.1/§3/§4）、构建说明（libtailscale 版本/脚本/CI）、三档通道与已知限制（后台挂起、7 天重签、包体、issue #20060）；spec §5/§8 回填「已实施」注记（对齐方案 C 在 spec §4.6 的回填范式）。
+  - **README（iOS 仓）**：① 新增 §0.2「方案 D 架构总览」——内嵌节点 + 127.0.0.1 回环反代形态图、为何必须本地反代（SOCKS5 不作用于 WKWebView）、RouteStore 三档（.embedded/.funnel/nil）、凭据两档（signOut 保留目录态 / wipeState 删目录）、#20060 回前台探活重建（<1s 不重 up，真死才重新入网）、已知限制；旧 §0.1 Playgrounds 评估保留作决策记录并注明已被取代。② §3 重写为真实工程结构（节点面/反代面/通道/同步内核/桥/媒体授权/S1，扁平 Sources + Settings 子目录），注明旧虚拟 origin 三件套已零匹配删除。③ §4 两个历史决策点加「已被方案 D 收口」抬头，标注最终走 A 真回环 + 乙-1 资产内置。④ 新增 §5.2 TailscaleKit 构建复现（VERSION 钉 d1dc45d0 / binding 0.2.0 / v1.104.1 / Go 1.27.1，build-tailscalekit.sh，18.1→17.0 sed patch，CI gate/build 两 job 三道自检）。
+  - **spec（dsh-remote 仓 `2026-10-22-...md`）**：§5 开头加整体「已实施（2026-11-06）」状态注记；§7.1 加实施状态 + **API 偏差注记**（WKUIDelegate 媒体回调签名不带 WKMediaCaptureType、非 AVAudioSession，实际靠 loadedBase/loadedFunnel origin 白名单 + 全仓无视频采集兜底）；§8.1 表前加「改造后各维度全部落地」确认注记。原文均保留作设计基线。
+- [x] **7.5** 清理：删除 Phase 2 spike 临时 target/工程；grep 无密钥/无占位 origin/无死代码；全量 CI（模拟器 test + Release iphoneos build）绿。
+  - **spike target/工程（已不存在，复核确认）**：`project.yml` 仅 `DSHRemote` + `DSHRemoteTests` 两个 target，无 spike target；全仓 glob 无 `*Spike*`/`SpikeWebView` 源文件；`.xcodeproj` 由 xcodegen 生成且 gitignore。Sources 中残留的 "spike" 字样仅 6 处**历史叙述性注释**（说明设计源自 spike 实证），非代码符号，保留。
+  - **无密钥**：`tskey` 命中仅 ①`TailnetSettingsView` 的 `SecureField` 输入占位符、②测试里的假数据（`tskey-auth-test-123` 等），无真实 auth key；`TailnetAuthStore` 走 Keychain，不入 UserDefaults/日志/包。
+  - **无占位 origin/死代码**：`local.dsh-remote.invalid` / `dsh-asset` / `ShellOrigin` / `ShellSchemeHandler` / `ShellHTMLRewriter` 在 `Sources/` 与 `Tests/` 零匹配（仅存于历史 plan 文档与 README 的"已删除"说明）；glob 确认三件套 `.swift` 物理不存在，旧 `ShellHTMLRewriterTests` 已由 `ShellHTMLInjectorTests`/`ShellAssetRoutesTests` 取代。`100.99.84.35:8080` 是 dsh-cloud 真实 tailnet 地址，作为带默认值的注入参数（测试可覆盖），非密钥非占位。无 TODO/FIXME；唯一 `fatalError` 是 UIKit `required init?(coder:)` 标准样板。
+  - **入库卫生**：`git ls-files` 无 xcframework，`.gitignore` 含 `Vendor/TailscaleKit.xcframework/`，VERSION 入 git。
+  - **CI**：本次 7.3–7.5 改动仅文档/注释（README、plan、spec、ios-build.yml 头注释、project.yml 注释），不含 Swift/工程结构变更；最新代码真值 run-42166079900 模拟器 test + Release iphoneos build 全绿。Windows 无 Swift 工具链，无法本地复跑，下一次 push 后以 CI 复核（等用户授权 push）。
+- [x] **7.6 总验收（对应 spec §5.7 九场景）**：自签真机；入网一次、杀进程/7 天重签登录态保留；Keychain 之外无明文；18 资产 + `/plugins`(combo/rev) + `/api` + 登录登出 Cookie + CSP iframe `/app` + WS；Secure/SameSite Cookie 在 http://127.0.0.1 实测；三档切换；弱网耗时对比；前后台重连；语音双通道。
+  - **九场景逐条对账（2026-11-06 汇总，证据全部来自 Phase 3.5/4.8/5.9/6.x/7.2 既有真机与单测，无新增改动）**：
+
+    | # | spec §5.7 场景 | 结论 | 证据来源 |
+    |---|---|---|---|
+    | 1 | 自签真机 xcframework 链接运行无 entitlement 报错 | ✅ GO | 2.1（Sideloadly）+ 7.2（iLoader 重签 run-42166079900）真机零 `0x72613c21`/entitlement 错误；LINK_CHECK=PASS |
+    | 2 | auth key 入网一次，杀进程后登录态保留 | ✅ GO | 3.5 入网一次显示 tailnet IP、杀进程保活；6.4-B 非临时 key 锁屏回前台「直接已入网」 |
+    | 2b | **7 天重签后登录态保留** | ⏳ **待真机（时间相关，无法加速）** | 机制已保证：节点态在沙盒 `Documents/tailscale`，iLoader 覆盖安装不清沙盒；首次 7 天重签后由用户确认一次即可销项 |
+    | 3 | Keychain 之外无明文 auth key | ✅ GO | 3.5 沙盒 plist/UserDefaults/日志抽查无明文 tskey-auth；7.5 grep 复核仅占位符与测试假数据 |
+    | 4 | 18 壳资产 + `/plugins`(combo/rev) + `/api` 本地/反代 | ✅ GO | 5.9 主线真机：壳路由两通道（A 自体本地下发 + B 声明式 link/script onload）、plugins/api 全量业务流；AssetManifest 18 件白名单单测 |
+    | 5 | 登录/登出 Cookie、CSP iframe `/app`、WS 长连接 | ✅ GO | 4.8 真机登录后 WS OPEN 101 + cookie 现 `dsh_session`、未登录 WS 1006（upgrade 透传）；5.9 iframe `/app` 同源可读 location；TailnetVerifyView Cookie 验收页 |
+    | 6 | Secure/SameSite Cookie 在 http://127.0.0.1 实测 | ✅ GO（透传层） | 反代逐字节透传、Cookie 不在 hop-by-hop 剥离集（仅剥 8 个 hop 头+重写 Host），HttpBridge/HTTPHeadCodec/LoopbackProxy 三处单测锁定 Cookie 双向透传；真机登录态保持即 Set-Cookie/SameSite 在 loopback 安全上下文生效的端到端佐证 |
+    | 7 | 三档切换：P2P / 封 UDP 落 DERP / 停节点 Funnel 应急+文案 | ✅ GO | 6.2 三档真机（RouteStore 12 单测 + PeerPathParser 10 单测）；6.3 真实抖动自然落 `sha` DERP（status JSON CurAddr 空 + Relay=sha 坐实）后 NAT 重打洞回 P2P；Funnel 降级/独立登录/返回内网/橙色应急条逐项确认 |
+    | 8 | 弱网冷载/热启耗时 vs Funnel 基线（冷 45s/热 10s） | ✅ GO | 6.5：冷载 20–30s（优于 45s 基线）、热启 5–10s（达标）、断网回网约 5s 自动重连；声明不突破 EIP 带宽物理上限，只保成功率与冗余 |
+    | 9 | 后台挂起 ≥30s 回前台重连耗时与 UI | ✅ GO | 6.1 锁屏 30s 探活快路径无感；桥失效才 stop/start 重建 NWListener（实测 355ms，不重 up 节点）+「tailnet 重连中…」浮层；6.4 追加节点真死双信号自愈兜底（handle 丢失/二次探活失败才重新入网）+ 2 回归测试 |
+    | 附 | 语音双通道（方案 E-iOS） | ✅ GO | 7.2 真机五项全过：系统麦克风弹窗→授权→录音→转写→回填、拒绝显示 permission 文案不白屏、第四项未授权态正确、第五项正常 |
+
+  - **唯一未闭环项 = #2b「7 天重签后登录态保留」**：这是日历时间相关项，Windows/CI 无法加速验证，机制上由「节点态存沙盒、iLoader 覆盖安装不清沙盒、非临时 node key 不过期」三点保证。**待用户首次 7 天到期重签后确认一次**（预期：重签覆盖安装后打开 App 自动恢复同一节点、无需重粘 tskey）。其余八项 + 语音附项全部有真机或单测证据，7.6 判 GO（带 2b 一条观察项）。
 
 ---
 
