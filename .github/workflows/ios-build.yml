@@ -164,6 +164,25 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tail -n 60
 
+      - name: Info.plist 自定义键进包自检（防 XcodeGen 模板 plist 吞键回归）
+        # 2026-11-06 取证：project.yml 曾用 `info: { path }` 无 properties，xcodegen 生成最小
+        # 模板 plist 覆盖手写文件，导致包内 Info.plist 仅 751B，ATS 例外 / NSMicrophoneUsageDescription
+        # / 文件共享等 21 个自定义键全丢（run-42160507335 解包 hex dump 实证）。改显式
+        # INFOPLIST_FILE + GENERATE_INFOPLIST_FILE=NO 后，这里固化验收，任一缺失即让 CI 红。
+        run: |
+          set -euo pipefail
+          PLIST="build/Build/Products/Release-iphoneos/DSHRemote.app/Info.plist"
+          test -f "$PLIST"
+          echo "--- 包内 Info.plist 体积（期望远大于 751B 的最小生成模板）---"
+          ls -lh "$PLIST"
+          echo "--- 关键自定义键逐项验收 ---"
+          /usr/libexec/PlistBuddy -c 'Print NSMicrophoneUsageDescription' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Print NSAppTransportSecurity' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Print NSAppTransportSecurity:NSAllowsLocalNetworking' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Print UIFileSharingEnabled' "$PLIST"
+          /usr/libexec/PlistBuddy -c 'Print CFBundleDisplayName' "$PLIST"
+          echo "PLIST_KEYS_CHECK=PASS"
+
       - name: TailscaleKit 正式链接自检（动态 framework 确实 embed 进包）
         # TailscaleKit.framework/TailscaleKit 是 MH_DYLIB（动态框架）：22MB Go 在 dylib 内，
         # 主二进制仍 ~2MB、只含 LC_LOAD_DYLIB（magic bytes 取证于 Phase 2.1）。自检口径：
