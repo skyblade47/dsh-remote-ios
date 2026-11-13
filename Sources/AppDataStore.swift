@@ -49,6 +49,9 @@ final class AppDataStore {
         s["ui"] = (cfg["ui"] as? [String: Any]).map { deepCopy($0) } ?? [String: Any]()
         s["proofread"] = normalizeProofread(cfg["proofread"])
         s["writingPrefs"] = normalizeWritingPrefs(cfg["writingPrefs"] as? [String: Any])
+        // 记录板（笔记/待办/预览缓存，按 relPath 分文档）。2026-11-13 前原生白名单漏接 board，
+        // 导致 iPad 端 saveConfig({board}) 被静默丢弃、重启即丢；补齐后与 PC main.js 同口径。
+        s["board"] = normalizeBoard(cfg["board"])
         s["draftsDir"] = dataDir.appendingPathComponent("drafts").path
         return s
     }
@@ -167,6 +170,10 @@ final class AppDataStore {
         }
         if patch["writingPrefs"] != nil {
             next["writingPrefs"] = mergeWritingPrefs(prev["writingPrefs"], patch["writingPrefs"])
+        }
+        if patch["board"] != nil {
+            // 按 relPath 顶级键粒度合并，单文档 patch 不会覆盖他文档；逐条校验与 PC mergeBoard 同口径。
+            next["board"] = mergeBoard(prev["board"], patch["board"])
         }
 
         do {
@@ -648,6 +655,107 @@ final class AppDataStore {
             out["reminderTime"] = t
         }
         return out
+    }
+
+    // MARK: - 记录板（笔记/待办/预览缓存，按 relPath 双层映射，对齐 PC main.js mergeBoard）
+
+    /// 记录板上限（逐字对齐 PC main.js 常量）。
+    /// 单条笔记文本最多 2 万字；单篇文档待办最多 200 条；单条待办文本最多 500 字。
+    private static let boardNoteMax = 20_000
+    private static let boardTodoMax = 200
+    private static let boardTodoTextMax = 500
+    private static let boardTabs: Set<String> = ["notes", "todos", "proof", "preview"]
+
+    /// 整板归一化（对齐 PC normalizeBoard）：顶层四槽 version/activeTab/notes/todos/previewCache，
+    /// notes/todos/previewCache 均为「relPath → 值」的字典，非对象入参归一为空板。
+    private func normalizeBoard(_ raw: Any?) -> [String: Any] {
+        let o = asMap(raw)
+        let tab = o["activeTab"] as? String
+        return [
+            "version": Int64(1),
+            "activeTab": tab.map { Self.boardTabs.contains($0) ? $0 : "notes" } ?? "notes",
+            "notes": asMap(o["notes"]),
+            "todos": asMap(o["todos"]),
+            "previewCache": asMap(o["previewCache"])
+        ]
+    }
+
+    /// 笔记单条值（对齐 PC sanitizeBoardNote）：`{text, updatedAt}`；text 截断 2 万字，
+    /// 非字符串 text 或坏 rel 键返回 nil（调用方丢弃该条）。
+    private func sanitizeBoardNote(rel: String, _ v: Any?) -> [String: Any]? {
+        let o = asMap(v)
+        guard let text = o["text"] as? String, !rel.isEmpty else { return nil }
+        let ts = toDouble(o["updatedAt"])
+        let cut = text.count > Self.boardNoteMax ? String(text.prefix(Self.boardNoteMax)) : text
+        return ["text": cut, "updatedAt": ts.isFinite ? ts : Double(nowMillis())]
+    }
+
+    /// 待办单条（对齐 PC sanitizeBoardTodo）：`{id,text,done,createdAt,updatedAt}`；
+    /// id/text 缺一则丢弃；text 截断 500 字。
+    private func sanitizeBoardTodo(_ v: Any?) -> [String: Any]? {
+        let o = asMap(v)
+        guard let id = o["id"] as? String, !id.isEmpty, let text = o["text"] as? String else {
+            return nil
+        }
+        let c = toDouble(o["createdAt"])
+        let u = toDouble(o["updatedAt"])
+        let now = Double(nowMillis())
+        let cut = text.count > Self.boardTodoTextMax ? String(text.prefix(Self.boardTodoTextMax)) : text
+        return [
+            "id": id,
+            "text": cut,
+            "done": Self.strictBool(o["done"]),
+            "createdAt": c.isFinite ? c : now,
+            "updatedAt": u.isFinite ? u : now
+        ]
+    }
+
+    /// 把 patch.board 合并进现值并归一化（对齐 PC mergeBoard）。
+    /// 🔴 notes/todos 按顶级键（relPath）粒度合并：一次 patch 只含当前文档一条，
+    /// 绝不覆盖其它文档；值再按单条规则校验，待办单文档最多 200 条。
+    private func mergeBoard(_ prevObj: Any?, _ patchObj: Any?) -> [String: Any] {
+        let prev = normalizeBoard(prevObj)
+        let p = asMap(patchObj)
+
+        var notes = asMap(prev["notes"])
+        let pn = asMap(p["notes"])
+        for (rel, val) in pn {
+            let key = rel.trimmingJava()
+            if let n = sanitizeBoardNote(rel: key, val) { notes[key] = n }
+        }
+
+        var todos = asMap(prev["todos"])
+        let pt = asMap(p["todos"])
+        for (rel, val) in pt {
+            let key = rel.trimmingJava()
+            guard !key.isEmpty, let arr = val as? [Any] else { continue }
+            var list: [[String: Any]] = []
+            for item in arr {
+                if let t = sanitizeBoardTodo(item) { list.append(t) }
+                if list.count >= Self.boardTodoMax { break }
+            }
+            todos[key] = list
+        }
+
+        // previewCache 直接按顶级键并入（与 PC Object.assign 同口径，不逐项校验）。
+        var previewCache = asMap(prev["previewCache"])
+        for (k, v) in asMap(p["previewCache"]) { previewCache[k] = v }
+
+        let prevTab = (prev["activeTab"] as? String) ?? "notes"
+        let activeTab: String
+        if let t = p["activeTab"] as? String, Self.boardTabs.contains(t) {
+            activeTab = t
+        } else {
+            activeTab = prevTab
+        }
+
+        return [
+            "version": Int64(1),
+            "activeTab": activeTab,
+            "notes": notes,
+            "todos": todos,
+            "previewCache": previewCache
+        ]
     }
 
     private func normalizeIntentList(_ v: Any?) -> [String] {

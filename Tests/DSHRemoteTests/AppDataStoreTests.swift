@@ -425,6 +425,119 @@ final class AppDataStoreTests: XCTestCase {
         XCTAssertTrue(pending.contains("w/c.md"))
     }
 
+    // MARK: - 记录板 board（2026-11-13 补：原生白名单漏接 board 致 iPad 重启即丢）
+
+    /// 取 getState 里的整板；board 是顶层键（与 PC 同口径，不嵌在 settings 下）。
+    func board() -> [String: Any] { dict(data.getState(), "board") }
+
+    func testBoardDefaultsAreEmptyShape() {
+        let b = board()
+        XCTAssertEqual(b["version"] as? Int64, Int64(1))
+        XCTAssertEqual(b["activeTab"] as? String, "notes")
+        XCTAssertTrue(dict(b, "notes").isEmpty)
+        XCTAssertTrue(dict(b, "todos").isEmpty)
+        XCTAssertTrue(dict(b, "previewCache").isEmpty)
+    }
+
+    func testBoardNotePersistsAndTruncates20000() {
+        let long = String(repeating: "记", count: 25_000)
+        save(["board": ["notes": ["作品/甲.md": ["text": long, "updatedAt": 123.0]]]])
+        let note = dict(dict(board(), "notes"), "作品/甲.md")
+        XCTAssertEqual(note["text"] as? String, String(repeating: "记", count: 20_000))
+        XCTAssertEqual(note["updatedAt"] as? Double, 123.0)
+    }
+
+    func testBoardNoteBadTimestampFallsBackToNow() {
+        save(["board": ["notes": ["a.md": ["text": "x", "updatedAt": "oops"]]]])
+        let note = dict(dict(board(), "notes"), "a.md")
+        XCTAssertEqual(note["text"] as? String, "x")
+        XCTAssertTrue((note["updatedAt"] as? Double).map { $0 > 0 } ?? false, "坏时间戳回落当前毫秒")
+    }
+
+    func testBoardNoteMissingTextIsDropped() {
+        save(["board": ["notes": ["a.md": ["updatedAt": 1.0]]]])
+        XCTAssertTrue(dict(board(), "notes").isEmpty, "缺 text 的笔记整条丢弃")
+    }
+
+    func testBoardTodoRoundTripAndSanitize() {
+        let todos: [Any] = [
+            ["id": "t1", "text": "待办一", "done": true, "createdAt": 10.0, "updatedAt": 11.0],
+            ["id": "t2", "text": "待办二"], // 缺时间戳，回落 now；done 缺省 false
+            ["text": "无 id 应丢弃"],        // 缺 id 整条丢弃
+            ["id": "", "text": "空 id 也丢弃"]
+        ]
+        save(["board": ["todos": ["作品/甲.md": todos]]])
+        let list = dict(board(), "todos")["作品/甲.md"] as? [[String: Any]] ?? []
+        XCTAssertEqual(list.count, 2)
+        XCTAssertEqual(list[0]["id"] as? String, "t1")
+        XCTAssertEqual(list[0]["done"] as? Bool, true)
+        XCTAssertEqual(list[1]["id"] as? String, "t2")
+        XCTAssertEqual(list[1]["done"] as? Bool, false)
+        XCTAssertTrue((list[1]["createdAt"] as? Double).map { $0 > 0 } ?? false)
+    }
+
+    func testBoardTodoCapsAt200AndTruncatesText500() {
+        let many: [[String: Any]] = (0..<250).map {
+            ["id": "t\($0)", "text": String(repeating: "x", count: 600)]
+        }
+        save(["board": ["todos": ["a.md": many]]])
+        let list = dict(board(), "todos")["a.md"] as? [[String: Any]] ?? []
+        XCTAssertEqual(list.count, 200, "单文档待办最多 200 条")
+        XCTAssertEqual((list[0]["text"] as? String)?.count, 500, "单条待办文本截断 500")
+    }
+
+    func testBoardMergeKeepsOtherDocs() {
+        // 先存甲文档的笔记与待办
+        save(["board": [
+            "notes": ["甲.md": ["text": "甲的笔记", "updatedAt": 1.0]],
+            "todos": ["甲.md": [["id": "k", "text": "甲待办"]]]
+        ]])
+        // 再只 patch 乙文档，甲的数据必须原样保留
+        save(["board": ["notes": ["乙.md": ["text": "乙的笔记", "updatedAt": 2.0]]]])
+        let b = board()
+        let notes = dict(b, "notes")
+        XCTAssertEqual(dict(notes, "甲.md")["text"] as? String, "甲的笔记", "他文档笔记不被覆盖")
+        XCTAssertEqual(dict(notes, "乙.md")["text"] as? String, "乙的笔记")
+        let todos = dict(b, "todos")
+        let jiaTodos = todos["甲.md"] as? [[String: Any]] ?? []
+        XCTAssertEqual(jiaTodos.count, 1, "未在 patch 中的他文档待办保留")
+    }
+
+    func testBoardActiveTabValidationAndFallback() {
+        save(["board": ["activeTab": "todos"]])
+        XCTAssertEqual(board()["activeTab"] as? String, "todos")
+        save(["board": ["activeTab": "bogus"]])
+        XCTAssertEqual(board()["activeTab"] as? String, "todos", "非法 tab 回落上一个合法值")
+    }
+
+    func testBoardPreviewCacheMergesByTopKey() {
+        save(["board": ["previewCache": ["甲.md": ["hash": "h1"]]]])
+        save(["board": ["previewCache": ["乙.md": ["hash": "h2"]]]])
+        let cache = dict(board(), "previewCache")
+        XCTAssertEqual(dict(cache, "甲.md")["hash"] as? String, "h1")
+        XCTAssertEqual(dict(cache, "乙.md")["hash"] as? String, "h2")
+    }
+
+    func testBoardSurvivesStoreRecreation() {
+        save(["board": [
+            "notes": ["甲.md": ["text": "重启后还在", "updatedAt": 9.0]],
+            "todos": ["甲.md": [["id": "z", "text": "待办"]]]
+        ]])
+        // 用同一目录重建 store，模拟 App 冷启动从 config.json 回读
+        let reopened = AppDataStore(dataDir: dir)
+        let b = dict(reopened.getState(), "board")
+        XCTAssertEqual(dict(dict(b, "notes"), "甲.md")["text"] as? String, "重启后还在")
+        let todos = dict(b, "todos")["甲.md"] as? [[String: Any]] ?? []
+        XCTAssertEqual(todos.count, 1)
+    }
+
+    func testBoardDoesNotClobberOtherConfigKeys() {
+        save(["theme": "dark", "board": ["notes": ["a.md": ["text": "n", "updatedAt": 1.0]]]])
+        let settings = dict(data.getState(), "settings")
+        XCTAssertEqual(settings["theme"] as? String, "dark", "board 与既有配置键共存不互踩")
+        XCTAssertFalse(dict(board(), "notes").isEmpty)
+    }
+
     // MARK: - 校对缓存
 
     func testProofSaveTruncates500AndLoad() {
