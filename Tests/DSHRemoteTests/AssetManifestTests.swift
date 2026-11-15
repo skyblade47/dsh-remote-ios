@@ -2,14 +2,18 @@ import XCTest
 @testable import DSHRemote
 
 final class AssetManifestTests: XCTestCase {
-    func testWhitelistContainsEighteenAssets() {
-        XCTAssertEqual(AssetManifest.names.count, 18)
+    func testWhitelistContainsTwentyOneAssets() {
+        XCTAssertEqual(AssetManifest.names.count, 21)
         XCTAssertTrue(AssetManifest.isAsset("writing-count-core.js"))
         XCTAssertTrue(AssetManifest.isAsset("sensitive-words.js"))
         XCTAssertTrue(AssetManifest.isAsset("sensitive.js"))
         XCTAssertTrue(AssetManifest.isAsset("search-core.js"))
         XCTAssertTrue(AssetManifest.isAsset("ipad.css"))
         XCTAssertTrue(AssetManifest.isAsset("ipad.js"))
+        // 悬浮流式对话三件套（2026-11-15 自 PC writing-client 移植）
+        XCTAssertTrue(AssetManifest.isAsset("coach-chat-core.js"))
+        XCTAssertTrue(AssetManifest.isAsset("coach-chat-net.js"))
+        XCTAssertTrue(AssetManifest.isAsset("coach-chat-boot.js"))
     }
 
     func testContentTypeByExtension() {

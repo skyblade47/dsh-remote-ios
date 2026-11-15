@@ -6,7 +6,9 @@ enum AssetManifest {
         "send.js", "watch.js", "editor-plain.js", "proofread.js",
         "sensitive-words.js", "sensitive.js", "search-core.js",
         "sync-core.js", "writing-count-core.js", "writing.js", "send-net.js",
-        "proofread-net.js", "coach-net.js", "sync-net.js", "ipad.js"
+        "proofread-net.js", "coach-net.js", "sync-net.js", "ipad.js",
+        // 悬浮流式对话（2026-11-15 自 PC writing-client 移植）：纯逻辑 core + 网络接线 net + iOS 薄引导 boot
+        "coach-chat-core.js", "coach-chat-net.js", "coach-chat-boot.js"
     ]
 
     static func isAsset(_ name: String) -> Bool {

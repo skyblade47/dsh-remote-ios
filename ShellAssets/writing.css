@@ -1479,3 +1479,150 @@
   #page-writing .w-head-cancel { min-height: 32px; }
   #page-writing .w-btn-sm { min-height: 32px; }
 }
+
+/* ============================================================================
+   悬浮流式对话（2026-11-15 自 PC writing-client 移植，阶段D）：独立 position:fixed 浮窗，挂 body。
+   仅搬 .wc-chat* 段；右栏 #w-board-coach-pins 固定 pane 因 iOS 无该 DOM 不搬。
+   token 与 iOS dsw-tokens.css 对齐，z-index:1002 低于 iPad 遮罩 9000/9999。
+   ============================================================================ */
+/* ============================================================================
+   悬浮流式对话（2026-11-14，阶段D）：独立 position:fixed 浮窗，挂 body 不进 flex 流。
+   全部颜色/字号/阴影走 dsw token；z-index 与工具条浮层同档（1000+），保证压在编辑器之上。
+   ============================================================================ */
+.wc-chat {
+  position: fixed; z-index: 1002;
+  right: 18px; bottom: 18px;
+  display: flex; flex-direction: column;
+  width: 380px; max-width: calc(100vw - 24px);
+  height: min(560px, calc(100vh - 36px));
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-prominent);
+  font-family: var(--dsw-font-family);
+  overflow: hidden;
+}
+.wc-chat[hidden] { display: none; }
+.wc-chat .wc-chat-head {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: .5px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-module-platform);
+}
+.wc-chat .wc-chat-title { font: var(--dsw-font-s-strong-14); color: var(--dsw-alias-label-primary); }
+.wc-chat .wc-chat-close {
+  border: none; background: transparent; cursor: pointer;
+  color: var(--dsw-alias-label-tertiary); font-size: 14px; line-height: 1; padding: 4px 6px;
+  border-radius: 6px;
+}
+.wc-chat .wc-chat-close:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+
+/* 消息滚动区 */
+.wc-chat .wc-chat-scroll {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+/* 气泡：用户右靠品牌色，AI 左靠层底色 */
+.wc-chat .wc-chat-msg { display: flex; flex-direction: column; max-width: 86%; }
+.wc-chat .wc-chat-msg.is-user { align-self: flex-end; align-items: flex-end; }
+.wc-chat .wc-chat-msg.is-assistant { align-self: flex-start; align-items: flex-start; }
+.wc-chat .wc-chat-bubble {
+  padding: 8px 11px; border-radius: 10px;
+  font: var(--dsw-font-xxs-12); line-height: 1.7;
+  white-space: pre-wrap; word-break: break-word;
+}
+.wc-chat .is-user .wc-chat-bubble {
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  border-bottom-right-radius: 3px;
+}
+.wc-chat .is-assistant .wc-chat-bubble {
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-primary);
+  border: .5px solid var(--dsw-alias-border-l4);
+  border-bottom-left-radius: 3px;
+}
+.wc-chat .wc-chat-msg.is-failed .wc-chat-bubble {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+/* 流式中气泡的省略脉动（纯 CSS，不引图） */
+.wc-chat .is-assistant .wc-chat-bubble:empty::after { content: '…'; color: var(--dsw-alias-label-tertiary); }
+.wc-chat .wc-chat-msg-actions { display: flex; gap: 6px; margin-top: 4px; }
+.wc-chat .wc-chat-pin {
+  border: .5px solid var(--dsw-alias-border-l4); border-radius: 6px;
+  background: transparent; color: var(--dsw-alias-label-secondary);
+  font-size: 11px; line-height: 16px; padding: 1px 8px; cursor: pointer;
+}
+.wc-chat .wc-chat-pin:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+
+/* 结构化建议卡片（对话流内） */
+.wc-chat .wc-chat-card {
+  align-self: stretch; max-width: 100%;
+  border: .5px solid var(--dsw-alias-border-l1); border-radius: 10px;
+  background: var(--dsw-alias-bg-base); overflow: hidden;
+}
+.wc-chat .wc-chat-card-head {
+  padding: 7px 11px; font: var(--dsw-font-xxs-strong-12);
+  color: var(--dsw-alias-label-secondary);
+  border-bottom: .5px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-module-platform);
+}
+.wc-chat .wc-chat-card-list { display: flex; flex-direction: column; }
+.wc-chat .wc-chat-card-item {
+  padding: 9px 11px; border-bottom: .5px solid var(--dsw-alias-border-l4);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.wc-chat .wc-chat-card-item:last-child { border-bottom: none; }
+.wc-chat .wc-chat-card-item.is-applied { opacity: .62; }
+.wc-chat .wc-chat-card-item.is-failed .wc-chat-card-title { color: var(--dsw-alias-state-error-primary); }
+.wc-chat .wc-chat-card-title { font: var(--dsw-font-xxs-strong-12); color: var(--dsw-alias-label-primary); }
+.wc-chat .wc-chat-card-reason { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-secondary); line-height: 1.6; }
+.wc-chat .wc-chat-card-sug {
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-primary); line-height: 1.6;
+  padding: 6px 8px; border-radius: 6px;
+  background: var(--dsw-alias-bg-module-platform);
+}
+.wc-chat .wc-chat-card-btns { display: flex; gap: 8px; }
+.wc-chat .wc-chat-card-btns button {
+  height: 26px; padding: 0 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+}
+.wc-chat .wc-chat-card-apply {
+  border: .5px solid var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+}
+.wc-chat .wc-chat-card-apply:disabled { opacity: .5; cursor: not-allowed; }
+.wc-chat .wc-chat-card-skip {
+  border: .5px solid var(--dsw-alias-border-l4);
+  background: transparent; color: var(--dsw-alias-label-secondary);
+}
+.wc-chat .wc-chat-card-skip:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* 状态行 + 输入区 */
+.wc-chat .wc-chat-status {
+  flex: 0 0 auto; padding: 5px 12px;
+  font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary);
+}
+.wc-chat .wc-chat-status.is-error { color: var(--dsw-alias-state-error-primary); }
+.wc-chat .wc-chat-input-row {
+  flex: 0 0 auto; display: flex; gap: 8px; align-items: flex-end;
+  padding: 10px 12px; border-top: .5px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-module-platform);
+}
+.wc-chat textarea.wc-chat-input {
+  flex: 1 1 auto; resize: none; min-height: 40px; max-height: 96px;
+  padding: 7px 10px; border-radius: 8px;
+  border: .5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12); line-height: 1.6; outline: none;
+}
+.wc-chat textarea.wc-chat-input:focus { border-color: var(--dsw-alias-brand-primary); }
+.wc-chat .wc-chat-send {
+  flex: 0 0 auto; height: 34px; padding: 0 16px; border-radius: 8px;
+  border: .5px solid var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary-foreground);
+  font-size: 13px; cursor: pointer;
+}
+.wc-chat .wc-chat-send:disabled { opacity: .5; cursor: not-allowed; }

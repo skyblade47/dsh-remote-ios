@@ -120,6 +120,8 @@
           <button id="w-proof" class="w-btn-secondary" title="把正文发给校对助手，只给建议、不改正文；结果出在右栏">✎ 校对</button>
           <button id="w-sensitive" class="w-btn-secondary" title="纯本地扫描当前文档的一般互联网敏感词，不联网、只定位不替换">⚠ 敏感词</button>
           <button id="w-coach-open" class="w-btn-secondary" title="创作教练：查看回程建议；发送全文后自动在此等待">🎯 教练</button>
+          <!-- 悬浮流式对话（2026-11-15 自 PC 移植）：coach-chat-boot.js 绑定，走 coachRole 会话直连 -->
+          <button id="w-chat-open" class="w-btn-secondary" title="悬浮流式问答：与创作教练多轮对话，建议只给不改">💬 对话</button>
         </div>
         <span class="w-vsep" aria-hidden="true"></span>
         <!-- ④ 编辑组：低频幽灵钮（窄屏首版靠 flex-wrap 兜底，见 spec §8） -->
@@ -903,6 +905,10 @@
   <script src="/__shell__/proofread-net.js"></script>
   <!-- relay 创作教练回程（方案 C）：复用 proofread.js 纯逻辑与 writing.js 的 __wcProofBridge；必须在 proofread.js 之后加载 -->
   <script src="/__shell__/coach-net.js"></script>
+  <!-- 悬浮流式对话（2026-11-15 自 PC writing-client 移植）：core 纯逻辑 → net 接线 → boot 薄引导，加载顺序不可换 -->
+  <script src="/__shell__/coach-chat-core.js"></script>
+  <script src="/__shell__/coach-chat-net.js"></script>
+  <script src="/__shell__/coach-chat-boot.js"></script>
   <!-- C11：同步链路层（clientZoneList / clientZoneRead / clientZoneDelete）；依赖 sync-core.js 与 writing.js（桥）⇒ 最后加载 -->
   <script src="/__shell__/sync-net.js"></script>
   <script>
