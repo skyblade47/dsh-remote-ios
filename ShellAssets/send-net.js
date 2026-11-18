@@ -190,8 +190,15 @@
    * 🔴 relay 回程（方案 C）：`requestId` 由 doSend 预生成传入，客户端轮询与服务端台账用同一个 id；
    *    服务端若回带 requestId 以服务端为准（理论上同值）。
    */
-  async function deliver(text, signal, requestId) {
-    var r = await fetch(RELAY_PATH, jsonOpts('POST', { text: text, requestId: requestId, timeZone: ianaZone() }, signal))
+  async function deliver(text, signal, requestId, permission) {
+    // P3：仅当带合法显式身份时附加结构化 permission；否则不带该键，服务端按自由文本 triage 分诊。
+    // 合法性依赖 coach-role.js（window.WCCoachRole，与浮动工具条一并移植）；未加载时一律不透传。
+    var payload = { text: text, requestId: requestId, timeZone: ianaZone() }
+    if (permission && window.WCCoachRole &&
+      window.WCCoachRole.ROLES.concat(['proofread']).indexOf(permission) >= 0) {
+      payload.permission = permission
+    }
+    var r = await fetch(RELAY_PATH, jsonOpts('POST', payload, signal))
       .then(function (res) { return readBody(res).then(function (rb) { return { status: res.status, ok: res.ok, rb: rb } }) })
     var body = (r.rb && r.rb.json) || {}
     if (r.ok && body.ok === true) return { ok: true, requestId: body.requestId || requestId }
@@ -917,4 +924,84 @@
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init)
   else init()
+
+  /**
+   * 浮动 AI 工具条（coach-toolbar-net.js）专用直发入口（2026-11-18 自 PC 移植）：
+   * 在浮动条内点按钮即经**同一条 relay 管道**发出，不弹独立发送确认窗。
+   *
+   * 与弹窗发送共用同一套底层：uuid 造 requestId → deliver(POST /taskkit/api/relay) →
+   * 服务端台账/轮询 → bridge.coachResult 回程，不另起投递通道。区别只在：
+   *   · 消息文案已由 coach-toolbar.buildActionMessage 组好（含首行【身份】权限卡 + 选中段），
+   *     这里整条直投，不再走 saveDraft/buildMessage/弹窗 DOM；
+   *   · 不做远端落盘（工具条本就只针对选中段内联场景）。
+   *
+   * 红线：本函数只负责把用户显式点击产生的诉求「发出去」，**绝不自动改正文**；
+   *   结果只回显进 coach 面板（bridge.coachResult），写回正文只能由用户手动操作。
+   *
+   * @param {string} text 已组好的完整消息（权限卡 + 选中段/问题）
+   * @param {string} [permission] 显式身份；合法才透传，否则服务端按 triage 分诊
+   * @returns {Promise<{ok:boolean, requestId?:string, code?:string, message?:string}>}
+   */
+  window.__wcSendDirectRelay = async function (text, permission) {
+    var msg = String(text == null ? '' : text)
+    if (Send.countChars(msg) === 0) {
+      say('消息为空，未发送', true)
+      return { ok: false, code: 'EMPTY', message: '消息为空' }
+    }
+    var b = bridge()
+    // 与 doSend 同一互斥：在途期间拒绝第二条，避免并发抢占 inflight/计时器。
+    if (busy || inflight) {
+      say('上一条仍在投递中，请稍候', true)
+      return { ok: false, code: 'BUSY', message: '上一条仍在投递中' }
+    }
+    // ① 先把本地未保存内容落盘（与 doSend 同一 fail-closed 纪律），失败即中止。
+    if (b && b.flush) {
+      try {
+        var f = await b.flush()
+        if (!f || !f.ok) throw new Error(((f && f.error) || '未知错误'))
+      } catch (e) {
+        var fe = '本地保存失败，已中止发送：' + ((e && e.message) || e)
+        say(fe, true)
+        return { ok: false, code: 'FLUSH_FAILED', message: fe }
+      }
+    }
+
+    var reqId = uuid()
+    var ctl = new AbortController()
+    var timedOut = false
+    inflight = ctl
+    var timer = setTimeout(function () { timedOut = true; abortInflight() }, SEND_TIMEOUT_MS)
+    var when = stamp()
+    // bridge.docName 是属性（writing.js 暴露 state.current.name），不是函数；安全取值。
+    var docName = (b && b.docName) ? String(b.docName) : ''
+    try {
+      say('投递中…')
+      var d = await deliver(msg, ctl.signal, reqId, permission)
+      if (d.ok) {
+        say('已发送 ' + when.slice(11))
+        // 记账沿用同一发送记录（意图标注为浮动工具条，便于与弹窗发送区分）。
+        appendLog(logLine(when, docName, '教练工具条', '选中段', '已送达任务中心'))
+        // relay 回程：与 doSend 同一开关、同一入口；关着或旧桥无 coachResult ⇒ 只发不等。
+        if (d.requestId && b && b.waitResult && b.waitResult() && b.coachResult) b.coachResult(d.requestId)
+        // 悬浮流式对话：工具条直发同样回填 requestId 作为首轮锚点（缺失安全）。
+        if (d.requestId && window.__wcCoachChatSetRequest) {
+          try { window.__wcCoachChatSetRequest(d.requestId) } catch (e) { /* 不影响直发主路径 */ }
+        }
+        return { ok: true, requestId: d.requestId }
+      }
+      var cfgMsg = relayMessage(d.code) || d.message || ('投递失败（' + d.code + '）')
+      say(cfgMsg, true)
+      appendLog(logLine(when, docName, '教练工具条', '选中段', '未发送（' + cfgMsg + '）'))
+      return { ok: false, code: d.code, message: cfgMsg }
+    } catch (e) {
+      var reason = timedOut ? ('投递超时（' + (SEND_TIMEOUT_MS / 1000) + ' 秒）')
+        : ('投递中止：' + ((e && e.message) || e))
+      say(reason, true)
+      appendLog(logLine(stamp(), docName, '教练工具条', '选中段', reason))
+      return { ok: false, code: timedOut ? 'TIMEOUT' : 'ABORTED', message: reason }
+    } finally {
+      clearTimeout(timer)
+      if (inflight === ctl) inflight = null
+    }
+  }
 })()

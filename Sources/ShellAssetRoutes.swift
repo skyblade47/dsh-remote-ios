@@ -4,7 +4,7 @@ import Foundation
 ///
 /// - shell.html：读本地资源、经 ShellHTMLInjector 注入后应答；
 /// - ping：健康探针；
-/// - 其余 21 件白名单资产：按 AssetManifest 的 content-type 应答；
+/// - 其余 24 件白名单资产：按 AssetManifest 的 content-type 应答；
 /// - 一律 `Cache-Control: no-store`（WKWebView 对壳资源不得用缓存副本）；
 /// - 白名单之外的任何名字（含路径分隔符、点段、NUL）一律 404，杜绝路径穿越。
 final class ShellAssetRoutes {

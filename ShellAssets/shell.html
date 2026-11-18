@@ -899,8 +899,17 @@
   <script src="/__shell__/writing-count-core.js"></script>
   <!-- §4 全站内容搜索：search-core.js = 查询匹配/片段/归并纯逻辑，window.WCSearch；必须先于 writing.js -->
   <script src="/__shell__/search-core.js"></script>
+  <!-- P4 创作教练四权限：coach-toolbar.js = 浮动工具条按权限挂载的纯逻辑（动作→权限/按角色只渲染可用项/权限卡/扩写代价），
+       window.WCCoachToolbar；必须先于 writing.js 与 coach-toolbar-net.js 加载（2026-11-18 自 PC 移植） -->
+  <script src="/__shell__/coach-toolbar.js"></script>
+  <!-- P3 身份路由纯逻辑：window.WCCoachRole（ROLES/normalizeRole/withPermission）；send-net 依赖它校验
+       结构化 permission 合法性，故必须先于 send-net.js 加载（2026-11-18 自 PC 移植） -->
+  <script src="/__shell__/coach-role.js"></script>
   <script src="/__shell__/writing.js"></script>
   <script src="/__shell__/send-net.js"></script>
+  <!-- P4 浮动 AI 工具条链路层：监听选区/渲染按角色只含可用动作的工具条/点按钮内嵌直发 relay（不弹独立发送窗）；
+       依赖 coach-toolbar.js（判定）、writing.js（__wcSendBridge）、send-net.js（__wcSendDirectRelay）⇒ 最后加载 -->
+  <script src="/__shell__/coach-toolbar-net.js"></script>
   <!-- B5：校对链路层（HTTP + 轮询 + 右栏渲染 + 应用）；依赖 send.js（信封）与 writing.js（桥）⇒ 最后加载 -->
   <script src="/__shell__/proofread-net.js"></script>
   <!-- relay 创作教练回程（方案 C）：复用 proofread.js 纯逻辑与 writing.js 的 __wcProofBridge；必须在 proofread.js 之后加载 -->

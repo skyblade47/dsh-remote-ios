@@ -8,7 +8,10 @@ enum AssetManifest {
         "sync-core.js", "writing-count-core.js", "writing.js", "send-net.js",
         "proofread-net.js", "coach-net.js", "sync-net.js", "ipad.js",
         // 悬浮流式对话（2026-11-15 自 PC writing-client 移植）：纯逻辑 core + 网络接线 net + iOS 薄引导 boot
-        "coach-chat-core.js", "coach-chat-net.js", "coach-chat-boot.js"
+        "coach-chat-core.js", "coach-chat-net.js", "coach-chat-boot.js",
+        // 创作教练 · 选中浮动 AI 工具条（2026-11-18 自 PC writing-client 移植）：
+        // 工具条纯逻辑 + 身份路由 + 选区监听/直发接线
+        "coach-toolbar.js", "coach-role.js", "coach-toolbar-net.js"
     ]
 
     static func isAsset(_ name: String) -> Bool {
